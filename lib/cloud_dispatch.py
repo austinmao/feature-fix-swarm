@@ -1608,7 +1608,7 @@ def _env_init(svc: Services, args: argparse.Namespace) -> int:
             svc.emit("%senv-init kept existing %s/%s (use --force to overwrite)" % (PREFIX, CLOUD_DIR_REL, name))
             continue
         shutil.copyfile(str(source / name), str(destination))
-        os.chmod(str(destination), 0o755 if name in EXECUTABLE_FILES else 0o644)
+        os.chmod(str(destination), 0o700 if name in EXECUTABLE_FILES else 0o600)
         written.append("%s/%s" % (CLOUD_DIR_REL, name))
         svc.emit("%senv-init wrote %s/%s" % (PREFIX, CLOUD_DIR_REL, name))
     if args.register_hook:

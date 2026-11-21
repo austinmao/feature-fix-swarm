@@ -486,7 +486,7 @@ def materialize_tree(repo: str, tree_oid: str, dest: str) -> int:
 
 def _write_file(dest_real: str, rel: str, data: bytes, executable: bool) -> None:
     target = os.path.join(dest_real, rel)
-    mode = 0o755 if executable else 0o644
+    mode = 0o700 if executable else 0o600
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
     try:
         os.makedirs(os.path.dirname(target), exist_ok=True)

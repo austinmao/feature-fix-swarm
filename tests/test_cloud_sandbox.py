@@ -63,7 +63,7 @@ def world(tmp_path: Path):
     (main / "node_modules" / "pkg" / "dep.txt").write_text("dep-ok")
     (main / "app.py").write_text("print('hi')\n")
     (main / "run.sh").write_text("#!/bin/sh\necho ran-exec\n")
-    os.chmod(main / "run.sh", 0o755)
+    os.chmod(main / "run.sh", 0o700)
     (main / "sub").mkdir()
     (main / "sub" / "inner.txt").write_text("inner\n")
     git(main, "add", "app.py", "run.sh", "sub/inner.txt")
@@ -351,8 +351,8 @@ def test_materialize_writes_files_and_exec_bit(world, tmp_path):
     assert count == 3
     assert (dest / "app.py").read_text() == "print('hi')\n"
     assert (dest / "sub" / "inner.txt").read_text() == "inner\n"
-    assert stat.S_IMODE((dest / "run.sh").stat().st_mode) == 0o755
-    assert stat.S_IMODE((dest / "app.py").stat().st_mode) == 0o644
+    assert stat.S_IMODE((dest / "run.sh").stat().st_mode) == 0o700
+    assert stat.S_IMODE((dest / "app.py").stat().st_mode) == 0o600
 
 
 def test_materialize_ignores_gitattributes_filters(world, tmp_path):
@@ -860,9 +860,20 @@ def test_nohup_background_child_is_dead_after_run_verify(world):
 
 @NEEDS_SANDBOX
 def test_timeout_also_kills_detached_children(world):
-    code = SETSID_CHILD % ("pass", "60")
+    # /usr/bin/perl is a real binary. /usr/bin/python3 is an Xcode shim that can spend
+    # seconds starting xcodebuild inside the sandbox (its cache dir is unwritable there),
+    # which on a slow runner ate the whole 3 s timeout before any child existed.
+    code = (
+        "use POSIX qw(setsid); $| = 1;\n"
+        "if (fork() == 0) {\n"
+        "  setsid();\n"
+        "  if (fork() == 0) { print \"grandchild $$\\n\"; sleep 300; exit 0; }\n"
+        "  sleep 1; exit 0;\n"
+        "}\n"
+        "sleep 60;\n"
+    )
     started = time.time()
-    rc, log = verify(world, "/usr/bin/python3 - <<'EOF'\n%sEOF\n" % code, timeout_s=3)
+    rc, log = verify(world, "/usr/bin/perl - <<'EOF'\n%sEOF\n" % code, timeout_s=3)
     assert rc == sb.RC_TIMEOUT and time.time() - started < 40
     pids = child_pids(log)
     assert pids, log

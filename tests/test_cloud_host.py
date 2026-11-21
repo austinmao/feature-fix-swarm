@@ -1968,9 +1968,9 @@ def test_a_launch_leaves_no_staging_directory_behind(install_fake, origin, state
 # ── Leftovers of a killed launch are recovered only when provably the dispatcher's own ──
 
 
-def _leftover(parent, prefix, mode=0o700):
+def _leftover(parent, prefix):
     path = Path(tempfile.mkdtemp(prefix=prefix, dir=str(parent)))
-    os.chmod(str(path), mode)
+    os.chmod(str(path), 0o700)
     return path
 
 
@@ -2026,9 +2026,10 @@ def test_a_kill_after_retiring_the_marker_is_recovered(install_fake, origin, sta
 
 def test_staging_leftovers_that_are_not_provably_the_dispatchers_are_never_deleted(
         install_fake, origin, state, tmp_path, clone_parent):
-    loose = _leftover(clone_parent, ch.STAGE_NEW_PREFIX, 0o755)  # right prefix, wrong mode
+    loose = _leftover(clone_parent, ch.STAGE_NEW_PREFIX)
     (loose / "new").mkdir()
     (loose / "new" / "keep").write_text("a")
+    os.chmod(str(loose), 0o500)  # right prefix, wrong mode (anything but 0o700 is refused)
     foreign = _leftover(clone_parent, ch.STAGE_OLD_PREFIX)  # a retired directory no marker names
     (foreign / "retired").mkdir()
     (foreign / "retired" / "keep").write_text("b")
