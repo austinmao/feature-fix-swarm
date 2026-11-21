@@ -204,7 +204,7 @@ all skills.
   `ffs:cloud-deferred` block ahead of the init gate prints one line saying cloud
   delegation for that skill arrives in a later release and that `/swarm --cloud`
   is available now, then stops. Nothing else in either skill changes
-  (versions 2.22.3 and 3.3.2). The no-flag test now compares both files with the
+  (versions 2.23.2 and 3.3.2; 2.23.2 is the merge bump over the base's 2.23.1, originally 2.22.3). The no-flag test now compares both files with the
   base outside that block and the version line.
 - The cloud review no longer passes a downgraded reviewer silently.
   `adversary-host.sh` records which model answered

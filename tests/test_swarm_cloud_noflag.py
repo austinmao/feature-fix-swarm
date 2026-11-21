@@ -31,30 +31,51 @@ def _git(*args: str) -> str:
     return done.stdout
 
 
+def _git_ok(*args: str) -> bool:
+    """True when the git command exits 0; any failure is simply False."""
+    try:
+        done = subprocess.run(
+            ["git", *args], cwd=ROOT, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, timeout=60, check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return done.returncode == 0
+
+
 @pytest.fixture(scope="module")
 def base() -> str:
     # Stacked-branch aware: the base is the parent of the oldest commit in
     # `merge-base..HEAD` that adds lib/cloud_dispatch.py, so unrelated commits
     # beneath the cloud work (e.g. a model-tier refresh that edits skills) are
-    # not counted as cloud differences. When no such commit is in range (after
-    # the merge, on main) fall back to the plain merge-base.
+    # not counted as cloud differences.
     merge_base = _git("merge-base", "HEAD", "origin/main").strip()
     adders = _git(
         "log", "--diff-filter=A", "--format=%H", "--reverse",
         f"{merge_base}..HEAD", "--", "lib/cloud_dispatch.py",
     ).split()
     if not adders:
-        return merge_base
-    # A later merge of the base branch into the cloud branch moves the baseline:
-    # the newest merged-in (second) parent on the first-parent chain after the
-    # cloud work began is the non-cloud text the skills must still equal.
+        # The cloud work is already on the base (after landing, on main or on a
+        # branch cut from it): there is no pre-cloud text left to compare with.
+        pytest.skip("cloud work is already on the base; no pre-cloud baseline")
+    pre = _git("rev-parse", f"{adders[0]}^").strip()
+    # A later merge of the base branch into the cloud branch moves the baseline.
+    # Accept a merged-in parent only when it carries no cloud work and descends
+    # from the pre-cloud commit; that excludes the cloud side of a synthetic PR
+    # merge and a sibling cloud branch, and a base that does not descend from
+    # the stacked pre-cloud commit. Newest merge first; otherwise fall through.
     merged = _git(
         "log", "--first-parent", "--merges", "--format=%P", f"{adders[0]}..HEAD",
     ).split("\n")
-    for parents in merged:
-        if len(parents.split()) >= 2:
-            return parents.split()[1]
-    return _git("rev-parse", f"{adders[0]}^").strip()
+    for line in merged:
+        clean = [
+            p for p in line.split()
+            if not _git_ok("cat-file", "-e", f"{p}:lib/cloud_dispatch.py")
+            and _git_ok("merge-base", "--is-ancestor", pre, p)
+        ]
+        if len(clean) == 1:
+            return clean[0]
+    return pre
 
 
 def _base_text(base: str, path: str) -> str:
