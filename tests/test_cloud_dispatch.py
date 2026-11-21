@@ -1159,6 +1159,15 @@ def test_a_scanner_positive_local_task_id_is_refused_before_it_is_stored_or_prin
         assert not L.run_ledger_path(world.root, "r1").exists() and not L.tasks_path(world.root, "r1").exists()
 
 
+def test_plan_refuses_a_scanner_positive_local_task_id_without_printing_it(world: World) -> None:
+    """The required plan step printed a valid but scanner-positive local id in its JSON before start could refuse it."""
+    leaky = cloud_scan.canary("slack-token").decode()
+    local = task(leaky, "src/b/**", local_only=True, local_reason="touches secrets")
+    for tasks in ([T1, local], [local]):
+        rc, out = world.cli("plan", "--tasks", world.tasks_file(tasks), "--policy", "auto", "--root", str(world.root))
+        assert rc == 3 and "SECRET_IN_PROMPT" in out and leaky not in out and '"tasks"' not in out, out
+
+
 def test_run_exists_on_a_ledger_without_the_batch_record_is_unknown(world: World) -> None:
     assert world.start(tasks=[T1])[0] == 0
     path = L.run_ledger_path(world.root, "r1")
@@ -1913,7 +1922,7 @@ def plan_out(world: World, tasks: List[Dict[str, Any]], capsys: pytest.CaptureFi
 @pytest.mark.parametrize("tasks, code", [
     ([task(LEAKY_ID, "src/a/**"), task(LEAKY_ID, "src/b/**")], "TASK_ID_DUPLICATE"),
     ([task("t1", "src/a/**", depends_on=[LEAKY_ID])], "DEP_UNKNOWN"),
-    ([task(LEAKY_ID, "src/a/**", depends_on=["nope"])], "DEP_UNKNOWN"),
+    ([task(LEAKY_ID, "src/a/**", depends_on=["nope"])], "SECRET_IN_PROMPT"),  # the id scan refuses before the router reads depends_on
     ([task(CANARY_KEY, "src/a/**")], "TASK_ID_INVALID"),
 ])
 def test_route_errors_never_echo_an_id_the_secret_scanner_flags(

@@ -8,6 +8,12 @@ all skills.
 
 ## Unreleased
 
+### Fixed (2026-11-21, cloud delegation: round 7)
+
+- `plan` scans every task id right after normalization, as `start` does: a
+  scanner-positive id is `SECRET_IN_PROMPT` (exit 3) and is never printed, so
+  the required plan step no longer exposes one.
+
 ### Fixed (2026-11-20, cloud delegation: round 6)
 
 - A retried `start` for an existing run id ends `RUN_EXISTS ... batch=same`,

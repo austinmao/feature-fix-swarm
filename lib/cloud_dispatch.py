@@ -1096,6 +1096,7 @@ def cmd_plan(svc: Services, args: argparse.Namespace) -> int:
     if args.run is not None:
         validate_run_id(args.run)
     tasks = normalize(read_tasks_input(args.tasks), args.sequential)
+    _scan_task_ids(tasks)  # the plan JSON prints every id: refuse a scanner-positive one before start would
     config = load_config(svc, root)
     refusals = run_refusals(svc, root)
     doctor = "unknown"
