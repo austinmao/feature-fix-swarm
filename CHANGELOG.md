@@ -283,6 +283,14 @@ all skills.
   refuses it until the task is abandoned. The review output is not kept in the
   run directory; only the verdict record is in the ledger.
 
+### Fixed (2026-11-21, model-fallback legacy 5-1 pins)
+
+- `model-fallback.sh` now decides availability and recovery per pinned model id: a config still pinned to a dead `claude-fable-5-1` is demoted to opus even when `claude-fable-5-2` answers, and a marker's 5-1 original is held (not restored) until 5-1 itself is available.
+
+### Fixed (2026-11-19, reconcile relaunch on macOS bash 3.2)
+
+- The launchd reconcile job could not relaunch runs on stock macOS bash 3.2 (`mapfile` is missing there, so the relaunch failed after the budget was charged). It now relaunches stale runs as designed, a behavior change for anyone with the agent installed.
+
 ### Changed (2026-11-20, review-gate runs helpers from the base ref)
 
 - review-gate 1.19.0 no longer executes FFS helper code from the tree it reviews.
