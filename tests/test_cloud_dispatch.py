@@ -2159,8 +2159,7 @@ def test_accept_deps_for_an_unattributed_change_needs_the_unattributed_grant(wor
     assert world.start(tasks=[owner])[0] == 0
     world.drive()
     entry = world.doc()["tasks"]["t1"]
-    if entry["blocker"] != "dependency-change":
-        pytest.skip("collector classified this change as %s" % entry["blocker"])
+    assert entry["blocker"] == "dependency-change", "collector classified this change as %s: %r" % (entry["blocker"], entry)
     run = ["--run", "r1", "--task", "t1", "--root", str(world.root)]
     rc, out = world.cli("resolve", *run, "--action", "accept-deps")
     assert rc == 3 and "GRANT_MISSING" in out and "install:unattributed:" in out
@@ -2172,8 +2171,7 @@ def test_accept_deps_is_stale_when_the_report_changed_under_the_lock(world: Worl
     assert world.start(tasks=[owner])[0] == 0
     world.drive()
     entry = world.doc()["tasks"]["t1"]
-    if entry["blocker"] != "dependency-change":
-        pytest.skip("collector classified this change as %s" % entry["blocker"])
+    assert entry["blocker"] == "dependency-change", "collector classified this change as %s: %r" % (entry["blocker"], entry)
     report = json.loads((L.run_dir(world.root, "r1") / "dependency-t1-g1.json").read_text())
     world.grant("r1", *cd.required_install_grants(
         {"packages": report["packages"], "unattributed": report["unattributed"], "digest": report["report_digest"]}))
