@@ -63,7 +63,7 @@ def world(tmp_path: Path):
     (main / "node_modules" / "pkg" / "dep.txt").write_text("dep-ok")
     (main / "app.py").write_text("print('hi')\n")
     (main / "run.sh").write_text("#!/bin/sh\necho ran-exec\n")
-    os.chmod(main / "run.sh", 0o755)
+    os.chmod(main / "run.sh", 0o700)
     (main / "sub").mkdir()
     (main / "sub" / "inner.txt").write_text("inner\n")
     git(main, "add", "app.py", "run.sh", "sub/inner.txt")
@@ -351,8 +351,8 @@ def test_materialize_writes_files_and_exec_bit(world, tmp_path):
     assert count == 3
     assert (dest / "app.py").read_text() == "print('hi')\n"
     assert (dest / "sub" / "inner.txt").read_text() == "inner\n"
-    assert stat.S_IMODE((dest / "run.sh").stat().st_mode) == 0o755
-    assert stat.S_IMODE((dest / "app.py").stat().st_mode) == 0o644
+    assert stat.S_IMODE((dest / "run.sh").stat().st_mode) == 0o700
+    assert stat.S_IMODE((dest / "app.py").stat().st_mode) == 0o600
 
 
 def test_materialize_ignores_gitattributes_filters(world, tmp_path):
