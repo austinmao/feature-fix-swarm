@@ -84,6 +84,12 @@ Otherwise skip it entirely and continue below exactly as before.
    line does not name. An empty value means run no local task. If `start`
    exited 0 but that line is missing or cannot be parsed, run no local task,
    report the run id, and tell the operator the local list is unknown.
+   If `start` exits 78, it printed `CLOUD-ERROR: <CODE> ...` on **stderr**
+   (for example `INTEGRATION_REF_UNCONFIRMED`: an identical retry found the
+   integration ref a crashed start left behind). Relay that stderr, run no task
+   (cloud or local) and stop for the operator to inspect what the message names.
+   Do not call `start` again until the operator has done so and says to proceed.
+   Step 6 does not apply: exit 78 is an error, not a refusal.
 6. **Refusals.** Exit code 3 means refused. Relay the `CLOUD-REFUSED:` line.
    Under `auto` or `prefer`, continue with every task locally; under
    `required`, stop. **Exception: `CLOUD-REFUSED: SECRET_IN_PROMPT`** (from

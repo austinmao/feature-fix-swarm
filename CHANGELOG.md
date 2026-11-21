@@ -44,6 +44,9 @@ all skills.
   retry of an already started run with an edited batch is refused by `plan`
   before `start` can say `RUN_EXISTS`, and its unchanged tasks may be running in
   the cloud.
+- `/swarm` skill 2.2.7 handles `start` exiting 78 (`CLOUD-ERROR` on stderr, for
+  example `INTEGRATION_REF_UNCONFIRMED`): it relays stderr, runs no task, cloud or
+  local, and stops for the operator to inspect before another `start`.
 - `plan` scans every task id right after normalization, as `start` does: a
   scanner-positive id is `SECRET_IN_PROMPT` (exit 3) and is never printed, so
   the required plan step no longer exposes one.

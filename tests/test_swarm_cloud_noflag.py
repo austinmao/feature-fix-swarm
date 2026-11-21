@@ -216,3 +216,14 @@ def test_swarm_secret_in_prompt_from_plan_is_terminal_and_never_falls_back_to_lo
     exception = refusals[refusals.index("SECRET_IN_PROMPT"):refusals.index("RUN_EXISTS")]
     assert "terminal" in exception and "dispatch nothing, cloud or local" in exception
     assert refusals.index("continue with every task locally") < refusals.index("SECRET_IN_PROMPT")
+
+
+def test_swarm_exit_78_from_start_is_relayed_and_stops_everything():
+    """INTEGRATION_REF_UNCONFIRMED exits 78 with CLOUD-ERROR on stderr: neither success nor an exit-3 refusal."""
+    block = _cloud_block()
+    start = block[block.index("5. **Start cloud groups.**"):block.index("6. **Refusals.**")]
+    branch = start[start.index("If `start` exits 78"):]
+    assert "`CLOUD-ERROR:" in branch and "**stderr**" in branch and "INTEGRATION_REF_UNCONFIRMED" in branch
+    assert "run no task" in branch and "cloud or local" in branch
+    assert "stop for the operator to inspect" in branch and "Do not call `start` again" in branch
+    assert "Step 6 does not apply" in branch
