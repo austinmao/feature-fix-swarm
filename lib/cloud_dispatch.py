@@ -471,6 +471,16 @@ def remote_env() -> Dict[str, str]:
     return cloud_host.child_env()
 
 
+def pushed_new_ref(porcelain: str, ref: str) -> bool:
+    """True when ``git push --porcelain`` output reports ``ref`` as a newly created destination (flag ``*``).
+    An up-to-date (``=``) or otherwise reported ref leaves creation unconfirmed."""
+    for line in porcelain.splitlines():
+        parts = line.split("\t")
+        if len(parts) >= 3 and parts[0] == "*" and parts[1].partition(":")[2] == ref and parts[2].startswith("[new "):
+            return True
+    return False
+
+
 def ls_remote(svc: Services, url: str, pattern: str) -> Tuple[bool, Dict[str, str]]:
     """``(ok, {ref: oid})`` for refs matching ``pattern`` on the pinned URL."""
     result = svc.run(["git", "ls-remote", url, pattern], timeout=GIT_TIMEOUT_S, env=remote_env())
@@ -3034,13 +3044,16 @@ class Orchestrator:
             self.to_operator(name, gen, ledger.B_GRANT_MISSING, ["missing grant %s" % key], seq)
             return
         seen, seen_refs = ls_remote(self.svc, doc["origin_url"], ref)
-        created["remote"] = seen and ref not in seen_refs  # absent right before the push: this push creates it
-        pushed = self.svc.run(["git", "-C", str(self.root), "push", "--no-force", "--no-verify", "--no-follow-tags",
-                               "--recurse-submodules=no", doc["origin_url"],
+        absent_before = seen and ref not in seen_refs
+        pushed = self.svc.run(["git", "-C", str(self.root), "push", "--porcelain", "--no-force", "--no-verify",
+                               "--no-follow-tags", "--recurse-submodules=no", doc["origin_url"],
                                "%s:%s" % (base_oid, ref)], timeout=GIT_PUSH_TIMEOUT_S, env=remote_env())
         if not pushed.ok:
             self.push_failed(name, gen, ref, pushed.rc, seq)
             return
+        # Ownership needs the push itself to report a NEW ref for this destination: another clone with the same origin,
+        # run, task and base may have created it between the pre-check and this push, which then says "up to date" (=).
+        created["remote"] = absent_before and pushed_new_ref(pushed.text(), ref)
         self.svc.fault("after-admit-push")
         ok, refs = ls_remote(self.svc, doc["origin_url"], ref)
         if not ok or refs.get(ref) != base_oid:

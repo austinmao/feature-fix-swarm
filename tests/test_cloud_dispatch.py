@@ -1961,6 +1961,39 @@ def test_cleanup_deletes_a_task_branch_the_run_created_and_confirmed(world: Worl
     assert run_git(world.origin, "for-each-ref", "refs/heads/ffs/cloud/r1/") == ""
 
 
+def test_cleanup_remote_keeps_a_task_branch_a_second_clone_created_between_the_check_and_the_push(
+        world: World) -> None:
+    """Two clones share origin, run id, task id and base.  The second sees the branch absent, the first creates it, and the
+    second push reports "up to date" and exits zero: that run must not be credited with the creation."""
+    remote_ref = L.task_branch_ref("r1", "t1", 1)
+    other = world.tmp / "second-clone"
+    run_git(world.tmp, "clone", "-q", str(world.root), str(other))
+    real_run, raced = world.svc.run, []
+
+    def racing(argv: Any, **kwargs: Any) -> Any:
+        if "push" in argv and argv[-1] == "%s:%s" % (world.base, remote_ref) and not raced:
+            raced.append(True)
+            run_git(other, "push", "-q", "file://" + str(world.origin), world.base + ":" + remote_ref)  # the first clone wins
+        return real_run(argv, **kwargs)
+
+    world.svc.run = racing  # type: ignore[assignment]
+    assert world.start(tasks=[T1])[0] == 0
+    world.drive()
+    assert raced and run_git(world.origin, "rev-parse", remote_ref) == world.base
+    assert world.doc()["tasks"]["t1"]["state"] != "waiting"
+    rc, out = world.cli("cleanup", "--run", "r1", "--remote", "--discard-unmerged", "--root", str(world.root))
+    assert rc == 0 and "CLOUD:cleanup-kept ref=remote:%s (creation not confirmed)" % remote_ref in out, out
+    assert run_git(world.origin, "rev-parse", remote_ref) == world.base
+
+
+def test_pushed_new_ref_needs_the_new_ref_flag_for_that_destination() -> None:
+    ref = "refs/heads/ffs/cloud/r1/t1-g1"
+    assert cd.pushed_new_ref("*\tabc:%s\t[new branch]\nDone\n" % ref, ref)
+    assert not cd.pushed_new_ref("=\tabc:%s\t[up to date]\nDone\n" % ref, ref)
+    assert not cd.pushed_new_ref("*\tabc:%s-other\t[new branch]\n" % ref, ref)
+    assert not cd.pushed_new_ref("", ref)
+
+
 def test_cleanup_keeps_the_integration_ref_when_the_ledger_never_confirmed_creating_it(world: World) -> None:
     assert world.start(tasks=[T1])[0] == 0
     world.drive()
