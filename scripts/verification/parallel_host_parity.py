@@ -57,6 +57,9 @@ FIELDS = {
     "coverage": COMMON | {"coverage"},
     "migration": COMMON | {"migration"},
     "rollout": COMMON | {"rollout"},
+    "experiment": COMMON | {"experiment"},
+    "docs": COMMON | {"docs"},
+    "authorization": COMMON | {"authorization"},
 }
 REQUIRED = {
     "baseline": COMMON | {"baseline"},
@@ -71,6 +74,9 @@ REQUIRED = {
     "coverage": COMMON | {"coverage"},
     "migration": COMMON | {"migration"},
     "rollout": COMMON | {"rollout"},
+    "experiment": COMMON | {"experiment"},
+    "docs": COMMON | {"docs"},
+    "authorization": COMMON | {"authorization"},
 }
 PROVENANCE = {"source_sha256", "binary_sha256", "bundle_sha256", "config_sha256"}
 ASSIGNMENT = {"finding_id", "action", "owner", "path_ids", "owning_phase", "regression_contract", "authority_id"}
@@ -80,9 +86,63 @@ REVIEW_DIRECTIONS = frozenset({"claude-codex", "codex-claude"})
 # PATH-014/FR-046: one row per direction binds the outer host, the opposite reviewer and the review transcript.
 REVIEW_ROW_FIELDS = frozenset({"direction", "outer_host", "reviewer_host", "artifact"})
 REQUIRED_AGGREGATE_GATES = frozenset({
-    "audit", "coverage", "hosts", "installation-lifecycle", "matrix",
-    "migration", "rollout", "upgrade-comparison",
+    "audit", "authorization", "coverage", "docs", "experiment", "hosts", "installation-lifecycle",
+    "matrix", "migration", "review-completion:upgraded", "rollout", "upgrade-comparison",
 })
+# FR-036 to FR-038: findings, regression tests, fixes, the five bounded refactors, independent
+# verification and the review-gate pin. A manifest may add domains; it cannot drop these.
+AUDIT_REQUIRED_DOMAINS = frozenset({
+    "findings", "regression", "fix", "refactor-path", "refactor-ownership", "refactor-host",
+    "refactor-dependency", "refactor-model", "independent-verification", "pin",
+})
+# FR-056: every documentation topic that must match verified behavior.
+DOC_TOPICS = frozenset({
+    "dependencies", "setup", "host-support", "tiers", "commands", "automatic-isolation", "evidence",
+    "resume-takeover", "migration", "troubleshooting", "examples", "rollout-rollback",
+})
+# FR-047: the dated upstream experiment records what it observed, never an assumption.
+EXPERIMENT_OUTCOMES = frozenset({"parallel", "sequential-fallback"})
+# Evidence obligation 1 (AC-001 to AC-004, PATH-001): the only ids a retained baseline can lend the aggregate.
+BASELINE_OWNED_IDS = frozenset({"AC-001", "AC-002", "AC-003", "AC-004", "PATH-001"})
+
+
+def _id_range(prefix: str, first: int, last: int) -> set[str]:
+    return {f"{prefix}-{number:03d}" for number in range(first, last + 1)}
+
+
+# The ids each indexed gate can prove, from specs/014-parallel-host-parity/spec.md: the "E2E Test
+# Paths" table (lines 603-628, PATH-001 to PATH-024 and their criteria) and the "Required evidence
+# traceability" table (lines 753-767, obligations 1 to 13). The aggregate credits a gate only for the
+# claimed ids in its set; no gate owns AC-001 to AC-004 or PATH-001, which are baseline credit only.
+GATE_OWNED_IDS = {gate: frozenset(ids) for gate, ids in {
+    # Obligation 3 and PATH-002: the repeated suite comparison (AC-009). AC-005 to AC-008 (changelog
+    # review, reader preflight, live-session preservation, profile progression) are unowned until the
+    # ledger proves them (FU-upgrade-ledger-obligations), so the aggregate stays UNMET on them.
+    "upgrade-comparison": {"AC-009", "PATH-002"},
+    # Obligation 4 and PATH-003 (AC-010, AC-031): fresh review identity, verdict and adjudication.
+    "review-completion:upgraded": {"AC-010", "AC-031", "PATH-003"},
+    # Obligation 6 and PATH-004 to PATH-012 (AC-011 to AC-028, AC-040 to AC-042): hermetic matrix.
+    "matrix": _id_range("AC", 11, 28) | _id_range("AC", 40, 42) | _id_range("PATH", 4, 12),
+    # Obligations 5 and 8, PATH-007 and PATH-013 to PATH-016, PATH-018 (AC-029 to AC-035, AC-040, AC-043 to AC-046).
+    "hosts": (_id_range("AC", 29, 35) | {"AC-040"} | _id_range("AC", 43, 46) | {"PATH-007", "PATH-018"}
+              | _id_range("PATH", 13, 16)),
+    # PATH-019 (AC-023, AC-045): six lifecycle operations, two scopes, two platforms.
+    "installation-lifecycle": {"AC-023", "AC-045", "PATH-019"},
+    # PATH-017 (AC-036 to AC-038): findings, regressions, fixes, refactors, verification, pin.
+    "audit": _id_range("AC", 36, 38) | {"PATH-017"},
+    # Obligation 7 and PATH-018 (AC-039).
+    "coverage": {"AC-039", "PATH-018"},
+    # Obligation 9 and PATH-020 (AC-047).
+    "experiment": {"AC-047", "PATH-020"},
+    # Obligation 10 and PATH-021 (AC-048 to AC-050).
+    "migration": _id_range("AC", 48, 50) | {"PATH-021"},
+    # Obligation 11, PATH-022 and PATH-023 (AC-051 to AC-055).
+    "rollout": _id_range("AC", 51, 55) | {"PATH-022", "PATH-023"},
+    # Obligation 12 and PATH-024 (AC-056 to AC-058).
+    "docs": _id_range("AC", 56, 58) | {"PATH-024"},
+    # Obligation 13 and PATH-024 (AC-059, AC-060).
+    "authorization": {"AC-059", "AC-060", "PATH-024"},
+}.items()}
 RESULT_COMMON_FIELDS = frozenset({
     "schema", "gate", "purpose", "binding", "ac_ids", "path_ids", "int_ids", "status",
     "platform", "host", "model", "label", "authenticated", "command", "started_utc",
@@ -105,11 +165,21 @@ AGGREGATE_RESULT_FIELDS = {
         "provenance_drift", "before_provenance", "after_provenance",
         "comparison_binding_sha256",
     },
+    # Imported completion only: a fresh adapter run cannot be revalidated offline (review_adapter is refused).
+    "review-completion:upgraded": {
+        "reviewer", "producer", "findings", "evidence_origin", "identity_assurance", "blocked_paths",
+        "review_execution",
+    },
+    "experiment": {"issue", "issue_status", "outcome", "observed_utc"},
+    "docs": {"topic_count", "example_count"},
+    "authorization": {"history_count"},
 }
 AGGREGATE_RESULT_PURPOSE = {
     "audit": "verification", "coverage": "verification", "hosts": "authenticated-verification",
     "installation-lifecycle": "verification", "matrix": "verification",
     "migration": "verify-legacy", "rollout": "verification", "upgrade-comparison": "comparison",
+    "review-completion:upgraded": "review-completion", "experiment": "verification",
+    "docs": "verification", "authorization": "verification",
 }
 
 
@@ -1191,6 +1261,96 @@ def _git_tree(repo: Path, generation: str, relative_root: str) -> dict[str, tupl
     return result
 
 
+_FIRST_PARTY_ROOTS = frozenset({"lib", "scripts", "skills"})
+_ROOT_SOURCES = frozenset({"setup.sh"})
+_SOURCE_EXCLUDED = frozenset({".git", "node_modules", "vendor", "__pycache__"})
+
+
+def _first_party_source(relative: str) -> bool:
+    """The repository source corpus: first-party roots and root sources, never vendored or cache paths."""
+    parts = Path(relative).parts
+    return (bool(relative) and (parts[0] in _FIRST_PARTY_ROOTS or relative in _ROOT_SOURCES)
+            and not _SOURCE_EXCLUDED.intersection(parts))
+
+
+def _git_blob_sha256(repo: Path, generation: str, relative: str) -> tuple[str, int]:
+    """Stream-hash one committed blob under the capture's per-file limit (MAX_INVENTORY_FILE_BYTES)."""
+    size_raw = _git(repo, "cat-file", "-s", f"{generation}:{relative}")
+    if not size_raw.isdigit() or int(size_raw) > MAX_INVENTORY_FILE_BYTES:
+        raise E("EVIDENCE_LIMIT", "retained generation blob exceeds the inventory file limit")
+    size, digest, seen = int(size_raw), hashlib.sha256(), 0
+    command = ["git", "-C", str(repo), "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
+               "cat-file", "blob", f"{generation}:{relative}"]
+    try:
+        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=_git_env())
+        assert process.stdout is not None
+        while chunk := process.stdout.read(1024 * 1024):
+            seen += len(chunk)
+            if seen > size:
+                process.kill()
+                break
+            digest.update(chunk)
+        process.wait(timeout=30)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        if "process" in locals():
+            process.kill()
+            process.wait()
+        raise E("VERIFICATION_PROOF", "retained generation blob is unreadable", "UNMET") from exc
+    if process.returncode or seen != size:
+        raise E("VERIFICATION_PROOF", "retained generation blob is unreadable", "UNMET")
+    return digest.hexdigest(), seen
+
+
+def _generation_source_inventory(repo: Path, generation: str) -> list[dict[str, str]]:
+    """git_inventory's source corpus derived from a committed generation's tree instead of the worktree.
+
+    It applies git_inventory's own limits (per-file MAX_INVENTORY_FILE_BYTES, cumulative
+    MAX_INVENTORY_TOTAL_BYTES) and stream-hashes each blob, so any corpus the capture accepted
+    is accepted here; the canonical-source blob cache and per-leaf limit do not apply.
+    """
+    source, total = [], 0
+    for record in _git(repo, "ls-tree", "-r", "-z", "--full-tree", generation).split("\0"):
+        if not record:
+            continue
+        try:
+            metadata, relative = record.split("\t", 1)
+            mode, object_type, _ = metadata.split(" ", 2)
+        except ValueError as exc:
+            raise E("VERIFICATION_PROOF", "retained generation tree is malformed", "UNMET") from exc
+        # git_inventory keeps regular files only; links and submodules are not source bytes.
+        if object_type != "blob" or mode not in {"100644", "100755"} or not _first_party_source(relative):
+            continue
+        sha256, size = _git_blob_sha256(repo, generation, relative)
+        total += size
+        if total > MAX_INVENTORY_TOTAL_BYTES:
+            raise E("EVIDENCE_LIMIT", "repository inventory exceeds the cumulative byte limit")
+        source.append({"path": relative, "sha256": sha256})
+    return sorted(source, key=lambda row: row["path"])
+
+
+def _check_retained_repository(repository: dict[str, Any]) -> None:
+    """Check a retained repository observation against facts an upgrade does not change.
+
+    The repository identity (its live Git common dir), the retained head and origin/main as commit
+    objects of that store with origin/main reachable from the head, and the source corpus as the
+    head's committed tree. Only live HEAD, index and worktree state are not compared.
+    """
+    root = Path(repository["root"])
+    common_raw = _git(root, "rev-parse", "--git-common-dir", missing=True)
+    common = Path(common_raw) if Path(common_raw).is_absolute() else root / common_raw
+    if common_raw == "unavailable" or str(common.resolve()) != repository["common_dir"]:
+        raise E("VERIFICATION_PROOF", "retained repository is not the canonical repository's common dir", "UNMET")
+    head, origin = repository.get("head"), repository.get("origin_main")
+    for oid in (head, origin):
+        if (not isinstance(oid, str) or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", oid)
+                or _git(root, "cat-file", "-t", oid, missing=True) != "commit"):
+            raise E("VERIFICATION_PROOF", "retained head and origin/main must be commits of the canonical store", "UNMET")
+    if _git(root, "merge-base", "--is-ancestor", origin, head, missing=True) == "unavailable":
+        raise E("VERIFICATION_PROOF", "retained origin/main is not an ancestor of the retained generation", "UNMET")
+    if repository.get("source_inventory") != _generation_source_inventory(root, head):
+        raise E("VERIFICATION_PROOF", "retained source inventory differs from the generation's committed tree", "UNMET")
+
+
 def git_inventory(repository: Any) -> dict[str, Any]:
     if not isinstance(repository, str) or not Path(repository).is_absolute():
         return {"head": "unavailable", "origin_main": "unavailable", "source_inventory": []}
@@ -1229,11 +1389,9 @@ def git_inventory(repository: Any) -> dict[str, Any]:
     tracked = _git(repo, "ls-files", "-z").split("\0")
     untracked = _git(repo, "ls-files", "-z", "--others", "--exclude-standard").split("\0")
     source = []
-    first_party_roots = {"lib", "scripts", "skills"}
-    root_sources = {"setup.sh"}
-    for rel in sorted({x for x in tracked + untracked if x and (Path(x).parts[0] in first_party_roots or x in root_sources)}):
+    for rel in sorted({x for x in tracked + untracked if x and _first_party_source(x)}):
         path = repo / rel
-        if path.is_file() and not path.is_symlink() and not {".git", "node_modules", "vendor", "__pycache__"}.intersection(Path(rel).parts):
+        if path.is_file() and not path.is_symlink():
             source.append({"path": rel, "sha256": inventory_read(path).sha256})
     after = inventory_read(index).sha256 if index.is_file() else "unavailable"
     if before != after:
@@ -1420,7 +1578,14 @@ def _canonical_artifact(value: Any, budget: Budget) -> Checked:
         raise E("SOURCE_CANONICAL", "canonical artifact is malformed or exceeds policy", "UNMET") from exc
 
 
-def _canonical_source(value: Any, budget: Budget, repository: dict[str, Any], candidate: Checked) -> dict[str, Any]:
+def _canonical_source(value: Any, budget: Budget, repository: dict[str, Any], candidate: Checked,
+                      retained: bool = False) -> dict[str, Any]:
+    """Canonical source ownership of the candidate generation.
+
+    With retained=True the repository is the capture's own retained observation rather than a live
+    one: the candidate worktree, HEAD and worktree list come from it, and every byte check still
+    reads Git objects at the retained generation, so a later commit does not invalidate history.
+    """
     value = _closed(value, {"manifests", "upstream_mappings", "current_dirty_inventory"},
                     {"manifests", "upstream_mappings", "current_dirty_inventory"}, "SOURCE_CANONICAL")
     if (not isinstance(value["manifests"], list) or not value["manifests"]
@@ -1436,9 +1601,13 @@ def _canonical_source(value: Any, budget: Budget, repository: dict[str, Any], ca
                               max_evidence_bytes=MAX_INVENTORY_TOTAL_BYTES)
     candidate_path = Path(candidate.locator)
     try:
-        candidate_root = Path(_git(candidate_path.parent, "rev-parse", "--show-toplevel")).resolve()
-        candidate_common_raw = _git(candidate_root, "rev-parse", "--git-common-dir")
-        candidate_head = _git(candidate_root, "rev-parse", "HEAD")
+        if retained:
+            candidate_root = Path(repository["root"])
+            candidate_common_raw, candidate_head = repository["common_dir"], repository["head"]
+        else:
+            candidate_root = Path(_git(candidate_path.parent, "rev-parse", "--show-toplevel")).resolve()
+            candidate_common_raw = _git(candidate_root, "rev-parse", "--git-common-dir")
+            candidate_head = _git(candidate_root, "rev-parse", "HEAD")
     except E as exc:
         raise E("SOURCE_CANONICAL", "candidate is not in a canonical Git worktree", "UNMET") from exc
     candidate_common_path = Path(candidate_common_raw)
@@ -1462,7 +1631,7 @@ def _canonical_source(value: Any, budget: Budget, repository: dict[str, Any], ca
             raise E("SOURCE_CANONICAL", "canonical repository identity must contain strings", "UNMET")
         canonical_inventory = inventory_cache.get(repo["root"])
         if canonical_inventory is None:
-            canonical_inventory = git_inventory(repo["root"])
+            canonical_inventory = repository if retained else git_inventory(repo["root"])
             inventory_cache[repo["root"]] = canonical_inventory
         if (not canonical_inventory.get("root") or source_root != Path(canonical_inventory["root"]) or repo["root"] != canonical_inventory["root"]
                 or repo["common_dir"] != canonical_inventory.get("common_dir") or repo["head"] != canonical_inventory.get("head")
@@ -1565,7 +1734,8 @@ def _canonical_source(value: Any, budget: Budget, repository: dict[str, Any], ca
 
 
 def _inventory_observations(name: str, value: Any, budget: Budget, provenance: dict[str, str],
-                            repository: dict[str, Any], m0: bool, candidate: Checked) -> dict[str, Any]:
+                            repository: dict[str, Any], m0: bool, candidate: Checked,
+                            retained: bool = False) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise E("FULL_INVENTORY", f"{name} observations must be a typed object", "UNMET")
     if name in {"ci", "python", "bats"}:
@@ -1652,7 +1822,8 @@ def _inventory_observations(name: str, value: Any, budget: Budget, provenance: d
             raise E("SOURCE_RUNTIME_EVIDENCE", "all source/runtime/config roles are required", "UNMET")
         result = {"entries": observed}
         if m0:
-            result["canonical_source"] = _canonical_source(value["canonical_source"], budget, repository, candidate)
+            result["canonical_source"] = _canonical_source(value["canonical_source"], budget, repository, candidate,
+                                                           retained)
         return result
     if name == "tools_customizations":
         value = _closed(value, {"entries"}, {"entries"}, "FULL_INVENTORY")
@@ -1708,7 +1879,8 @@ def _inventory_observations(name: str, value: Any, budget: Budget, provenance: d
 
 
 def _inventory(value: Any, budget: Budget, provenance: dict[str, str], repository: dict[str, Any],
-               m0: bool = False, candidate: Checked | None = None) -> tuple[bool, list[str], dict[str, Any]]:
+               m0: bool = False, candidate: Checked | None = None,
+               retained: bool = False) -> tuple[bool, list[str], dict[str, Any]]:
     if value is None:
         return False, sorted(FULL_KEYS), {}
     if not isinstance(value, dict) or set(value) - FULL_KEYS:
@@ -1735,13 +1907,20 @@ def _inventory(value: Any, budget: Budget, provenance: dict[str, str], repositor
                 raise E("FULL_INVENTORY", f"{name} inventory evidence provenance mismatch", "UNMET")
             if candidate is None:
                 raise E("FULL_INVENTORY", "candidate binding is unavailable", "UNMET")
-            validated = _inventory_observations(name, evidence["observations"], budget, provenance, repository, m0, candidate)
+            validated = _inventory_observations(name, evidence["observations"], budget, provenance, repository, m0, candidate,
+                                                retained)
             observations.append({"locator": item.locator, "sha256": item.sha256, "validated": validated})
         verified[name] = observations
     return not unmet, unmet, verified
 
 
-def baseline_mode(value: Any) -> dict[str, Any]:
+def baseline_mode(value: Any, retained_repository: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Capture a baseline; with retained_repository, revalidate a retained capture offline.
+
+    The retained form substitutes the capture's own repository observation for the live
+    git_inventory, so every byte-bound inventory, backup and canonical-source check runs again
+    against the retained generation and its artifacts, never against the current checkout state.
+    """
     manifest, candidate, budget = _common(value, "baseline")
     baseline = manifest["baseline"]
     if not isinstance(baseline, dict) or set(baseline) != {"suite_artifacts"}:
@@ -1751,9 +1930,12 @@ def baseline_mode(value: Any) -> dict[str, Any]:
     if "baseline_profile" in manifest and profile != M0_PROFILE:
         raise E("BASELINE_PROFILE", "unsupported baseline profile", "UNMET")
     m0 = profile == M0_PROFILE
-    repository = git_inventory(manifest.get("repository"))
+    retained = retained_repository is not None
+    if retained:
+        _check_retained_repository(retained_repository)
+    repository = retained_repository if retained else git_inventory(manifest.get("repository"))
     complete, unmet, inventory = _inventory(manifest.get("full_inventory"), budget, manifest["provenance"], repository,
-                                            m0, candidate)
+                                            m0, candidate, retained)
     output = envelope("baseline-capture", "capture", "PASS", manifest, vec(), [])
     output.update({"tests": rows, "suite_ids": ids, "suite_observations": observations, "artifacts": artifacts,
         "suite_passed": all(x == "PASS" for x in rows.values()), "repository": repository,
@@ -2107,7 +2289,9 @@ def _ledger(value: Any, budget: Budget, candidate_sha256: str) -> tuple[list[dic
 
 def upgrade_mode(value: Any, baseline_path: str | Path) -> dict[str, Any]:
     manifest, _, budget = _common(value, "upgrade")
-    baseline_item = read_checked(baseline_path, budget)
+    # A full M0 baseline repeats every test row in its inventory and exceeds the 2 MiB evidence
+    # file limit; it uses the inventory file limit and still counts against the total budget.
+    baseline_item = read_checked(baseline_path, budget, max_bytes=MAX_INVENTORY_FILE_BYTES)
     old = _baseline(obj(baseline_item.data))
     if old["binding"].get("run") != manifest["binding"].get("run"):
         raise E("COMPARISON_BINDING", "baseline and current evidence have different logical runs")
@@ -2253,8 +2437,31 @@ def _regular(path: Path, code: str = "UNSAFE_INPUT") -> os.stat_result:
     return value
 
 
+def _contained_link(root: Path, path: Path) -> str | None:
+    """The target of a relative link that resolves to an existing entry strictly inside root, else None.
+
+    setup.sh project scope creates relative links such as .agents/skills -> ../.claude/skills
+    (replace_link). Absolute, escaping, dangling and looping links stay refused.
+    """
+    try:
+        target = os.readlink(path)
+        if os.path.isabs(target):
+            return None
+        resolved = Path(os.path.realpath(path, strict=True))
+        unchanged = os.readlink(path) == target
+    except (OSError, RuntimeError):
+        return None
+    real_root = Path(os.path.realpath(root))
+    lexical = Path(os.path.normpath(path.parent / target))
+    # The scan runs after the sandboxed installer and its process group have exited; a target
+    # that changed between readlink and realpath is refused rather than recorded.
+    if not unchanged or not (_inside(lexical, root) and _inside(resolved, real_root)):
+        return None
+    return target
+
+
 def _tree(root: Path) -> dict[str, tuple[str, str | None]]:
-    """Hash a no-follow tree.  Links and hard links are never fixture data."""
+    """Hash a no-follow tree.  Hard links and links leaving the fixture are never fixture data."""
     result: dict[str, tuple[str, str | None]] = {".": ("directory", None)}
     for current, dirs, files in os.walk(root, followlinks=False):
         current_path = Path(current)
@@ -2266,7 +2473,11 @@ def _tree(root: Path) -> dict[str, tuple[str, str | None]]:
                 if relative == "bin/python3" and sys.platform == "darwin" and path.resolve() == Path(_native_python()):
                     result[relative] = ("runtime-link", hashlib.sha256(str(path.resolve()).encode()).hexdigest())
                     continue
-                raise E("FIXTURE_LINK", f"fixture contains a symlink: {relative}")
+                target = _contained_link(root, path)
+                if target is None:
+                    raise E("FIXTURE_LINK", f"fixture contains a symlink: {relative}")
+                result[relative] = ("link", hashlib.sha256(target.encode()).hexdigest())
+                continue
             if stat.S_ISDIR(value.st_mode):
                 result[relative] = ("directory", None)
             elif stat.S_ISREG(value.st_mode):
@@ -2842,6 +3053,8 @@ def audit_mode(value: Any) -> dict[str, Any]:
     if producer == reviewer:
         raise E("AUDIT_INDEPENDENCE", "final audit reviewer must differ from the producer")
     required = set(_strings(audit["required_domains"], "audit.required_domains", True))
+    if not AUDIT_REQUIRED_DOMAINS <= required:
+        raise E("AUDIT_INCOMPLETE", "audit must cover every FR-036 to FR-038 domain", "UNMET")
     domains = audit["domains"]
     if not isinstance(domains, list):
         raise E("AUDIT_DOMAINS", "audit domains must be an array")
@@ -2875,6 +3088,215 @@ def audit_mode(value: Any) -> dict[str, Any]:
     _gate_artifact(audit["review_pin"], budget, "review pin")
     return _pass(manifest, "audit", "verification", domains=sorted(required),
                  finding_count=len(findings), reviewer=reviewer)
+
+
+def _normalized_absolute(value: Any) -> bool:
+    """An absolute path already in normal form: no ".", ".." or empty segments and no trailing slash."""
+    return (isinstance(value, str) and value.startswith("/") and not value.startswith("//")
+            and os.path.normpath(value) == value)
+
+
+def _nonempty_strings(value: Any, unique: bool = False) -> bool:
+    """A nonempty array of nonempty strings; repeats are allowed unless unique is requested."""
+    return (isinstance(value, list) and bool(value) and all(isinstance(x, str) and x and "\0" not in x for x in value)
+            and (not unique or len(value) == len(set(value))))
+
+
+def _record(descriptor: Any, budget: Budget, schema: str, name: str) -> dict[str, Any]:
+    """A byte-bound evidence artifact that must parse as a JSON object of the named record schema."""
+    _gate_artifact(descriptor, budget, name)
+    record = obj(_artifact(descriptor, Budget()).data)
+    if not isinstance(record, dict) or record.get("schema") != schema:
+        raise E("EVIDENCE_RECORD", f"{name} must be a {schema} record", "UNMET")
+    return record
+
+
+def experiment_mode(value: Any) -> dict[str, Any]:
+    """FR-047/AC-047: the dated installed-upstream experiment and the current issue #4588 status."""
+    manifest, _, budget = _common(value, "experiment")
+    keys = {"issue", "issue_status", "observed_utc", "outcome", "report", "supported_paths"}
+    experiment = _closed(manifest["experiment"], keys, keys, "EXPERIMENT_SCHEMA")
+    if experiment["issue"] != "4588" or experiment["outcome"] not in EXPERIMENT_OUTCOMES:
+        raise E("EXPERIMENT", "the experiment must record issue 4588 and an observed outcome", "UNMET")
+    _string(experiment["issue_status"], "experiment.issue_status")
+    _timestamps(experiment["observed_utc"], experiment["observed_utc"], False)
+    report = _record(experiment["report"], budget, "ffs.upstream-experiment/v1", "experiment report")
+    runs = report.get("runs")
+    if (set(report) != {"schema", "issue", "issue_status", "outcome", "observed_utc", "upstream_version", "runs"}
+            or report.get("issue") != "4588" or report.get("outcome") != experiment["outcome"]
+            or report.get("observed_utc") != experiment["observed_utc"]
+            or report.get("issue_status") != experiment["issue_status"]
+            or not isinstance(report.get("upstream_version"), str) or not report["upstream_version"]
+            or not isinstance(runs, list) or not runs):
+        raise E("EXPERIMENT", "the experiment report must record the installed upstream and its observed runs", "UNMET")
+    overlaps = []
+    for raw in runs:
+        run = _closed(raw, {"workstreams", "overlap_seconds"}, {"workstreams", "overlap_seconds"}, "EXPERIMENT_RUN")
+        workstreams, overlap = run["workstreams"], run["overlap_seconds"]
+        if (isinstance(workstreams, bool) or not isinstance(workstreams, int) or workstreams < 2
+                or isinstance(overlap, bool) or not isinstance(overlap, (int, float)) or overlap < 0):
+            raise E("EXPERIMENT_RUN", "each run records two or more workstreams and a nonnegative overlap", "UNMET")
+        overlaps.append(overlap)
+    # The outcome must follow from the measurements: any overlap is parallel, none is a fallback.
+    if (experiment["outcome"] == "parallel") != any(value > 0 for value in overlaps):
+        raise E("EXPERIMENT", "the declared outcome contradicts the measured overlap", "UNMET")
+    supported = _record(experiment["supported_paths"], budget, "ffs.supported-paths/v1", "supported-path implications")
+    implications = supported.get("path_implications")
+    if (set(supported) != {"schema", "execution_paths", "path_implications"}
+            or not _nonempty_strings(supported["execution_paths"])
+            or not all(Path(path).is_absolute() for path in supported["execution_paths"])
+            or not isinstance(implications, list) or not implications
+            or any(not isinstance(row, dict) or set(row) != {"path_id", "implication"}
+                   or row["path_id"] not in _id_range("PATH", 1, 24)
+                   or not _nonempty_strings([row["implication"]]) for row in implications)):
+        raise E("EXPERIMENT", "supported-path implications must name the tested execution paths and PATH ids", "UNMET")
+    return _pass(manifest, "experiment", "verification", issue=experiment["issue"],
+                 issue_status=experiment["issue_status"], outcome=experiment["outcome"],
+                 observed_utc=experiment["observed_utc"])
+
+
+def docs_mode(value: Any) -> dict[str, Any]:
+    """FR-056 to FR-058/AC-056 to AC-058: every topic, observed examples, shared dependencies, guidance layers."""
+    manifest, _, budget = _common(value, "docs")
+    keys = {"topics", "examples", "shared_dependencies", "guidance", "user_global_unchanged",
+            "consumer_skills_unchanged"}
+    docs = _closed(manifest["docs"], keys, keys, "DOCS_SCHEMA")
+    if not isinstance(docs["topics"], list):
+        raise E("DOCS_SCHEMA", "documentation topics must be an array")
+    seen: set[str] = set()
+    for raw in docs["topics"]:
+        row = _closed(raw, {"id", "artifact"}, {"id", "artifact"}, "DOCS_TOPIC")
+        topic = _string(row["id"], "docs.topic")
+        if topic in seen:
+            raise E("DOCS_TOPIC", "each documentation topic appears once")
+        record = _record(row["artifact"], budget, "ffs.doc-topic/v1", "documentation topic")
+        documents = record.get("documents")
+        if (set(record) != {"schema", "topic", "documents", "statement"} or record["topic"] != topic
+                or not isinstance(documents, list) or not documents
+                or not all(isinstance(document, dict) for document in documents)
+                or not _nonempty_strings([record["statement"]])):
+            raise E("DOCS_TOPIC", "each topic artifact names its topic, the documents and what they state", "UNMET")
+        for document in documents:
+            _gate_artifact(document, budget, "documentation document")
+        seen.add(topic)
+    if seen != DOC_TOPICS:
+        raise E("DOCS_INCOMPLETE", "documentation topic coverage is incomplete", "UNMET")
+    if not isinstance(docs["examples"], list) or not docs["examples"]:
+        raise E("DOCS_INCOMPLETE", "observed CLI examples are required", "UNMET")
+    for raw in docs["examples"]:
+        keys = {"argv", "expected_exit_status", "observed"}
+        row = _closed(raw, keys, keys, "DOCS_EXAMPLE")
+        argv, expected = row["argv"], row["expected_exit_status"]
+        # An argv may repeat an option, so it is not a unique string set.
+        if not _nonempty_strings(argv) or isinstance(expected, bool) or not isinstance(expected, int):
+            raise E("DOCS_EXAMPLE", "each example needs an argv and the exit status it documents")
+        observed = _record(row["observed"], budget, "ffs.command-observation/v1", "observed example")
+        if set(observed) != {"schema", "argv", "exit_status", "stdout_sha256", "stdout"}:
+            raise E("DOCS_EXAMPLE", "each observation records argv, exit status and its stdout artifact", "UNMET")
+        stdout = _gate_artifact(observed["stdout"], budget, "observed example stdout")
+        if (observed["argv"] != argv or observed["exit_status"] != expected
+                or isinstance(observed["exit_status"], bool) or observed["stdout_sha256"] != stdout["sha256"]):
+            raise E("DOCS_EXAMPLE", "each example needs an observation of the same argv, exit status and stdout", "UNMET")
+    shared = _record(docs["shared_dependencies"], budget, "ffs.shared-dependencies/v1", "shared dependencies")
+    if (set(shared) != {"schema", "dependencies", "self_contained", "isolation_limit"}
+            or not _nonempty_strings(shared["dependencies"], unique=True)
+            or not isinstance(shared["self_contained"], bool) or not _nonempty_strings([shared["isolation_limit"]])):
+        raise E("DOCS_DEPENDENCIES", "docs must name the shared dependencies, the self-contained claim and the isolation limit", "UNMET")
+    guidance = _record(docs["guidance"], budget, "ffs.guidance-comparison/v1", "guidance comparison")
+    if set(guidance) != {"schema", "repo_guidance", "user_global", "consumer_skills"}:
+        raise E("DOCS_GUIDANCE", "guidance comparison must name the repo guidance files and both protected layers", "UNMET")
+    names: set[str] = set()
+    for raw in guidance["repo_guidance"] if isinstance(guidance["repo_guidance"], list) else [None]:
+        row = _closed(raw, {"path", "artifact"}, {"path", "artifact"}, "DOCS_GUIDANCE")
+        path = Path(_string(row["path"], "docs.guidance.path"))
+        if path.is_absolute() or ".." in path.parts:
+            raise E("DOCS_GUIDANCE", "repo guidance files are repository-relative paths")
+        bound = _gate_artifact(row["artifact"], budget, "repo guidance")
+        if Path(bound["locator"]).name != path.name:
+            raise E("DOCS_GUIDANCE", "each repo guidance artifact must be the named file", "UNMET")
+        names.add(str(path))
+    # AC-058: the repo's Claude (CLAUDE.md) and Codex (AGENTS.md) guidance are both compared.
+    if not {"CLAUDE.md", "AGENTS.md"} <= {Path(name).name for name in names}:
+        raise E("DOCS_GUIDANCE", "guidance comparison must include repo CLAUDE.md and AGENTS.md", "UNMET")
+    for layer in ("user_global", "consumer_skills"):
+        pair = guidance.get(layer)
+        if (not isinstance(pair, dict) or set(pair) != {"before", "after"}
+                or not all(HASH_RE.fullmatch(str(pair[side])) for side in pair)):
+            raise E("DOCS_GUIDANCE", f"guidance comparison lacks the {layer} before/after inventory", "UNMET")
+    if (docs["user_global_unchanged"] is not True or docs["consumer_skills_unchanged"] is not True
+            or guidance["user_global"]["before"] != guidance["user_global"]["after"]
+            or guidance["consumer_skills"]["before"] != guidance["consumer_skills"]["after"]):
+        raise E("DOCS_GUIDANCE", "user-global guidance and consumer-owned skills must stay unchanged", "UNMET")
+    return _pass(manifest, "docs", "verification", topic_count=len(seen), example_count=len(docs["examples"]))
+
+
+def authorization_mode(value: Any) -> dict[str, Any]:
+    """FR-059/FR-060/AC-059/AC-060: workspace and history evidence with no unauthorized action or discarded change."""
+    manifest, _, budget = _common(value, "authorization")
+    keys = {"record", "histories", "unauthorized_actions", "discarded_changes", "evidence_index"}
+    record = _closed(manifest["authorization"], keys, keys, "AUTHORIZATION_SCHEMA")
+    granted = _record(record["record"], budget, "ffs.authorization-record/v1", "authorization record")
+    grants = granted.get("authorizations")
+    if (set(granted) != {"schema", "canonical_repository", "authorizations"} or not isinstance(grants, list)
+            or not isinstance(granted["canonical_repository"], str)
+            or not Path(granted["canonical_repository"]).is_absolute()):
+        raise E("AUTHORIZATION_RECORD", "the authorization record names the canonical repository and its grants", "UNMET")
+    if not _normalized_absolute(granted["canonical_repository"]):
+        raise E("AUTHORIZATION_RECORD", "the canonical repository must be a normalized absolute path", "UNMET")
+    canonical = Path(os.path.realpath(granted["canonical_repository"]))
+    authorized: dict[str, tuple[str, str]] = {}
+    for raw in grants:
+        grant = _closed(raw, {"id", "action", "scope"}, {"id", "action", "scope"}, "AUTHORIZATION_RECORD")
+        authorized[_string(grant["id"], "authorization.id")] = (
+            _string(grant["action"], "authorization.action"), _string(grant["scope"], "authorization.scope"))
+    if not isinstance(record["histories"], list) or not record["histories"]:
+        raise E("AUTHORIZATION_HISTORY", "repository history evidence is required", "UNMET")
+    repositories: set[str] = set()
+    for raw in record["histories"]:
+        row = _closed(raw, {"repository", "artifact"}, {"repository", "artifact"}, "AUTHORIZATION_HISTORY")
+        repository = _string(row["repository"], "authorization.repository")
+        if not _normalized_absolute(repository) or repository in repositories:
+            raise E("AUTHORIZATION_HISTORY", "each repository history is named once by normalized absolute path")
+        history = _record(row["artifact"], budget, "ffs.repository-history/v1", "repository history")
+        if (set(history) - {"fixture_root"} != {"schema", "repository", "head", "commits", "pushes"}
+                or history["repository"] != repository or not isinstance(history["head"], str)
+                or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", history["head"])
+                or not isinstance(history["commits"], list) or not isinstance(history["pushes"], list)):
+            raise E("AUTHORIZATION_HISTORY", "repository history must name its repository, head, commits and pushes", "UNMET")
+        # FR-059: a commit names a "commit" grant scoped to this repository and a push names a "push"
+        # grant scoped to its exact ref. A fixture row is allowed only in a disposable repository: the
+        # history declares a fixture root, the repository lies strictly inside it, and it is neither the
+        # canonical repository nor inside it.
+        # Containment compares physical paths, so a symlinked fixture cannot alias the canonical repository.
+        root = history.get("fixture_root")
+        physical = Path(os.path.realpath(repository))
+        fixture_root = Path(os.path.realpath(root)) if _normalized_absolute(root) else None
+        disposable = (fixture_root is not None and _inside(physical, fixture_root)
+                      and physical != canonical and not _inside(physical, canonical)
+                      and not _inside(canonical, fixture_root) and canonical != fixture_root)
+        for kind, key, action in (("commits", "commit", "commit"), ("pushes", "ref", "push")):
+            for entry in history[kind]:
+                if (not isinstance(entry, dict) or set(entry) not in ({key, "authorization"}, {key, "fixture"})
+                        or not isinstance(entry[key], str) or not entry[key]
+                        or ("fixture" in entry and (entry["fixture"] is not True or not disposable))
+                        or ("authorization" in entry and authorized.get(entry["authorization"])
+                            != (action, repository if action == "commit" else entry[key]))):
+                    raise E("AUTHORIZATION_UNAUTHORIZED", f"repository history has an unauthorized {kind[:-1]}", "UNMET")
+        repositories.add(repository)
+    if record["unauthorized_actions"] != [] or record["discarded_changes"] != []:
+        raise E("AUTHORIZATION_VIOLATION", "unauthorized actions or discarded changes were recorded", "UNMET")
+    index = _closed(record["evidence_index"], {"results", "unmet", "hypotheses"},
+                    {"results", "unmet", "hypotheses"}, "AUTHORIZATION_INDEX")
+    digests: set[str] = set()
+    for category, descriptor in index.items():
+        entry = _record(descriptor, budget, "ffs.evidence-index/v1", f"evidence index {category}")
+        if (set(entry) != {"schema", "category", "entries"} or entry["category"] != category
+                or not isinstance(entry["entries"], list)):
+            raise E("AUTHORIZATION_INDEX", f"the {category} index must be an evidence index of that category", "UNMET")
+        digests.add(descriptor["sha256"])
+    if len(digests) != len(index):
+        raise E("AUTHORIZATION_INDEX", "results, unmet gates and hypotheses must be distinct records", "UNMET")
+    return _pass(manifest, "authorization", "verification", history_count=len(repositories))
 
 
 def _candidate_production_inventory(candidate: Checked) -> list[str]:
@@ -3164,6 +3586,20 @@ def _aggregate_result(value: Any, budget: Budget) -> dict[str, Any]:
                 or not isinstance(result["suite_observations"], list) or not result["suite_observations"]
                 or _closed(result["after_provenance"], PROVENANCE, PROVENANCE, "AGGREGATE_RESULT") != provenance):
             raise E("AGGREGATE_RESULT", "upgrade comparison result summary is incomplete", "UNMET")
+    elif gate == "review-completion:upgraded":
+        # PATH-003: unresolved critical/high (a repair still authorized or a blocked path) blocks readiness.
+        if (result["review_complete"] is not True or result["repair_authorized"] is not False
+                or result["blocked_paths"] != [] or result["evidence_origin"] != "imported"):
+            raise E("AGGREGATE_RESULT", "review completion retains open severe findings or blocked paths", "UNMET")
+    elif gate == "experiment":
+        if result["outcome"] not in EXPERIMENT_OUTCOMES:
+            raise E("AGGREGATE_RESULT", "experiment result summary is incomplete", "UNMET")
+    elif gate == "docs":
+        if result["topic_count"] != len(DOC_TOPICS) or not isinstance(result["example_count"], int) or result["example_count"] < 1:
+            raise E("AGGREGATE_RESULT", "documentation result summary is incomplete", "UNMET")
+    elif gate == "authorization":
+        if not isinstance(result["history_count"], int) or result["history_count"] < 1:
+            raise E("AGGREGATE_RESULT", "authorization result summary is incomplete", "UNMET")
     proof = _closed(result["verification_proof"], {"manifest", "inputs"},
                     {"manifest", "inputs"}, "VERIFICATION_PROOF")
     manifest_item = _artifact(proof["manifest"], budget)
@@ -3172,7 +3608,7 @@ def _aggregate_result(value: Any, budget: Budget) -> dict[str, Any]:
     expected_inputs = {"baseline"} if gate == "upgrade-comparison" else set()
     if set(proof["inputs"]) != expected_inputs:
         raise E("VERIFICATION_PROOF", "verification proof inputs do not match the gate", "UNMET")
-    checked_inputs = {name: _artifact(descriptor, budget)
+    checked_inputs = {name: _artifact(descriptor, budget, max_bytes=MAX_INVENTORY_FILE_BYTES)
                       for name, descriptor in proof["inputs"].items()}
     manifest = obj(manifest_item.data)
     if gate == "audit":
@@ -3190,6 +3626,14 @@ def _aggregate_result(value: Any, budget: Budget) -> dict[str, Any]:
         regenerated = migration_mode(manifest, "verify-legacy")
     elif gate == "rollout":
         regenerated = rollout_mode(manifest, Path(result["consumer"]))
+    elif gate == "review-completion:upgraded":
+        regenerated = do_review(manifest, "review-completion", False)
+    elif gate == "experiment":
+        regenerated = experiment_mode(manifest)
+    elif gate == "docs":
+        regenerated = docs_mode(manifest)
+    elif gate == "authorization":
+        regenerated = authorization_mode(manifest)
     else:
         regenerated = upgrade_mode(manifest, checked_inputs["baseline"].locator)
     stable_fields = {
@@ -3200,6 +3644,56 @@ def _aggregate_result(value: Any, budget: Budget) -> dict[str, Any]:
     if any(result[name] != regenerated[name] for name in stable_fields):
         raise E("VERIFICATION_PROOF", "indexed result does not match revalidated gate evidence", "UNMET")
     return result
+
+
+# The retained capture fields that baseline credit depends on; volatile envelope fields (timestamps, command) are not.
+BASELINE_STABLE_FIELDS = (
+    "schema", "gate", "purpose", "status", "exit_status", "binding", "ac_ids", "path_ids", "provenance",
+    "tests", "suite_ids", "suite_observations", "artifacts", "repository", "baseline_profile",
+    "canonical_source_verified", "full_baseline_complete", "full_baseline_unmet", "full_inventory_evidence",
+)
+
+
+def _credited_baseline(result: dict[str, Any], budget: Budget) -> tuple[list[str], list[str], dict[str, str]] | None:
+    """The upgrade comparison's retained baseline, credited only when it is a complete M0 capture.
+
+    The baseline describes the before-state, so it cannot share the candidate's provenance and is
+    never indexed directly; it reaches the aggregate only as the comparison's revalidated input.
+    A diagnostic or source-unverified capture proves nothing about AC-001 to AC-003. A capture that
+    claims to be a complete M0 baseline is re-derived from its own verification proof with
+    baseline_mode, so the full-inventory, backup and canonical-source checks run again on the
+    retained manifest and any edited retained field is refused.
+    """
+    proof = result.get("verification_proof")
+    inputs = proof.get("inputs") if isinstance(proof, dict) else None
+    # Only an attributed comparison makes upgrade_mode re-check the retained capture's full
+    # inventory (COMPARISON_EVIDENCE); the same-tuple compatibility path does not, so it earns no credit.
+    if not isinstance(inputs, dict) or "baseline" not in inputs or not result.get("comparison_binding_sha256"):
+        return None
+    item = _artifact(inputs["baseline"], budget, max_bytes=MAX_INVENTORY_FILE_BYTES)
+    old = obj(item.data)
+    if not isinstance(old, dict) or (old.get("schema"), old.get("gate"), old.get("purpose"), old.get("status"),
+                                     old.get("exit_status")) != (SCHEMA, "baseline-capture", "capture", "PASS", 0):
+        return None
+    inventory = old.get("full_inventory_evidence")
+    if (old.get("baseline_profile") != M0_PROFILE or old.get("full_baseline_complete") is not True
+            or old.get("full_baseline_unmet") != [] or old.get("canonical_source_verified") is not True
+            or not isinstance(inventory, dict) or not {"source_runtime", "environment"} <= set(inventory)):
+        return None
+    capture_proof = old.get("verification_proof")
+    if (not isinstance(capture_proof, dict) or set(capture_proof) != {"manifest", "inputs"}
+            or capture_proof["inputs"] != {}):
+        raise E("VERIFICATION_PROOF", "a retained M0 baseline needs its own capture proof", "UNMET")
+    repository = old.get("repository")
+    if not isinstance(repository, dict) or not all(isinstance(repository.get(key), str) and repository[key]
+                                                   for key in ("root", "common_dir", "head")):
+        raise E("VERIFICATION_PROOF", "a retained M0 baseline needs its repository observation", "UNMET")
+    regenerated = baseline_mode(obj(_artifact(capture_proof["manifest"], budget).data), repository)
+    if any(old.get(name) != regenerated.get(name) for name in BASELINE_STABLE_FIELDS):
+        raise E("VERIFICATION_PROOF", "retained baseline does not match its revalidated M0 capture", "UNMET")
+    acs = [name for name in _strings(old["ac_ids"], "baseline.ac_ids") if name in BASELINE_OWNED_IDS]
+    paths = [name for name in _strings(old["path_ids"], "baseline.path_ids") if name in BASELINE_OWNED_IDS]
+    return acs, paths, {"locator": item.locator, "sha256": item.sha256}
 
 
 def aggregate_mode(evidence: Path, require_all_paths: bool, stage: str) -> dict[str, Any]:
@@ -3235,15 +3729,24 @@ def aggregate_mode(evidence: Path, require_all_paths: bool, stage: str) -> dict[
         if gate in gates:
             raise E("AGGREGATE_RESULT", "evidence index contains a duplicate gate result", "UNMET")
         gates.add(gate)
-        ac_ids.update(_strings(result.get("ac_ids", []), "result.ac_ids"))
-        path_ids.update(_strings(result.get("path_ids", []), "result.path_ids"))
+        # A manifest chooses the ids a result claims; only the ids this gate can prove are credited.
+        owned = GATE_OWNED_IDS[gate]
+        ac_ids.update(name for name in _strings(result.get("ac_ids", []), "result.ac_ids") if name in owned)
+        path_ids.update(name for name in _strings(result.get("path_ids", []), "result.path_ids") if name in owned)
         artifacts.append({"locator": checked.locator, "sha256": checked.sha256})
+        if gate == "upgrade-comparison":
+            baseline = _credited_baseline(result, budget)
+            if baseline is not None:
+                ac_ids.update(baseline[0])
+                path_ids.update(baseline[1])
+                artifacts.append(baseline[2])
     if not REQUIRED_AGGREGATE_GATES.issubset(gates):
         raise E("AGGREGATE_GATES", "required verification gates are missing", "UNMET")
     required_acs = {f"AC-{number:03d}" for number in range(1, 61)}
     required_paths = {f"PATH-{number:03d}" for number in range(1, 25)}
-    if not required_acs.issubset(ac_ids) or (require_all_paths and not required_paths.issubset(path_ids)):
-        raise E("AGGREGATE_COVERAGE", "all 60 ACs and 24 PATHs are required", "UNMET")
+    missing = (required_acs - ac_ids) | ((required_paths - path_ids) if require_all_paths else set())
+    if missing:
+        raise E("AGGREGATE_COVERAGE", "all 60 ACs and 24 PATHs are required; missing " + " ".join(sorted(missing)), "UNMET")
     if stage not in {"m7", "final"}:
         raise E("AGGREGATE_STAGE", "aggregate stage must be m7 or final")
     manifest = {
@@ -3339,10 +3842,16 @@ def main() -> int:
             output = migration_mode(manifest, args.mode)
         elif args.gate == "rollout":
             output = rollout_mode(manifest, args.consumer)
+        elif args.gate == "experiment":
+            output = experiment_mode(manifest)
+        elif args.gate == "docs":
+            output = docs_mode(manifest)
+        elif args.gate == "authorization":
+            output = authorization_mode(manifest)
         if manifest_item is not None:
             inputs: dict[str, dict[str, str]] = {}
             if args.gate == "upgrade":
-                baseline_proof = read_checked(args.baseline)
+                baseline_proof = read_checked(args.baseline, max_bytes=MAX_INVENTORY_FILE_BYTES)
                 if baseline_proof.sha256 != output.get("baseline_sha256"):
                     raise E("VERIFICATION_PROOF", "upgrade baseline changed during verification")
                 inputs["baseline"] = {
