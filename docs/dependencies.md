@@ -41,6 +41,13 @@ readiness probe), `flock` (locking; shell fallback), `timeout`/`gtimeout`
 (bounded runs; python3 fallback), `tmux` (worktree-GC session check),
 `npx`/vitest and `playwright` and `canary` (browser/JS QA lane).
 
+`crapper` and `dryer` (https://github.com/unclebob/crapper, https://github.com/unclebob/dryer)
+feed an advisory into review-gate Pass 3: new or grown cyclomatic complexity ≥ 10 and
+duplicate blocks (similarity ≥ 0.8) that touch the diff (`lib/clean_code_metrics.py`).
+FFS finds them on `PATH`, under `$FFS_UB_TOOLS_DIR/<tool>/<tool>`, or under
+`~/.local/share/ub-mode/<tool>/<tool>`. Their output goes to a temporary directory, never
+the reviewed tree. Absent tools print nothing; findings are at most MEDIUM and never block.
+
 ## Contributor and CI tooling
 
 | Component | Version policy | Ownership | Purpose |

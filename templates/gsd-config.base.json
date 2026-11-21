@@ -80,6 +80,9 @@
   "learnings": {
     "max_inject": 10
   },
+  "agent_skills": {
+    "gsd-executor": ["global:testing-policy", ".agents/skills/testing-policy"]
+  },
   "hooks": {
     "context_warnings": true
   },

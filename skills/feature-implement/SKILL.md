@@ -1,7 +1,7 @@
 ---
 name: feature-implement
 description: "Execute a decomposed feature via the gsd-core loop with preflight-only host fallback, no stateful cross-vendor replay, autonomy grants, gates.py completion authority, and a fail-closed review/ship tail. --adhoc uses the same walls over gsd-quick."
-version: "2.22.3"
+version: "2.23.2"
 allowed-tools:
   - Read
   - Edit
@@ -289,8 +289,9 @@ it must still end in `scripts/gsd/gates-test-command.sh`.
 ### Step 4: Execute
 
 **Adhoc mode:** run the single task through gsd-quick (plan → execute → verify on
-one quick task). TDD applies: failing repro/behavior test first (RED), then the
-change (GREEN) — the gsd executor's commit trail must show both.
+one quick task). Append the five rules of testing-policy §7 to `<task>` (adhoc has no
+seeded config, so the task string is their only channel); TDD: a failing test that calls
+the code as its user does (RED), then the change (GREEN), both in the commit trail.
 
 - Interactive Claude session: invoke `/gsd-quick "<task>"` directly.
 - Interactive Codex session: invoke `$gsd-quick "<task>"` directly.

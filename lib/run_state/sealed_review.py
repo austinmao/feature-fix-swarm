@@ -123,7 +123,7 @@ def _host_final_text(result: dict, raw: bytes, *, single: bool = True) -> str:
     return texts[-1]
 
 
-def _review_output(result: dict, raw: bytes) -> dict:
+def _review_output(result: dict, raw: bytes, code: str = "FINAL_REVIEW_OUTPUT_INVALID") -> dict:
     try:
         if result.get("host_receipt") is None:
             value = json.loads(raw, object_pairs_hook=_unique_keys)
@@ -133,7 +133,7 @@ def _review_output(result: dict, raw: bytes) -> dict:
             raise ValueError("invalid review output")
         return value
     except (KeyError, TypeError, ValueError, UnicodeError) as error:
-        raise SupervisorRefused("FINAL_REVIEW_OUTPUT_INVALID") from error
+        raise SupervisorRefused(code) from error
 
 
 def record_final_review(supervisor, handle, *, acceptance_hash: str):

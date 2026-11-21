@@ -170,5 +170,5 @@ EOF
 
 @test "F3 P1: plan-wall brief asks for the smallest remedy and tags [needs-requirement]" {
   grep -qF '[needs-requirement]' "$LEVER"
-  grep -qF 'Also flag plan steps the goal does not need.' "$LEVER"
+  grep -qF 'Also flag plan steps the goal does not need, and steps that add a new path beside an old one without naming the old path it retires.' "$LEVER"
 }
