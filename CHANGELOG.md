@@ -27,6 +27,11 @@ all skills.
   `INTEGRATION_REF`, or `INTEGRATION_REF_UNCONFIRMED` (exit 78) when an identical
   retry of a crashed start finds one. Runs started by an earlier build have no
   proof, so `cleanup` keeps their refs.
+- The `INTEGRATION_REF_UNCONFIRMED` (exit 78) message no longer suggests
+  `git update-ref -d <ref>`, which follows a symbolic ref and deletes its target.
+  For a symbolic ref it says to inspect the target and remove only the symbolic
+  ref (`git symbolic-ref --delete <ref>`); for a plain ref it prints
+  `git update-ref --no-deref -d <ref> <inspected-oid>`.
 - An identical retry of `start` whose orchestrator restart fails (the spawn raises
   `OSError`) adds `orchestrator=restart-failed` to the `RUN_EXISTS` refusal
   instead of silently dropping the error; the ledger and the local claims are

@@ -1320,6 +1320,17 @@ def _mark_initialized(doc: Dict[str, Any]) -> Dict[str, Any]:
     return doc
 
 
+def _integration_ref_removal_advice(svc: Services, root: Path, ref: str, oid: str) -> str:
+    """How an operator may remove a leftover integration ref without touching anything else.  A symbolic ref is
+    followed by ``rev-parse`` and by a plain ``update-ref -d``, so for one the advice is to inspect the target and
+    remove only the symbolic ref; a plain ref is deleted with ``--no-deref`` at the inspected OID."""
+    target = git(svc, root, ["symbolic-ref", "-q", ref])
+    if target.ok:
+        return ("it is a symbolic ref to %s: inspect that target, and remove only the symbolic ref itself "
+                "(`git symbolic-ref --delete %s`)" % (target.text().strip() or "another ref", ref))
+    return "inspect it and delete it by hand (`git update-ref --no-deref -d %s %s`)" % (ref, oid)
+
+
 def _initialize_run(svc: Services, root: Path, run: str, tip: str, *, fresh: bool) -> None:
     """Create the integration ref and commit the initialization record (``initialized``), under the orchestrator lock.
 
@@ -1332,10 +1343,11 @@ def _initialize_run(svc: Services, root: Path, run: str, tip: str, *, fresh: boo
     created = git(svc, root, ["update-ref", "--no-deref", ref, tip, ""]).ok
     if not created:
         _release_reservation(root, run, tasks_written=True)
-        if not fresh and rev_parse(svc, root, ref) is not None:
+        found = rev_parse(svc, root, ref)
+        if not fresh and found is not None:
             raise StoreError("INTEGRATION_REF_UNCONFIRMED", "%s already exists and nothing proves this run created it "
-                             "(a crashed start, or another party); inspect it and delete it by hand "
-                             "(`git update-ref -d %s`), then start again" % (ref, ref))
+                             "(a crashed start, or another party); %s, then start again"
+                             % (ref, _integration_ref_removal_advice(svc, root, ref, found)))
         raise StoreError("INTEGRATION_REF", "could not create %s" % ref)
     try:
         ledger.locked_update(ledger.run_ledger_path(root, run), _mark_initialized)

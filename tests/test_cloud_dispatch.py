@@ -828,6 +828,30 @@ def test_an_identical_retry_finishes_a_start_that_died_before_its_initialization
     assert world.cli("orchestrate", "--run", "r1", "--once", "--root", str(world.root))[0] == 0
 
 
+@pytest.mark.parametrize("symbolic", [False, True])
+def test_unconfirmed_integration_ref_advice_never_names_a_command_that_follows_a_symbolic_ref(
+        world: World, capsys: pytest.CaptureFixture, symbolic: bool) -> None:
+    assert world.start(tasks=[T1])[0] == 0
+    ref = L.integration_ref("r1")
+    L.locked_update(L.run_ledger_path(world.root, "r1"), lambda d: (d.pop("initialized"), d.pop("integration_ref_created"), d)[2])
+    if symbolic:
+        run_git(world.root, "update-ref", "refs/heads/victim", world.base)
+        run_git(world.root, "update-ref", "--no-deref", "-d", ref)
+        run_git(world.root, "symbolic-ref", ref, "refs/heads/victim")
+    capsys.readouterr()
+    rc, out = world.cli("start", "--run", "r1", "--tasks", world.tasks_file([T1], "same.json"), "--policy", "auto",
+                        "--root", str(world.root))
+    out += capsys.readouterr().err
+    assert rc == 78 and "INTEGRATION_REF_UNCONFIRMED" in out, out
+    assert "update-ref -d" not in out, out  # that form follows a symbolic ref and deletes its target
+    if symbolic:
+        assert "symbolic ref to refs/heads/victim" in out and "git symbolic-ref --delete %s" % ref in out, out
+        assert "update-ref" not in out, out
+    else:
+        assert "git update-ref --no-deref -d %s %s" % (ref, world.base) in out, out
+    assert run_git(world.root, "rev-parse", "refs/heads/victim" if symbolic else ref) == world.base
+
+
 def test_start_over_a_dangling_symbolic_ref_creates_no_branch_behind_it(world: World) -> None:
     run_git(world.root, "symbolic-ref", "refs/heads/ffs/cloud/r1/integration", "refs/heads/victim")  # dangling
     world.start(tasks=[T1])
