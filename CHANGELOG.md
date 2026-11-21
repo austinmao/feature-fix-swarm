@@ -8,6 +8,52 @@ all skills.
 
 ## Unreleased
 
+### Changed (2026-11-20, review-gate runs helpers from the base ref)
+
+- review-gate 1.19.0 no longer executes FFS helper code from the tree it reviews.
+  Each fence evaluates the new `scripts/gsd/trusted-runtime.sh` as committed on the
+  merge-base with `origin/main` (else local `main`), which copies `lib/`, `scripts/` and
+  `skills/` from that commit into a temporary directory. `adversary-host.sh`,
+  `review-tier.sh`, `socratic-slice.sh`, `gates.py` and `clean_code_metrics.py` then
+  run from that copy, so a branch that edits them cannot change its own review. The
+  `gates.py` ladder is now the base-ref copy, then `~/.claude/lib/feature-fix-swarm/`.
+  Without an FFS runtime on the base ref, the pre-check stops the review.
+- The Pass 3 metrics advisory is computed and printed in the Capture-diff block,
+  so it no longer depends on shell variables surviving between blocks (#284).
+- `setup.sh --reconcile-consumer` now ships `lib/clean_code_metrics.py` (#290).
+
+### Added (2026-11-19, clean-code metrics advisory)
+
+- `lib/clean_code_metrics.py`: review-gate Pass 3 now gets an advisory block when
+  the optional `crapper` and `dryer` tools are installed. It reports functions whose
+  cyclomatic complexity is new or grew to 10 or more, and duplicate blocks
+  (similarity at least 0.8) that touch the diff. Tool output goes to a temporary
+  directory, and one 90-second budget bounds the whole run. Findings are at most
+  MEDIUM and never block. Absent tools print nothing.
+- `scripts/gsd/deps.sh` lists both tools as optional; `docs/dependencies.md`
+  documents where FFS finds them (`PATH`, `FFS_UB_TOOLS_DIR`, `~/.local/share/ub-mode`).
+
+### Changed (2026-11-19, write-time clean-code rules)
+
+- gsd executors now load `testing-policy` through `agent_skills.gsd-executor` in
+  `templates/gsd-config.base.json` (gsd-core self-load; user- and project-scope paths,
+  resolves on Claude and Codex). Only newly seeded projects get it: spec-decompose
+  skips seeding when `.planning/PROJECT.md` exists, so an existing
+  `.planning/config.json` needs the `agent_skills` entry added by hand (#286).
+  New `testing-policy` §7 gives the executor five rules before it writes: one decision
+  in one place, subtract before adding, check data where it enters, fix the cause,
+  and keep new functions under cyclomatic complexity 10. The "mock-call counts"
+  anti-pattern now reads "would still pass if the code returned nothing".
+- `/feature-implement --adhoc` appends the §7 rules to the `/gsd-quick` task string,
+  because adhoc runs have no seeded config.
+- The plan wall also flags steps that add a new path beside an old one without
+  naming the old path they retire.
+- Removed duplicated helpers found by a duplication scan: authority table checks and
+  decision enumeration (`run_state/state.py`), the duplicate-key JSON hook
+  (`gsd_wave_bridge.py`), review-output parsing (`spec_review.py`), the retained-event
+  lookup (`repair_integration.py`) and the test-seam hold (`gates.py`). Behavior is
+  pinned by `tests/test_dedupe_characterization.py`.
+
 ### Changed (2026-11-19, model tier refresh)
 
 - Tier table moved to the GPT-6 family releases (6.2 frontier and judgment, 6.1

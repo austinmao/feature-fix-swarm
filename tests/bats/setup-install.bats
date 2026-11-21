@@ -32,6 +32,8 @@ setup() {
   cmp -s lib/process_identity.py "$target/lib/process_identity.py"
   cmp -s lib/gates.py "$target/lib/gates.py"
   cmp -s lib/runtime_proof.py "$target/lib/runtime_proof.py"
+  cmp -s lib/clean_code_metrics.py "$target/lib/clean_code_metrics.py"
+  cmp -s scripts/gsd/trusted-runtime.sh "$target/scripts/gsd/trusted-runtime.sh"
   cmp -s scripts/hooks/credential-output-guard.sh "$target/scripts/hooks/credential-output-guard.sh"
 }
 
