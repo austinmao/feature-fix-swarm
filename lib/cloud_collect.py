@@ -621,9 +621,17 @@ _NPM_HARMLESS = frozenset([
 ])
 _NAME_SPLIT = re.compile(r"[<>=!~;\[\s@(]")
 _NPM_REGISTRY_SPEC = re.compile(r"^[A-Za-z0-9.^~<>=*|\s-]*$")  # semver range or dist-tag; no ':' or '/'
+# Linear-time by construction: every character is matched by exactly one alternative, so a failing match never
+# backtracks over competing splits (adjacent \s* runs, an optional "=" that "[^;@\s,]*" also matches, and "[^#]*"
+# overlapping the --hash tokens are what made the one-line form polynomial/exponential on adversarial input).
+# Reads as: name[extras], optional comma-separated version specs, then either ";marker" (a "#" may appear only
+# inside a trailing --hash token) or only --hash tokens.
+_REQ_SPEC = r"[<>=!~][^;@\s,]*"
 _REQ_REGISTRY_LINE = re.compile(
-    r"^[A-Za-z0-9][A-Za-z0-9._-]*(\[[A-Za-z0-9,._-]*\])?\s*"
-    r"(?:[<>=!~]=?[^;@\s,]*(?:\s*,\s*[<>=!~]=?[^;@\s,]*)*)?\s*(?:;[^#]*)?(?:\s+--hash=\S+)*\s*$")
+    r"^[A-Za-z0-9][A-Za-z0-9._-]*(?:\[[A-Za-z0-9,._-]*\])?"
+    r"(?:\s*" + _REQ_SPEC + r"(?:\s*,\s*" + _REQ_SPEC + r")*)?"
+    r"(?:\s*;(?:[^#]*$|[^#]*\s--hash=[^#\s]*#\S*(?:\s+--hash=\S+)*\s*$)"
+    r"|(?:\s+--hash=\S+)*\s*$)")
 
 
 _LOCK_FOLDED = frozenset(n.casefold() for n in _LOCK_NAMES)

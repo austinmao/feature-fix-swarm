@@ -282,6 +282,8 @@ adversary_invoke() {
     }
     local -a schema_args=()
     [ -n "$schema_file" ] && schema_args=(--output-schema "$schema_file")
+    # Expanded below as ${schema_args[@]+"${schema_args[@]}"}: bash 3.2 (macOS
+    # /bin/bash) treats a bare "${empty[@]}" as unbound under the caller's set -u.
     # Codex has no Claude-style `--tools ''` flag. Disable every built-in
     # agentic tool family supported by the pinned CLI, run from a disposable
     # empty directory, and retain the read-only sandbox as defense in depth.
@@ -300,7 +302,7 @@ adversary_invoke() {
       --disable image_generation \
       -C "$data_dir" --skip-git-repo-check \
       --color never --output-last-message "$last_message" \
-      "${schema_args[@]}" \
+      ${schema_args[@]+"${schema_args[@]}"} \
       - >"$transcript" 2>&1
     rc="${PIPESTATUS[1]}"
     if [ "$rc" -eq 0 ] && [ -s "$last_message" ]; then

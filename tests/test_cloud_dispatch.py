@@ -858,7 +858,8 @@ def test_unconfirmed_integration_ref_advice_withholds_a_symbolic_target_the_scan
     assert world.start(tasks=[T1])[0] == 0
     ref = L.integration_ref("r1")
     L.locked_update(L.run_ledger_path(world.root, "r1"), lambda d: (d.pop("initialized"), d.pop("integration_ref_created"), d)[2])
-    secret_target = "refs/heads/AKIAIOSFODNN7EXAMPLE"  # a name the secret scanner flags
+    secret = cloud_scan.canary("aws-access-key").decode("ascii")  # a name the secret scanner flags, built at runtime
+    secret_target = "refs/heads/" + secret
     run_git(world.root, "update-ref", secret_target, world.base)
     run_git(world.root, "update-ref", "--no-deref", "-d", ref)
     run_git(world.root, "symbolic-ref", ref, secret_target)
@@ -867,7 +868,7 @@ def test_unconfirmed_integration_ref_advice_withholds_a_symbolic_target_the_scan
                         "--root", str(world.root))
     out += capsys.readouterr().err
     assert rc == 78 and "INTEGRATION_REF_UNCONFIRMED" in out, out
-    assert "AKIAIOSFODNN7EXAMPLE" not in out, out
+    assert secret not in out, out
     assert "symbolic ref to [withheld sha256:" in out and "git symbolic-ref --delete %s" % ref in out, out
 
 
@@ -2747,3 +2748,13 @@ def test_doctor_with_an_unreadable_working_tree_config_still_reports_the_history
     finally:
         config_path.chmod(0o644)
     assert check["level"] == "FAIL" and check["data"]["findings_total"] == 1
+
+
+def test_undeclared_secret_entries_are_located_never_echoed() -> None:
+    pasted = "ghp_" + "A1b2C3d4E5f6G7h8I9j0K1l2"  # a value pasted where a name belongs, built at runtime
+    config = {"secrets": {"exposure": {"claude": ["API_TOKEN"], "codex": []}}}
+    tasks = [{"id": "t1", "needs_secrets": ["API_TOKEN"]}, {"id": "t2", "needs_secrets": ["API_TOKEN", pasted, "OTHER"]}]
+    check = cd._secret_declared_check(config, tasks)
+    assert check.level == cd.FAIL and pasted not in check.detail and "OTHER" not in check.detail, check.detail
+    assert "2 needs-secret entries" in check.detail and "task 2 entry 2" in check.detail and "task 2 entry 3" in check.detail
+    assert cd._secret_declared_check(config, tasks[:1]).level == cd.OK
