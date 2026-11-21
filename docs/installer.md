@@ -50,6 +50,8 @@ no repo-local copy shadows them. These are manifest-tracked like skills, so
 `--doctor` flags a drifted/stale copy and `--uninstall` removes them.
 `--reconcile-consumer` likewise ships `lib/gates.py` and
 `lib/runtime_proof.py` so vendored consumers stop running stale gate logic.
+review-gate runs these helpers from a copy of the merge-base with `origin/main` (else `main`), never
+from the reviewed working tree, so commit the reconciled runtime to `main`.
 
 A pre-existing hand-copied file at the managed path (the old workaround for
 this gap) is an unmanaged collision: the install blocks and preserves it
