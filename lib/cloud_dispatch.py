@@ -1275,8 +1275,7 @@ def cmd_start(svc: Services, args: argparse.Namespace) -> int:
             raise
         raise _run_exists(svc, root, run, raw, args.sequential)  # lost the race: another start holds or made the run
     svc.emit("%sstarted run=%s tasks=%d" % (PREFIX, run, len(records)))
-    if local:
-        svc.emit("%slocal tasks=%s" % (PREFIX, ",".join(local)))
+    svc.emit("%slocal tasks=%s" % (PREFIX, ",".join(local)))  # always printed: an absent line is "unparseable", not "none"
     if args.foreground:
         return Orchestrator(svc, root, run).run()
     pid = svc.spawn(orchestrator_argv(root, run, resume=False), ledger.run_dir(root, run) / "orchestrate.log", root)

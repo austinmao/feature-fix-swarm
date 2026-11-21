@@ -1,7 +1,7 @@
 ---
 name: swarm
 description: "Ad-hoc parallel task executor. Pass natural language tasks directly (or --tasks-file); independent tasks use concurrent host-native volume/execution/judgment roles and dependent tasks run serially. No spec directory required; use feature-implement for full-feature work."
-version: "2.2.4"
+version: "2.2.5"
 permissions:
   filesystem: write
   network: true
@@ -68,7 +68,17 @@ Otherwise skip it entirely and continue below exactly as before.
    - Autonomous or headless run: never self-grant. Rely on grants that already
      exist; `start` refuses when one is missing.
 5. **Start cloud groups.** `bash scripts/gsd/cloud-dispatch.sh start --run <run> --tasks FILE --policy P --root "$(git rev-parse --show-toplevel)"`.
-   Run every local group exactly as Step 2 does today.
+   On exit 0 it prints `CLOUD:started run=<run> tasks=N` and then
+   `CLOUD:local tasks=<ids>`: the comma-separated ids of every task it routed
+   locally, empty when there are none. `start` routes again, and under `auto`
+   host pressure can move a task between the plan and `start`, so the plan's
+   local groups may be stale. Run locally exactly the ids in `CLOUD:local tasks=`
+   (grouped as Step 2 does today), never from the plan, and never a task that
+   line does not name. An empty value means run no local task. If `start`
+   exited 0 but that line is missing or cannot be parsed, run no local task,
+   report the run id, and tell the operator the local list is unknown.
+   If `plan` itself exits 3 (`CLOUD-REFUSED: SECRET_IN_PROMPT`: a task id looks
+   like a secret), relay the line and treat it as a refusal as in step 6.
 6. **Refusals.** Exit code 3 means refused. Relay the `CLOUD-REFUSED:` line.
    Under `auto` or `prefer`, continue with every task locally; under
    `required`, stop. **Exception: `CLOUD-REFUSED: RUN_EXISTS`** is not a

@@ -155,3 +155,12 @@ def test_swarm_run_exists_is_reconciled_and_never_runs_cloud_tasks_locally():
         assert token in step, token
     assert "without the operator's confirmation" in step and "`local=`" not in step
     assert "compare its task ids with this batch" not in step
+
+
+def test_swarm_runs_local_tasks_only_from_the_start_output_never_from_the_plan():
+    """Under `auto` start re-routes: a task the plan showed as local may be cloud by then (and the reverse)."""
+    text = (ROOT / SWARM).read_text(encoding="utf-8")
+    block = text[text.index(BEGIN):text.index(END)]
+    step = block[block.index("5. **Start cloud groups.**"):block.index("6. **Refusals.**")]
+    assert "`CLOUD:local tasks=`" in step and "never from the plan" in step
+    assert "empty" in step and "run no local task" in step and "report" in step

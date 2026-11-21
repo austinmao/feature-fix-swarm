@@ -1113,6 +1113,13 @@ def test_an_identical_retry_restarts_an_orchestrator_that_never_started(world: W
     assert world.spawned == []
 
 
+def test_start_always_prints_the_local_task_list_even_when_it_is_empty(world: World) -> None:
+    """The skill dispatches locally only the ids of this line: an absent line must mean "unparseable", never "none"."""
+    rc, out = world.start(tasks=[T1])
+    assert rc == 0 and "CLOUD:local tasks=" in out.splitlines(), out
+    assert out.splitlines().index("CLOUD:started run=r1 tasks=1") < out.splitlines().index("CLOUD:local tasks=")
+
+
 def test_the_local_claim_is_persisted_before_the_local_ids_are_first_emitted(world: World) -> None:
     """A retry used to hand the original local list back, so a local task the first caller had already started ran twice."""
     local = task("t2", "src/b/**", local_only=True, local_reason="touches secrets")
