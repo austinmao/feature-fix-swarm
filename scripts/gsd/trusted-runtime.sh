@@ -1,3 +1,4 @@
+#!/usr/bin/env bash
 # trusted-runtime.sh — review-gate fences eval this file as committed on the base
 # ref. ffs_trusted_runtime <ref> copies lib/, scripts/ and skills/ of the FFS
 # runtime at <ref> (packaged or flat layout) into a temp dir and sets FFS_T; on
