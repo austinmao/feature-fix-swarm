@@ -70,8 +70,10 @@ def _resolve_base(root: Path, ci: bool) -> str:
     The pre-cloud commit is the parent of the oldest commit in `merge-base..HEAD` that adds lib/cloud_dispatch.py, so
     unrelated commits beneath the cloud work (e.g. a model-tier refresh that edits skills) are not counted as cloud
     differences. A later merge of the base branch into the cloud branch moves it: only a merge parent that is the
-    declared stacked base (or one of its ancestors), carries no cloud work and descends from the pre-cloud commit is
-    accepted. An unrelated cloud-free topic merged in does not qualify, because its text was never the base. All
+    declared base (or one of its ancestors) and carries no cloud work is accepted. While the stacked ref exists the
+    parent must also descend from the pre-cloud commit, so an unrelated cloud-free topic merged in does not qualify
+    (its text was never the base). Once the stacked base has landed and its ref is gone, `pre` sits on the old line and
+    is no longer an ancestor of the squash commit on main, so that descent check is not applied. All
     merges in range are considered, newest first (a synthetic PR merge puts the branch's own merges off the
     first-parent chain); otherwise the pre-cloud commit stands."""
     def git(*args: str) -> str:
@@ -99,7 +101,7 @@ def _resolve_base(root: Path, ci: bool) -> str:
         clean = [
             p for p in line.split()
             if not git_ok("cat-file", "-e", f"{p}:lib/cloud_dispatch.py")
-            and git_ok("merge-base", "--is-ancestor", pre, p)
+            and (declared != STACKED_REF or git_ok("merge-base", "--is-ancestor", pre, p))
             and git_ok("merge-base", "--is-ancestor", p, declared)
         ]
         if len(clean) == 1:
@@ -365,3 +367,40 @@ def test_a_history_with_no_cloud_work_anywhere_fails_in_ci(tmp_path: Path) -> No
         _resolve_base(repo, ci=False)
     with pytest.raises(pytest.fail.Exception):
         _resolve_base(repo, ci=True)
+
+
+def test_a_synthetic_pr_merge_puts_the_stacked_tip_on_the_first_parent_and_still_resolves_to_it(tmp_path: Path) -> None:
+    ids = _history(tmp_path, merge_stacked=False, merge_unrelated=False)
+    repo = Path(ids["repo"])
+    _g(repo, "checkout", "-q", "-b", "synthetic", ids["stacked"])
+    _g(repo, "merge", "-q", "--no-ff", "-m", "synthetic PR merge", "cloud")
+    assert _resolve_base(repo, ci=False) == ids["stacked"]
+    assert _resolve_base(repo, ci=True) == ids["stacked"]
+
+
+def test_a_stacked_base_squash_merged_into_main_with_its_ref_gone_resolves_to_the_squash_commit(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _g(repo, "init", "-q", "-b", "main")
+    skill = "line one\nline two\nline three\n"
+    root = _commit(repo, {"skills/swarm/SKILL.md": skill}, "base")
+    _g(repo, "update-ref", "refs/remotes/origin/main", root)
+    # the stacked base edits line one; the cloud work is cut from it, so the pre-cloud commit is on that line
+    _g(repo, "checkout", "-q", "-b", "stacked")
+    tiered = skill.replace("one", "tiered")
+    stacked = _commit(repo, {"skills/swarm/SKILL.md": tiered}, "stacked base edit")
+    _g(repo, "update-ref", "refs/remotes/origin/chore/model-tiers-6-2", stacked)
+    _g(repo, "checkout", "-q", "-b", "cloud")
+    _commit(repo, {"lib/cloud_dispatch.py": "# cloud\n"}, "add the dispatcher")
+    # main moves on, then the stacked base lands as ONE squash commit that is not a descendant of `stacked`
+    _g(repo, "checkout", "-q", "main")
+    _commit(repo, {"skills/swarm/SKILL.md": skill.replace("three", "later main edit")}, "later main edit")
+    landed = _commit(repo, {"skills/swarm/SKILL.md": tiered.replace("three", "later main edit")}, "squash: stacked base")
+    _g(repo, "update-ref", "refs/remotes/origin/main", landed)
+    _g(repo, "update-ref", "-d", "refs/remotes/origin/chore/model-tiers-6-2")  # branch deleted on merge
+    # the operator merges main into the cloud branch
+    _g(repo, "checkout", "-q", "cloud")
+    _g(repo, "merge", "-q", "--no-ff", "-m", "merge main", "main")
+    assert not _git_ok_in(repo, "merge-base", "--is-ancestor", stacked, landed)  # the squash does not contain it
+    assert _resolve_base(repo, ci=False) == landed
+    assert _resolve_base(repo, ci=True) == landed
