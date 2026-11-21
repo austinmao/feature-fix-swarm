@@ -45,6 +45,15 @@ def base() -> str:
     ).split()
     if not adders:
         return merge_base
+    # A later merge of the base branch into the cloud branch moves the baseline:
+    # the newest merged-in (second) parent on the first-parent chain after the
+    # cloud work began is the non-cloud text the skills must still equal.
+    merged = _git(
+        "log", "--first-parent", "--merges", "--format=%P", f"{adders[0]}..HEAD",
+    ).split("\n")
+    for parents in merged:
+        if len(parents.split()) >= 2:
+            return parents.split()[1]
     return _git("rev-parse", f"{adders[0]}^").strip()
 
 
