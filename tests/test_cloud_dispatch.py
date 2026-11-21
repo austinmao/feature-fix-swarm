@@ -2036,6 +2036,44 @@ def test_pushed_new_ref_needs_the_new_ref_flag_for_that_destination() -> None:
     assert not cd.pushed_new_ref("", ref)
 
 
+def test_a_retry_after_a_failed_push_keeps_the_proof_that_the_run_created_the_local_branch(world: World) -> None:
+    """The first attempt makes the local task branch and its push fails; the retry then finds the branch already present.
+    The creation is journaled before the push, so cleanup still removes what this run made."""
+    ref = L.task_branch_ref("r1", "t1", 1)
+    real_run, seen = world.svc.run, {}
+
+    def failing_first_push(argv: Any, **kwargs: Any) -> Any:
+        if "push" in argv and "--porcelain" in argv and "pushed" not in seen:
+            seen["pushed"] = True
+            journal = [j for j in world.doc()["journal"] if j["op"] == "admit"]
+            seen["proof_before_push"] = [j.get("created") for j in journal]
+            return cd.CmdResult(1, b"", b"rejected")
+        return real_run(argv, **kwargs)
+
+    world.svc.run = failing_first_push  # type: ignore[assignment]
+    assert world.start(tasks=[T1])[0] == 0
+    world.drive()
+    assert seen["proof_before_push"] == [{"local": True}], seen  # on the ledger already, with the push still to come
+    assert run_git(world.origin, "rev-parse", ref) == world.base  # the retry pushed it
+    admits = [j for j in world.doc()["journal"] if j["op"] == "admit"]
+    assert admits and admits[-1]["created"] == {"local": True, "remote": True}, admits
+    rc, out = world.cli("cleanup", "--run", "r1", "--discard-unmerged", "--root", str(world.root))
+    assert rc == 0 and "creation not confirmed" not in out, out
+    assert run_git(world.root, "for-each-ref", "refs/heads/ffs/cloud/r1/") == ""
+
+
+def test_a_local_branch_that_existed_before_the_run_is_never_credited_to_it(world: World) -> None:
+    ref = L.task_branch_ref("r1", "t1", 1)
+    run_git(world.root, "update-ref", ref, world.base)  # somebody's own branch, at the base
+    assert world.start(tasks=[T1])[0] == 0
+    world.drive()
+    admits = [j for j in world.doc()["journal"] if j["op"] == "admit"]
+    assert admits and "local" not in (admits[-1].get("created") or {}), admits
+    rc, out = world.cli("cleanup", "--run", "r1", "--discard-unmerged", "--root", str(world.root))
+    assert rc == 0 and "CLOUD:cleanup-kept ref=%s (creation not confirmed)" % ref in out, out
+    assert run_git(world.root, "rev-parse", ref) == world.base
+
+
 def test_cleanup_keeps_the_integration_ref_when_the_ledger_never_confirmed_creating_it(world: World) -> None:
     assert world.start(tasks=[T1])[0] == 0
     world.drive()

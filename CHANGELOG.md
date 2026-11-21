@@ -27,6 +27,13 @@ all skills.
   `INTEGRATION_REF`, or `INTEGRATION_REF_UNCONFIRMED` (exit 78) when an identical
   retry of a crashed start finds one. Runs started by an earlier build have no
   proof, so `cleanup` keeps their refs.
+- The admit journal now records that the run created the local task branch right
+  after the update-ref and before the push, and a retry after a failed push keeps
+  that proof, so `cleanup` removes the branch instead of printing `creation not
+  confirmed`. The remote proof still needs a push that reports a new ref
+  (`git push --porcelain`, flag `*`): another clone that created the branch first
+  makes the push "up to date" and leaves the ref to its owner. A remote branch
+  whose creation acknowledgement was lost is still kept. `/swarm` skill 2.2.7.
 - The `INTEGRATION_REF_UNCONFIRMED` (exit 78) message no longer suggests
   `git update-ref -d <ref>`, which follows a symbolic ref and deletes its target.
   For a symbolic ref it says to inspect the target and remove only the symbolic

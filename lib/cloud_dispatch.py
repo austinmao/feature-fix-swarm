@@ -1365,6 +1365,16 @@ def _finish_start(svc: Services, root: Path, run: str) -> None:
             _initialize_run(svc, root, run, doc["integration"]["tip"], fresh=False)
 
 
+def _merge_created(doc: Dict[str, Any], seq: int, flags: Dict[str, bool]) -> Dict[str, Any]:
+    """Add the ``True`` creation proofs in ``flags`` to the journal entry ``seq``; a proof is never taken back."""
+    for entry in doc.get("journal", []):
+        if entry.get("seq") == seq:
+            merged = dict(entry.get("created") or {})
+            merged.update({key: True for key, value in flags.items() if value is True})
+            entry["created"] = merged
+    return doc
+
+
 class _RestartFailed(Exception):
     """The spawn of a restarted orchestrator raised ``OSError``; ``cause`` is its errno name only (never the message,
     which can carry a path or a command line)."""
@@ -3057,7 +3067,12 @@ class Orchestrator:
             return
         if existing is None and not git(self.svc, self.root, ["update-ref", "--no-deref", ref, base_oid, ""]).ok:
             raise StoreError("TASK_BRANCH", "cannot create %s" % ref)
-        created = {"local": existing is None, "remote": False}  # creation proof, recorded once the push is confirmed
+        if existing is None and not self.record_created(name, gen, seq, {"local": True}):
+            return  # the local branch is journaled as ours before anything else can fail; a stale task drops the step
+        prior = next((j.get("created") or {} for j in doc.get("journal", []) if j.get("seq") == seq), {})
+        # a retry after a failed push finds the branch it made itself: the proof journaled by the attempt that made it stands
+        created = {"local": existing is None or prior.get("local") is True,
+                   "remote": False}  # the remote proof is recorded once the push is confirmed
         findings = self.outbound_findings(doc, entry["provider"], base_oid)
         if findings:
             self.to_operator(name, gen, ledger.B_SCAN_REFUSED, ["outbound scan refused the push: " + ", ".join(findings)], seq)
@@ -3084,6 +3099,10 @@ class Orchestrator:
             return
         self.finish_admit(name, gen, base_oid, seq, created)
 
+    def record_created(self, name: str, gen: int, seq: int, flags: Dict[str, bool]) -> bool:
+        """Journal, at once, a creation proof for the admit entry ``seq``; ``False`` when the task moved on."""
+        return self.apply(name, gen, lambda d: _merge_created(d, seq, flags), "creation-proof")
+
     def push_failed(self, name: str, gen: int, ref: str, rc: int, seq: int, why: str = "") -> None:
         """Count a failed admit push in the ledger; after ``PUSH_FAILURE_LIMIT`` attempts the task needs an
         operator (``push-failed``, visible in status) instead of retrying silently forever."""
@@ -3106,9 +3125,7 @@ class Orchestrator:
         settles the admit, i.e. after the push was confirmed; a replay passes none, so its refs are never cleanup-owned."""
         def settle(d: Dict[str, Any]) -> Dict[str, Any]:
             if created and any(created.values()):
-                for entry in d.get("journal", []):
-                    if entry.get("seq") == seq:
-                        entry["created"] = dict(created)
+                _merge_created(d, seq, created)
             return ledger.transition(d, name, ledger.EV_DEPS_MET, generation=gen, journal_seq=seq, base_oid=base_oid,
                                      task_branch_oid=base_oid)
 
