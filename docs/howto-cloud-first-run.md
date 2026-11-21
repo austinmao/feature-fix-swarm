@@ -317,7 +317,12 @@ bash scripts/gsd/cloud-dispatch.sh cleanup --run <run> [--remote]
 
 `cleanup` deletes only the `ffs/cloud/<run>/*` refs the ledger accounts for, each
 only at its recorded OID, then the run state. A ref with no recorded OID is kept
-and printed `CLOUD:cleanup-kept ref=... (reason)`. A ref that moved ends
+and printed `CLOUD:cleanup-kept ref=... (reason)`. A ref the ledger has no proof this run created is also kept, as
+`(creation not confirmed)`. A local task branch is journaled as created right after the run makes it, so
+it is cleaned up even after a failed push and retry. What can still be kept: a remote branch whose
+creation acknowledgement was lost, a remote branch another clone created first, and a local branch
+when the process died before journaling it. Delete such a ref by hand before reusing the run id.
+A ref that moved ends
 `CLEANUP_INCOMPLETE` and keeps the ledger so a rerun can finish. `--remote`
 deletes the pushed task branches with a lease on the recorded OID, never a
 remote `integration` branch, and needs the push grant. It never deletes the
@@ -373,14 +378,14 @@ Refusals (`CLOUD-REFUSED`, exit 3):
 | `TOKEN_BUDGET` | `GSD_TOKEN_BUDGET` is set. The run stays local. |
 | `DIRTY_BASE` | Tracked files are modified. Commit or stash them. |
 | `NO_BASE` | The repository has no commit at HEAD. |
-| `RUN_EXISTS` | The run id already has a ledger, usually a retry after a lost acknowledgement. The tasks may already be running. Read `status --run <run>`; do not start them under a new id. The line ends `batch=same` (optionally `local-claimed=<ids>`), `batch=other` or `batch=unknown`, and may add `orchestrator=restarted`. |
+| `RUN_EXISTS` | The run id already has a ledger, usually a retry after a lost acknowledgement. The tasks may already be running. Read `status --run <run>`; do not start them under a new id. The line ends `batch=same` (optionally `local-claimed=<ids>`), `batch=other` or `batch=unknown`, and may add `orchestrator=restarted` or `orchestrator=restart-failed cause=<ERRNO>` (the restart spawn raised `OSError`; `cause` is the errno name, or `OSERROR` when there is none, never the message). After `restart-failed`, `/swarm` reports the cause and stops: it runs no `reconcile.sh`, no local task and no cloud task. Fix the cause, then repeat the identical `start` once. |
 | `RUN_NOT_INITIALIZED` | `orchestrate` found a run with no initialization record. Retry the identical `start`; a run from an earlier build cannot be finished. |
 | `NO_CLOUD_TASKS` | Nothing routes to the cloud. Read the reason codes in step 4. |
 | `CLOUD_REQUIRED_NOT_ELIGIBLE` | Policy is `required` and a group cannot go to the cloud. Fix the task, or use `auto` or `prefer`. |
 | `GRANT_MISSING` | A `cloud-dispatch:<provider>` or `push:origin/ffs/cloud/<run>` grant is missing. Grant it (step 6). |
 | `EXPOSURE_NOT_GRANTED` | A `secret-use:<NAME>` grant is missing. Grant it, or empty `secrets.exposure`. |
 | `GRANT_STORE_ERROR` | `gates.py check-grant` failed in an unexpected way. |
-| `SECRET_IN_PROMPT`, `SECRET_IN_PACKET` | The task text or worker packet matched the secret scanner. Remove the secret-shaped text. |
+| `SECRET_IN_PROMPT`, `SECRET_IN_PACKET` | The task text or worker packet matched the secret scanner. Remove the secret-shaped text. For `/swarm`, `SECRET_IN_PROMPT` from `plan` or `start` ends the invocation: nothing runs, cloud or local, under `auto`, `prefer`, `required` and `--dry-run`. |
 | `PACKET_INVALID` | The worker packet could not be built, for example an invalid `secrets.wrapper`. |
 | `RUN_NOT_DONE` | `cleanup` only removes `done` runs. |
 | `CLEANUP_INCOMPLETE` | Some refs moved off their recorded OID or could not be deleted. The ledger is kept. Fix the cause (delete a foreign remote ref by hand) and rerun `cleanup`. |
@@ -400,7 +405,12 @@ Usage errors (`CLOUD-ERROR` or argparse text on stderr, exit 2):
 
 Store and internal errors (`CLOUD-ERROR`, exit 78) include `TEMPLATES_MISSING`
 (no templates next to the library; reinstall), `SETTINGS_INVALID` (`.claude/settings.json`
-is not a JSON object) and `HOOK_API_MISSING`.
+is not a JSON object), `HOOK_API_MISSING` and `INTEGRATION_REF_UNCONFIRMED` (an identical
+retry of a crashed `start` found the integration ref it left behind and cannot tell it is its
+own). `start` prints it on stderr and exits 78. `/swarm` relays it, runs no task (cloud or
+local) and stops. Inspect the ref the message names before another `start`: for a symbolic
+ref, remove only the symbolic ref (`git symbolic-ref --delete <ref>`); for a plain ref, the
+message prints `git update-ref --no-deref -d <ref> <oid>`.
 
 ### Launch problems
 

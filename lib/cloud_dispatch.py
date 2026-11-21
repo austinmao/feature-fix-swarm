@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import copy
+import errno
 import fcntl
 import hashlib
 import json
@@ -469,6 +470,16 @@ def is_ancestor(svc: Services, root: Path, ancestor: str, descendant: str) -> bo
 
 def remote_env() -> Dict[str, str]:
     return cloud_host.child_env()
+
+
+def pushed_new_ref(porcelain: str, ref: str) -> bool:
+    """True when ``git push --porcelain`` output reports ``ref`` as a newly created destination (flag ``*``).
+    An up-to-date (``=``) or otherwise reported ref leaves creation unconfirmed."""
+    for line in porcelain.splitlines():
+        parts = line.split("\t")
+        if len(parts) >= 3 and parts[0] == "*" and parts[1].partition(":")[2] == ref and parts[2].startswith("[new "):
+            return True
+    return False
 
 
 def ls_remote(svc: Services, url: str, pattern: str) -> Tuple[bool, Dict[str, str]]:
@@ -1310,6 +1321,17 @@ def _mark_initialized(doc: Dict[str, Any]) -> Dict[str, Any]:
     return doc
 
 
+def _integration_ref_removal_advice(svc: Services, root: Path, ref: str, oid: str) -> str:
+    """How an operator may remove a leftover integration ref without touching anything else.  A symbolic ref is
+    followed by ``rev-parse`` and by a plain ``update-ref -d``, so for one the advice is to inspect the target and
+    remove only the symbolic ref; a plain ref is deleted with ``--no-deref`` at the inspected OID."""
+    target = git(svc, root, ["symbolic-ref", "-q", ref])
+    if target.ok:
+        return ("it is a symbolic ref to %s: inspect that target, and remove only the symbolic ref itself "
+                "(`git symbolic-ref --delete %s`)" % (_listable(target.text().strip()) or "another ref", ref))
+    return "inspect it and delete it by hand (`git update-ref --no-deref -d %s %s`)" % (ref, oid)
+
+
 def _initialize_run(svc: Services, root: Path, run: str, tip: str, *, fresh: bool) -> None:
     """Create the integration ref and commit the initialization record (``initialized``), under the orchestrator lock.
 
@@ -1322,10 +1344,11 @@ def _initialize_run(svc: Services, root: Path, run: str, tip: str, *, fresh: boo
     created = git(svc, root, ["update-ref", "--no-deref", ref, tip, ""]).ok
     if not created:
         _release_reservation(root, run, tasks_written=True)
-        if not fresh and rev_parse(svc, root, ref) is not None:
+        found = rev_parse(svc, root, ref)
+        if not fresh and found is not None:
             raise StoreError("INTEGRATION_REF_UNCONFIRMED", "%s already exists and nothing proves this run created it "
-                             "(a crashed start, or another party); inspect it and delete it by hand "
-                             "(`git update-ref -d %s`), then start again" % (ref, ref))
+                             "(a crashed start, or another party); %s, then start again"
+                             % (ref, _integration_ref_removal_advice(svc, root, ref, found)))
         raise StoreError("INTEGRATION_REF", "could not create %s" % ref)
     try:
         ledger.locked_update(ledger.run_ledger_path(root, run), _mark_initialized)
@@ -1342,8 +1365,28 @@ def _finish_start(svc: Services, root: Path, run: str) -> None:
             _initialize_run(svc, root, run, doc["integration"]["tip"], fresh=False)
 
 
+def _merge_created(doc: Dict[str, Any], seq: int, flags: Dict[str, bool]) -> Dict[str, Any]:
+    """Add the ``True`` creation proofs in ``flags`` to the journal entry ``seq``; a proof is never taken back."""
+    for entry in doc.get("journal", []):
+        if entry.get("seq") == seq:
+            merged = dict(entry.get("created") or {})
+            merged.update({key: True for key, value in flags.items() if value is True})
+            entry["created"] = merged
+    return doc
+
+
 class _RestartFailed(Exception):
-    """The spawn of a restarted orchestrator raised ``OSError``."""
+    """The spawn of a restarted orchestrator raised ``OSError``; ``cause`` is its errno name, or the fixed token
+    ``OSERROR`` when it has none (never the message, which can carry a path or a command line)."""
+
+    def __init__(self, cause: str) -> None:
+        super().__init__(cause)
+        self.cause = cause
+
+
+def _errno_name(exc: OSError) -> str:
+    name = errno.errorcode.get(exc.errno) if isinstance(exc.errno, int) else None
+    return name if name and re.fullmatch(r"E[A-Z0-9]+", name) else "OSERROR"
 
 
 def _restart_unowned_run(svc: Services, root: Path, run: str) -> bool:
@@ -1356,7 +1399,7 @@ def _restart_unowned_run(svc: Services, root: Path, run: str) -> bool:
     try:
         svc.spawn(orchestrator_argv(root, run, resume=True), ledger.run_dir(root, run) / "orchestrate.log", root)
     except OSError as exc:  # no process was started and nothing was recorded: say so, never look like an ordinary retry
-        raise _RestartFailed(str(exc)) from exc
+        raise _RestartFailed(_errno_name(exc)) from exc
     return True
 
 
@@ -1369,8 +1412,8 @@ def _run_exists(svc: Services, root: Path, run: str, raw: List[Any], sequential:
             _finish_start(svc, root, run)
             if _restart_unowned_run(svc, root, run):
                 tokens += " orchestrator=restarted"
-        except _RestartFailed:  # the claims and the ledger are untouched: the same retry tries again
-            tokens += " orchestrator=restart-failed"
+        except _RestartFailed as exc:  # the claims and the ledger are untouched: the same retry tries again
+            tokens += " orchestrator=restart-failed cause=%s" % exc.cause
         except (Refused, ledger.LedgerError, OSError):
             pass  # busy (an in-flight start or a live orchestrator) or unreadable: the classification stands
     return Refused("RUN_EXISTS", "run %s already has a ledger: read it with `status --run %s`; never run its tasks "
@@ -3024,7 +3067,14 @@ class Orchestrator:
             return
         if existing is None and not git(self.svc, self.root, ["update-ref", "--no-deref", ref, base_oid, ""]).ok:
             raise StoreError("TASK_BRANCH", "cannot create %s" % ref)
-        created = {"local": existing is None, "remote": False}  # creation proof, recorded once the push is confirmed
+        if existing is None:
+            # Journaled as ours before anything else can fail.  The write carries no generation check (locked_update
+            # raises no stale code and _merge_created only adds a proof), and none is needed: this run made the ref.
+            self.record_created(name, gen, seq, {"local": True})
+        prior = next((j.get("created") or {} for j in doc.get("journal", []) if j.get("seq") == seq), {})
+        # a retry after a failed push finds the branch it made itself: the proof journaled by the attempt that made it stands
+        created = {"local": existing is None or prior.get("local") is True,
+                   "remote": False}  # the remote proof is recorded once the push is confirmed
         findings = self.outbound_findings(doc, entry["provider"], base_oid)
         if findings:
             self.to_operator(name, gen, ledger.B_SCAN_REFUSED, ["outbound scan refused the push: " + ", ".join(findings)], seq)
@@ -3034,19 +3084,27 @@ class Orchestrator:
             self.to_operator(name, gen, ledger.B_GRANT_MISSING, ["missing grant %s" % key], seq)
             return
         seen, seen_refs = ls_remote(self.svc, doc["origin_url"], ref)
-        created["remote"] = seen and ref not in seen_refs  # absent right before the push: this push creates it
-        pushed = self.svc.run(["git", "-C", str(self.root), "push", "--no-force", "--no-verify", "--no-follow-tags",
-                               "--recurse-submodules=no", doc["origin_url"],
+        absent_before = seen and ref not in seen_refs
+        pushed = self.svc.run(["git", "-C", str(self.root), "push", "--porcelain", "--no-force", "--no-verify",
+                               "--no-follow-tags", "--recurse-submodules=no", doc["origin_url"],
                                "%s:%s" % (base_oid, ref)], timeout=GIT_PUSH_TIMEOUT_S, env=remote_env())
         if not pushed.ok:
             self.push_failed(name, gen, ref, pushed.rc, seq)
             return
+        # Ownership needs the push itself to report a NEW ref for this destination: another clone with the same origin,
+        # run, task and base may have created it between the pre-check and this push, which then says "up to date" (=).
+        created["remote"] = absent_before and pushed_new_ref(pushed.text(), ref)
         self.svc.fault("after-admit-push")
         ok, refs = ls_remote(self.svc, doc["origin_url"], ref)
         if not ok or refs.get(ref) != base_oid:
             self.push_failed(name, gen, ref, 0, seq, "ls-remote did not confirm the push")
             return
         self.finish_admit(name, gen, base_oid, seq, created)
+
+    def record_created(self, name: str, gen: int, seq: int, flags: Dict[str, bool]) -> bool:
+        """Journal, at once, a creation proof for the admit entry ``seq``.  The merge raises no stale-task code, so this
+        is ``True`` unless the ledger itself fails (which propagates)."""
+        return self.apply(name, gen, lambda d: _merge_created(d, seq, flags), "creation-proof")
 
     def push_failed(self, name: str, gen: int, ref: str, rc: int, seq: int, why: str = "") -> None:
         """Count a failed admit push in the ledger; after ``PUSH_FAILURE_LIMIT`` attempts the task needs an
@@ -3070,9 +3128,7 @@ class Orchestrator:
         settles the admit, i.e. after the push was confirmed; a replay passes none, so its refs are never cleanup-owned."""
         def settle(d: Dict[str, Any]) -> Dict[str, Any]:
             if created and any(created.values()):
-                for entry in d.get("journal", []):
-                    if entry.get("seq") == seq:
-                        entry["created"] = dict(created)
+                _merge_created(d, seq, created)
             return ledger.transition(d, name, ledger.EV_DEPS_MET, generation=gen, journal_seq=seq, base_oid=base_oid,
                                      task_branch_oid=base_oid)
 

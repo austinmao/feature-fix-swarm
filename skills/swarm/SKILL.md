@@ -1,7 +1,7 @@
 ---
 name: swarm
 description: "Ad-hoc parallel task executor. Pass natural language tasks directly (or --tasks-file); independent tasks use concurrent host-native volume/execution/judgment roles and dependent tasks run serially. No spec directory required; use feature-implement for full-feature work."
-version: "2.2.6"
+version: "2.2.7"
 permissions:
   filesystem: write
   network: true
@@ -57,6 +57,13 @@ Otherwise skip it entirely and continue below exactly as before.
    one stays absent (the task then runs locally). Write the list to a temp
    file (`FILE`); `P` is the policy.
 2. **Plan.** Run `bash scripts/gsd/cloud-dispatch.sh plan --tasks FILE --policy P --with-doctor`.
+   If it exits 3 with `CLOUD-REFUSED: SECRET_IN_PROMPT` (a task id looks like a
+   secret), that is terminal for this invocation: relay the redacted refusal
+   line and STOP. Dispatch nothing, cloud or local, under `auto`, `prefer` and
+   `required` alike, and under `--dry-run`. Step 6's local fallback does not
+   apply: a retry of an already started run with an edited batch is refused here
+   before `start` can say `RUN_EXISTS`, and its unchanged tasks may be running in
+   the cloud.
 3. **`--dry-run`.** Print the plan table (groups, route, provider, reasons,
    refusals, preconditions) and STOP. Do not run the reconcile pass below, do
    not start anything, do not execute any task.
@@ -77,17 +84,23 @@ Otherwise skip it entirely and continue below exactly as before.
    line does not name. An empty value means run no local task. If `start`
    exited 0 but that line is missing or cannot be parsed, run no local task,
    report the run id, and tell the operator the local list is unknown.
-   If `plan` itself exits 3 (`CLOUD-REFUSED: SECRET_IN_PROMPT`: a task id looks
-   like a secret), relay the line and treat it as a refusal as in step 6.
+   If `start` exits 78, it printed `CLOUD-ERROR: <CODE> ...` on **stderr**
+   (for example `INTEGRATION_REF_UNCONFIRMED`: an identical retry found the
+   integration ref a crashed start left behind). Relay that stderr, run no task
+   (cloud or local) and stop for the operator to inspect what the message names.
+   Do not call `start` again until the operator has done so and says to proceed.
+   Step 6 does not apply: exit 78 is an error, not a refusal.
 6. **Refusals.** Exit code 3 means refused. Relay the `CLOUD-REFUSED:` line.
    Under `auto` or `prefer`, continue with every task locally; under
-   `required`, stop. **Exception: `CLOUD-REFUSED: RUN_EXISTS`** is not a
+   `required`, stop. **Exception: `CLOUD-REFUSED: SECRET_IN_PROMPT`** (from
+   `plan` or `start`) is terminal as in step 2: dispatch nothing, cloud or local.
+   **Exception: `CLOUD-REFUSED: RUN_EXISTS`** is not a
    refusal to offload. The run was already started (a retry after a lost
    acknowledgement, or a reused run id) and its tasks may be running in the
    cloud. Never run those tasks locally and never call `start` again for that
    run. The refusal line ends with `batch=same`, `batch=same local-claimed=<ids>`,
    `batch=other` or `batch=unknown`, optionally followed by
-   `orchestrator=restarted` or `orchestrator=restart-failed`: `start` itself compared this batch (every task id,
+   `orchestrator=restarted` or `orchestrator=restart-failed cause=<ERRNO>`: `start` itself compared this batch (every task id,
    cloud and local, its content, its dependencies and its order) with the whole
    batch the first attempt started. `batch=same` means an exact match; a
    superset, a subset or an edited batch is `batch=other`, and a run started by
@@ -95,15 +108,16 @@ Otherwise skip it entirely and continue below exactly as before.
    `batch=unknown`. On `batch=same`, `orchestrator=restarted` means `start`
    found no orchestrator for the run and started one. `orchestrator=restart-failed`
    means it found none and could not start one (a resource or filesystem
-   failure): the run is active with no orchestrator, `reconcile.sh` cannot fix
-   that, and the local claims stand. Report it to the operator with the run id
-   and the cause to fix; this is the one case in which the same `start` (same
-   run id, same tasks file) may be repeated, once the cause is fixed. Run no
-   local task meanwhile.
-   Run `bash scripts/gsd/cloud-dispatch.sh status --run <run> --json` and treat
+   failure; `cause=` is the errno name, or `OSERROR` when there is none): the run is active with no orchestrator
+   and no lifecycle record, so `reconcile.sh` has nothing to restart, and the
+   local claims stand. This branch ends after you report it: tell the operator
+   the run id and the cause to fix, run no `reconcile.sh`, no local task and no
+   cloud task, and do nothing else. The same `start` (same run id, same tasks
+   file) may be repeated, once, after the cause is fixed.
+   Otherwise run `bash scripts/gsd/cloud-dispatch.sh status --run <run> --json` and treat
    the run as started only on `batch=same`: report it as in step 8, and if
-   `orchestrator.alive` is false and the line did not say
-   `orchestrator=restarted`, run `bash scripts/gsd/reconcile.sh` once so a dead
+   `orchestrator.alive` is false and the line carried no `orchestrator=` token,
+   run `bash scripts/gsd/reconcile.sh` once so a dead
    orchestrator is restarted. `local-claimed=<ids>` names the local tasks the
    first attempt claimed and may already have started: do not start a claimed
    local task again without the operator's confirmation, and run none of the

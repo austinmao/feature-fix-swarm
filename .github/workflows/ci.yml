@@ -18,6 +18,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          # Full history: the no-flag baseline test needs origin/main and the
+          # branch ancestry; a depth-1 checkout would make it skip.
+          fetch-depth: 0
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.11"
@@ -200,7 +203,9 @@ jobs:
           bats --print-output-on-failure "${SUITES[@]}"
 
   host-shell-matrix:
-    timeout-minutes: 15
+    # The macOS leg also runs the sandbox-gated cloud suites, which take
+    # far longer than the installer checks the ubuntu leg runs.
+    timeout-minutes: ${{ matrix.os == 'macos-latest' && 40 || 15 }}
     strategy:
       matrix:
         os: [ubuntu-latest, macos-latest]
@@ -220,6 +225,21 @@ jobs:
       - run: python -m pip install --quiet --requirement requirements-dev.txt
       - name: Scoped installer and prompt-master compatibility
         run: python -m pytest -q tests/test_installer.py tests/test_prompt_master_patch.py
+      - name: Require a working sandbox (macOS only, fail rather than skip every gated test)
+        if: runner.os == 'macOS'
+        # sandbox_available() runs the hardening preflight (kill -0 and pbpaste must be denied inside the profile).
+        # When it is false every sandbox-gated test skips and the step below would stay green with no coverage.
+        run: |
+          python - <<'PY'
+          import sys
+          sys.path.insert(0, "lib")
+          import cloud_sandbox
+          if not cloud_sandbox.sandbox_available():
+              sys.exit("sandbox_available() is false on this runner: every sandbox-gated test would skip")
+          PY
+      - name: Sandbox-gated cloud tests (macOS only, sandbox-exec is darwin-only)
+        if: runner.os == 'macOS'
+        run: python -m pytest -q tests/test_cloud_sandbox.py tests/test_cloud_collect.py tests/test_cloud_dispatch.py
       - name: Bash and zsh parser checks
         shell: bash
         run: |

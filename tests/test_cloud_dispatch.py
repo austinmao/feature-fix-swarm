@@ -9,6 +9,7 @@ plays the cloud worker (writes the manifest with the real nonce and pushes the r
 from __future__ import annotations
 
 import copy
+import errno
 import fcntl
 import functools
 import io
@@ -828,6 +829,48 @@ def test_an_identical_retry_finishes_a_start_that_died_before_its_initialization
     assert world.cli("orchestrate", "--run", "r1", "--once", "--root", str(world.root))[0] == 0
 
 
+@pytest.mark.parametrize("symbolic", [False, True])
+def test_unconfirmed_integration_ref_advice_never_names_a_command_that_follows_a_symbolic_ref(
+        world: World, capsys: pytest.CaptureFixture, symbolic: bool) -> None:
+    assert world.start(tasks=[T1])[0] == 0
+    ref = L.integration_ref("r1")
+    L.locked_update(L.run_ledger_path(world.root, "r1"), lambda d: (d.pop("initialized"), d.pop("integration_ref_created"), d)[2])
+    if symbolic:
+        run_git(world.root, "update-ref", "refs/heads/victim", world.base)
+        run_git(world.root, "update-ref", "--no-deref", "-d", ref)
+        run_git(world.root, "symbolic-ref", ref, "refs/heads/victim")
+    capsys.readouterr()
+    rc, out = world.cli("start", "--run", "r1", "--tasks", world.tasks_file([T1], "same.json"), "--policy", "auto",
+                        "--root", str(world.root))
+    out += capsys.readouterr().err
+    assert rc == 78 and "INTEGRATION_REF_UNCONFIRMED" in out, out
+    assert "update-ref -d" not in out, out  # that form follows a symbolic ref and deletes its target
+    if symbolic:
+        assert "symbolic ref to refs/heads/victim" in out and "git symbolic-ref --delete %s" % ref in out, out
+        assert "update-ref" not in out, out
+    else:
+        assert "git update-ref --no-deref -d %s %s" % (ref, world.base) in out, out
+    assert run_git(world.root, "rev-parse", "refs/heads/victim" if symbolic else ref) == world.base
+
+
+def test_unconfirmed_integration_ref_advice_withholds_a_symbolic_target_the_scanner_flags(
+        world: World, capsys: pytest.CaptureFixture) -> None:
+    assert world.start(tasks=[T1])[0] == 0
+    ref = L.integration_ref("r1")
+    L.locked_update(L.run_ledger_path(world.root, "r1"), lambda d: (d.pop("initialized"), d.pop("integration_ref_created"), d)[2])
+    secret_target = "refs/heads/AKIAIOSFODNN7EXAMPLE"  # a name the secret scanner flags
+    run_git(world.root, "update-ref", secret_target, world.base)
+    run_git(world.root, "update-ref", "--no-deref", "-d", ref)
+    run_git(world.root, "symbolic-ref", ref, secret_target)
+    capsys.readouterr()
+    rc, out = world.cli("start", "--run", "r1", "--tasks", world.tasks_file([T1], "same.json"), "--policy", "auto",
+                        "--root", str(world.root))
+    out += capsys.readouterr().err
+    assert rc == 78 and "INTEGRATION_REF_UNCONFIRMED" in out, out
+    assert "AKIAIOSFODNN7EXAMPLE" not in out, out
+    assert "symbolic ref to [withheld sha256:" in out and "git symbolic-ref --delete %s" % ref in out, out
+
+
 def test_start_over_a_dangling_symbolic_ref_creates_no_branch_behind_it(world: World) -> None:
     run_git(world.root, "symbolic-ref", "refs/heads/ffs/cloud/r1/integration", "refs/heads/victim")  # dangling
     world.start(tasks=[T1])
@@ -1139,18 +1182,35 @@ def test_a_failed_restart_spawn_is_reported_not_swallowed_and_the_same_retry_tri
     real_spawn = world.svc.spawn
 
     def no_processes(argv: Any, log: Path, cwd: Path) -> int:
-        raise OSError(11, "Resource temporarily unavailable")
+        raise OSError(errno.EAGAIN, "Resource temporarily unavailable")
 
     world.svc.spawn = no_processes
     rc, out = retry()
     assert rc == 3 and "RUN_EXISTS" in out and "batch=same local-claimed=t2" in out, out
-    assert "orchestrator=restart-failed" in out and "orchestrator=restarted" not in out, out
+    assert "orchestrator=restart-failed cause=" + errno.errorcode[errno.EAGAIN] in out and "orchestrator=restarted" not in out, out
+    assert "Resource temporarily" not in out, out  # the errno name only: a message can carry a path or a command line
     assert world.doc()["local_claimed"] == ["t2"] and world.doc()["state"] == "active"
     world.svc.spawn = real_spawn
     world.spawned.clear()
     rc, out = retry()
     assert rc == 3 and "orchestrator=restarted" in out and "restart-failed" not in out and "local-claimed=t2" in out, out
     assert world.spawned == [cd.orchestrator_argv(world.root, "r1", resume=True)]
+
+
+@pytest.mark.parametrize("error, cause", [(OSError(2, "No such file or directory: '/secret/path'"), "ENOENT"),
+                                          (OSError("no errno here"), "OSERROR")])
+def test_a_failed_restart_spawn_cause_is_a_sanitized_errno_name(
+        world: World, error: OSError, cause: str) -> None:
+    assert world.start(tasks=[T1])[0] == 0
+
+    def no_processes(argv: Any, log: Path, cwd: Path) -> int:
+        raise error
+
+    world.svc.spawn = no_processes
+    rc, out = world.cli("start", "--run", "r1", "--tasks", world.tasks_file([T1], "same.json"), "--policy", "auto",
+                        "--root", str(world.root))
+    assert rc == 3 and out.rstrip().endswith("orchestrator=restart-failed cause=" + cause), out
+    assert "secret" not in out and "no errno here" not in out, out
 
 
 def test_the_local_claim_is_persisted_before_the_local_ids_are_first_emitted(world: World) -> None:
@@ -1961,6 +2021,77 @@ def test_cleanup_deletes_a_task_branch_the_run_created_and_confirmed(world: Worl
     assert run_git(world.origin, "for-each-ref", "refs/heads/ffs/cloud/r1/") == ""
 
 
+def test_cleanup_remote_keeps_a_task_branch_a_second_clone_created_between_the_check_and_the_push(
+        world: World) -> None:
+    """Two clones share origin, run id, task id and base.  The second sees the branch absent, the first creates it, and the
+    second push reports "up to date" and exits zero: that run must not be credited with the creation."""
+    remote_ref = L.task_branch_ref("r1", "t1", 1)
+    other = world.tmp / "second-clone"
+    run_git(world.tmp, "clone", "-q", str(world.root), str(other))
+    real_run, raced = world.svc.run, []
+
+    def racing(argv: Any, **kwargs: Any) -> Any:
+        if "push" in argv and argv[-1] == "%s:%s" % (world.base, remote_ref) and not raced:
+            raced.append(True)
+            run_git(other, "push", "-q", "file://" + str(world.origin), world.base + ":" + remote_ref)  # the first clone wins
+        return real_run(argv, **kwargs)
+
+    world.svc.run = racing  # type: ignore[assignment]
+    assert world.start(tasks=[T1])[0] == 0
+    world.drive()
+    assert raced and run_git(world.origin, "rev-parse", remote_ref) == world.base
+    assert world.doc()["tasks"]["t1"]["state"] != "waiting"
+    rc, out = world.cli("cleanup", "--run", "r1", "--remote", "--discard-unmerged", "--root", str(world.root))
+    assert rc == 0 and "CLOUD:cleanup-kept ref=remote:%s (creation not confirmed)" % remote_ref in out, out
+    assert run_git(world.origin, "rev-parse", remote_ref) == world.base
+
+
+def test_pushed_new_ref_needs_the_new_ref_flag_for_that_destination() -> None:
+    ref = "refs/heads/ffs/cloud/r1/t1-g1"
+    assert cd.pushed_new_ref("*\tabc:%s\t[new branch]\nDone\n" % ref, ref)
+    assert not cd.pushed_new_ref("=\tabc:%s\t[up to date]\nDone\n" % ref, ref)
+    assert not cd.pushed_new_ref("*\tabc:%s-other\t[new branch]\n" % ref, ref)
+    assert not cd.pushed_new_ref("", ref)
+
+
+def test_a_retry_after_a_failed_push_keeps_the_proof_that_the_run_created_the_local_branch(world: World) -> None:
+    """The first attempt makes the local task branch and its push fails; the retry then finds the branch already present.
+    The creation is journaled before the push, so cleanup still removes what this run made."""
+    ref = L.task_branch_ref("r1", "t1", 1)
+    real_run, seen = world.svc.run, {}
+
+    def failing_first_push(argv: Any, **kwargs: Any) -> Any:
+        if "push" in argv and "--porcelain" in argv and "pushed" not in seen:
+            seen["pushed"] = True
+            journal = [j for j in world.doc()["journal"] if j["op"] == "admit"]
+            seen["proof_before_push"] = [j.get("created") for j in journal]
+            return cd.CmdResult(1, b"", b"rejected")
+        return real_run(argv, **kwargs)
+
+    world.svc.run = failing_first_push  # type: ignore[assignment]
+    assert world.start(tasks=[T1])[0] == 0
+    world.drive()
+    assert seen["proof_before_push"] == [{"local": True}], seen  # on the ledger already, with the push still to come
+    assert run_git(world.origin, "rev-parse", ref) == world.base  # the retry pushed it
+    admits = [j for j in world.doc()["journal"] if j["op"] == "admit"]
+    assert admits and admits[-1]["created"] == {"local": True, "remote": True}, admits
+    rc, out = world.cli("cleanup", "--run", "r1", "--discard-unmerged", "--root", str(world.root))
+    assert rc == 0 and "creation not confirmed" not in out, out
+    assert run_git(world.root, "for-each-ref", "refs/heads/ffs/cloud/r1/") == ""
+
+
+def test_a_local_branch_that_existed_before_the_run_is_never_credited_to_it(world: World) -> None:
+    ref = L.task_branch_ref("r1", "t1", 1)
+    run_git(world.root, "update-ref", ref, world.base)  # somebody's own branch, at the base
+    assert world.start(tasks=[T1])[0] == 0
+    world.drive()
+    admits = [j for j in world.doc()["journal"] if j["op"] == "admit"]
+    assert admits and "local" not in (admits[-1].get("created") or {}), admits
+    rc, out = world.cli("cleanup", "--run", "r1", "--discard-unmerged", "--root", str(world.root))
+    assert rc == 0 and "CLOUD:cleanup-kept ref=%s (creation not confirmed)" % ref in out, out
+    assert run_git(world.root, "rev-parse", ref) == world.base
+
+
 def test_cleanup_keeps_the_integration_ref_when_the_ledger_never_confirmed_creating_it(world: World) -> None:
     assert world.start(tasks=[T1])[0] == 0
     world.drive()
@@ -2159,8 +2290,7 @@ def test_accept_deps_for_an_unattributed_change_needs_the_unattributed_grant(wor
     assert world.start(tasks=[owner])[0] == 0
     world.drive()
     entry = world.doc()["tasks"]["t1"]
-    if entry["blocker"] != "dependency-change":
-        pytest.skip("collector classified this change as %s" % entry["blocker"])
+    assert entry["blocker"] == "dependency-change", "collector classified this change as %s: %r" % (entry["blocker"], entry)
     run = ["--run", "r1", "--task", "t1", "--root", str(world.root)]
     rc, out = world.cli("resolve", *run, "--action", "accept-deps")
     assert rc == 3 and "GRANT_MISSING" in out and "install:unattributed:" in out
@@ -2172,8 +2302,7 @@ def test_accept_deps_is_stale_when_the_report_changed_under_the_lock(world: Worl
     assert world.start(tasks=[owner])[0] == 0
     world.drive()
     entry = world.doc()["tasks"]["t1"]
-    if entry["blocker"] != "dependency-change":
-        pytest.skip("collector classified this change as %s" % entry["blocker"])
+    assert entry["blocker"] == "dependency-change", "collector classified this change as %s: %r" % (entry["blocker"], entry)
     report = json.loads((L.run_dir(world.root, "r1") / "dependency-t1-g1.json").read_text())
     world.grant("r1", *cd.required_install_grants(
         {"packages": report["packages"], "unattributed": report["unattributed"], "digest": report["report_digest"]}))

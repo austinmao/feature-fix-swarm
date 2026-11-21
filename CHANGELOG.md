@@ -27,11 +27,36 @@ all skills.
   `INTEGRATION_REF`, or `INTEGRATION_REF_UNCONFIRMED` (exit 78) when an identical
   retry of a crashed start finds one. Runs started by an earlier build have no
   proof, so `cleanup` keeps their refs.
+- The admit journal now records that the run created the local task branch right
+  after the update-ref and before the push, and a retry after a failed push keeps
+  that proof, so `cleanup` removes the branch instead of printing `creation not
+  confirmed`. The remote proof still needs a push that reports a new ref
+  (`git push --porcelain`, flag `*`): another clone that created the branch first
+  makes the push "up to date" and leaves the ref to its owner. A remote branch
+  whose creation acknowledgement was lost is still kept. `/swarm` skill 2.2.7.
+- The `INTEGRATION_REF_UNCONFIRMED` (exit 78) message no longer suggests
+  `git update-ref -d <ref>`, which follows a symbolic ref and deletes its target.
+  For a symbolic ref it says to inspect the target and remove only the symbolic
+  ref (`git symbolic-ref --delete <ref>`); for a plain ref it prints
+  `git update-ref --no-deref -d <ref> <inspected-oid>`.
 - An identical retry of `start` whose orchestrator restart fails (the spawn raises
   `OSError`) adds `orchestrator=restart-failed` to the `RUN_EXISTS` refusal
   instead of silently dropping the error; the ledger and the local claims are
-  unchanged and the same retry tries again. `/swarm` skill 2.2.6 reports it, runs
-  no local task, and may repeat the identical `start` once the cause is fixed.
+  unchanged and the same retry tries again. The token now carries the errno name
+  (`orchestrator=restart-failed cause=ENOENT`, or `OSERROR` when the exception has
+  no errno; never the message, which can hold a path). `/swarm` skill 2.2.7 reports it and ends there: no
+  `reconcile.sh` (the run has no lifecycle record to restart), no task, and the
+  identical `start` may be repeated once the cause is fixed.
+- `/swarm` skill 2.2.7: `CLOUD-REFUSED: SECRET_IN_PROMPT` from `plan` (or `start`)
+  ends the invocation. The skill relays the redacted refusal and dispatches
+  nothing, cloud or local, under `auto`, `prefer` and `required` and under
+  `--dry-run`; the local fallback of the other refusals no longer applies. A
+  retry of an already started run with an edited batch is refused by `plan`
+  before `start` can say `RUN_EXISTS`, and its unchanged tasks may be running in
+  the cloud.
+- `/swarm` skill 2.2.7 handles `start` exiting 78 (`CLOUD-ERROR` on stderr, for
+  example `INTEGRATION_REF_UNCONFIRMED`): it relays stderr, runs no task, cloud or
+  local, and stops for the operator to inspect before another `start`.
 - `plan` scans every task id right after normalization, as `start` does: a
   scanner-positive id is `SECRET_IN_PROMPT` (exit 3) and is never printed, so
   the required plan step no longer exposes one.
@@ -204,7 +229,7 @@ all skills.
   `ffs:cloud-deferred` block ahead of the init gate prints one line saying cloud
   delegation for that skill arrives in a later release and that `/swarm --cloud`
   is available now, then stops. Nothing else in either skill changes
-  (versions 2.22.3 and 3.3.2). The no-flag test now compares both files with the
+  (versions 2.23.2 and 3.3.2; 2.23.2 is the merge bump over the base's 2.23.1, originally 2.22.3). The no-flag test now compares both files with the
   base outside that block and the version line.
 - The cloud review no longer passes a downgraded reviewer silently.
   `adversary-host.sh` records which model answered
@@ -257,6 +282,14 @@ all skills.
   delete it by hand. A run whose task never binds stays `active` and `cleanup`
   refuses it until the task is abandoned. The review output is not kept in the
   run directory; only the verdict record is in the ledger.
+
+### Fixed (2026-11-21, model-fallback legacy 5-1 pins)
+
+- `model-fallback.sh` now decides availability and recovery per pinned model id: a config still pinned to a dead `claude-fable-5-1` is demoted to opus even when `claude-fable-5-2` answers, and a marker's 5-1 original is held (not restored) until 5-1 itself is available.
+
+### Fixed (2026-11-19, reconcile relaunch on macOS bash 3.2)
+
+- The launchd reconcile job could not relaunch runs on stock macOS bash 3.2 (`mapfile` is missing there, so the relaunch failed after the budget was charged). It now relaunches stale runs as designed, a behavior change for anyone with the agent installed.
 
 ### Changed (2026-11-20, review-gate runs helpers from the base ref)
 

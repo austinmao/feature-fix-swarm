@@ -6,9 +6,11 @@ version line and the marked `ffs:cloud-deferred` refusal block.
 """
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 from pathlib import Path
+from typing import Dict, NoReturn
 
 import pytest
 
@@ -18,43 +20,98 @@ BEGIN, END = "<!-- ffs:cloud:begin -->", "<!-- ffs:cloud:end -->"
 RECONCILE = "At entry, make one opportunistic, fail-soft `bash scripts/gsd/reconcile.sh` pass"
 
 
-def _git(*args: str) -> str:
+def _in_ci() -> bool:
+    return bool(os.environ.get("CI"))
+
+
+def _unavailable(reason: str, ci: bool) -> NoReturn:
+    """Missing history is a skip on a developer machine but a failure in CI, where a skip would hide the comparison."""
+    if ci:
+        pytest.fail(reason)
+    pytest.skip(reason)
+
+
+def _git_in(root: Path, ci: bool, *args: str) -> str:
     try:
         done = subprocess.run(
-            ["git", *args], cwd=ROOT, text=True, stdout=subprocess.PIPE,
+            ["git", *args], cwd=root, text=True, stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, timeout=60, check=False,
         )
     except (OSError, subprocess.SubprocessError) as exc:
-        pytest.skip(f"git unavailable: {exc}")
+        _unavailable(f"git unavailable: {exc}", ci)
     if done.returncode != 0:
-        pytest.skip(f"git {' '.join(args)} unavailable: {done.stderr.strip()[:120]}")
+        _unavailable(f"git {' '.join(args)} unavailable: {done.stderr.strip()[:120]}", ci)
     return done.stdout
 
 
-@pytest.fixture(scope="module")
-def base() -> str:
-    # Stacked-branch aware: the base is the parent of the oldest commit in
-    # `merge-base..HEAD` that adds lib/cloud_dispatch.py, so unrelated commits
-    # beneath the cloud work (e.g. a model-tier refresh that edits skills) are
-    # not counted as cloud differences. When no such commit is in range (after
-    # the merge, on main) fall back to the plain merge-base.
-    merge_base = _git("merge-base", "HEAD", "origin/main").strip()
-    adders = _git(
+def _git(*args: str) -> str:
+    return _git_in(ROOT, _in_ci(), *args)
+
+
+def _git_ok_in(root: Path, *args: str) -> bool:
+    """True when the git command exits 0; any failure is simply False."""
+    try:
+        done = subprocess.run(
+            ["git", *args], cwd=root, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, timeout=60, check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return done.returncode == 0
+
+
+MAIN_REF = "origin/main"
+STACKED_REF = "origin/chore/model-tiers-6-2"
+
+
+def _resolve_base(root: Path, ci: bool) -> str:
+    """The commit whose skill text the cloud branch must equal outside the cloud block.
+
+    The pre-cloud commit is the parent of the oldest commit in `merge-base..HEAD` that adds lib/cloud_dispatch.py, so
+    unrelated commits beneath the cloud work (e.g. a model-tier refresh that edits skills) are not counted as cloud
+    differences. A later merge of the base branch into the cloud branch moves it: only a merge parent that is the
+    declared base (or one of its ancestors) and carries no cloud work is accepted. While the stacked ref exists the
+    parent must also descend from the pre-cloud commit, so an unrelated cloud-free topic merged in does not qualify
+    (its text was never the base). Once the stacked base has landed and its ref is gone, `pre` sits on the old line and
+    is no longer an ancestor of the squash commit on main, so that descent check is not applied. All
+    merges in range are considered, newest first (a synthetic PR merge puts the branch's own merges off the
+    first-parent chain); otherwise the pre-cloud commit stands."""
+    def git(*args: str) -> str:
+        return _git_in(root, ci, *args)
+
+    def git_ok(*args: str) -> bool:
+        return _git_ok_in(root, *args)
+
+    merge_base = git("merge-base", "HEAD", MAIN_REF).strip()
+    adders = git(
         "log", "--diff-filter=A", "--format=%H", "--reverse",
         f"{merge_base}..HEAD", "--", "lib/cloud_dispatch.py",
     ).split()
     if not adders:
-        return merge_base
-    # A later merge of the base branch into the cloud branch moves the baseline:
-    # the newest merged-in (second) parent on the first-parent chain after the
-    # cloud work began is the non-cloud text the skills must still equal.
-    merged = _git(
-        "log", "--first-parent", "--merges", "--format=%P", f"{adders[0]}..HEAD",
-    ).split("\n")
-    for parents in merged:
-        if len(parents.split()) >= 2:
-            return parents.split()[1]
-    return _git("rev-parse", f"{adders[0]}^").strip()
+        # The cloud work is already on the base (after landing, on main or on a
+        # branch cut from it): there is no pre-cloud text left to compare with.
+        # In CI that must be true, not a misread history.
+        if ci and not git_ok("cat-file", "-e", f"{merge_base}:lib/cloud_dispatch.py"):
+            pytest.fail(f"no commit adds lib/cloud_dispatch.py after {merge_base[:12]} and it is not on the base either")
+        pytest.skip("cloud work is already on the base; no pre-cloud baseline")
+    pre = git("rev-parse", f"{adders[0]}^").strip()
+    declared = STACKED_REF if git_ok("rev-parse", "--verify", "-q", STACKED_REF) else MAIN_REF
+    merged = git("log", "--merges", "--format=%P", f"{adders[0]}..HEAD").split("\n")
+    for line in merged:
+        clean = [
+            p for p in line.split()
+            if not git_ok("cat-file", "-e", f"{p}:lib/cloud_dispatch.py")
+            and (declared != STACKED_REF or git_ok("merge-base", "--is-ancestor", pre, p))
+            and git_ok("merge-base", "--is-ancestor", p, declared)
+        ]
+        if len(clean) == 1:
+            return clean[0]
+    return pre
+
+
+@pytest.fixture(scope="module")
+def base() -> str:
+    return _resolve_base(ROOT, _in_ci())
 
 
 def _base_text(base: str, path: str) -> str:
@@ -173,3 +230,177 @@ def test_swarm_runs_local_tasks_only_from_the_start_output_never_from_the_plan()
     step = block[block.index("5. **Start cloud groups.**"):block.index("6. **Refusals.**")]
     assert "`CLOUD:local tasks=`" in step and "never from the plan" in step
     assert "empty" in step and "run no local task" in step and "report" in step
+
+
+def _cloud_block() -> str:
+    text = (ROOT / SWARM).read_text(encoding="utf-8")
+    return text[text.index(BEGIN):text.index(END)]
+
+
+def test_swarm_secret_in_prompt_from_plan_is_terminal_and_never_falls_back_to_local():
+    """A refused plan of an edited retry must not send tasks that may already run in the cloud to the local path."""
+    block = _cloud_block()
+    plan = block[block.index("2. **Plan.**"):block.index("3. **`--dry-run`.**")]
+    assert "SECRET_IN_PROMPT" in plan and "terminal" in plan and "STOP" in plan
+    assert "Dispatch nothing, cloud or local" in plan and "`--dry-run`" in plan
+    assert all(policy in plan for policy in ("`auto`", "`prefer`", "`required`"))
+    start = block[block.index("5. **Start cloud groups.**"):block.index("6. **Refusals.**")]
+    assert "treat it as a refusal as in step 6" not in start
+    refusals = block[block.index("6. **Refusals.**"):block.index("7. **Hard limits.**")]
+    exception = refusals[refusals.index("SECRET_IN_PROMPT"):refusals.index("RUN_EXISTS")]
+    assert "terminal" in exception and "dispatch nothing, cloud or local" in exception
+    assert refusals.index("continue with every task locally") < refusals.index("SECRET_IN_PROMPT")
+
+
+def test_swarm_exit_78_from_start_is_relayed_and_stops_everything():
+    """INTEGRATION_REF_UNCONFIRMED exits 78 with CLOUD-ERROR on stderr: neither success nor an exit-3 refusal."""
+    block = _cloud_block()
+    start = block[block.index("5. **Start cloud groups.**"):block.index("6. **Refusals.**")]
+    branch = start[start.index("If `start` exits 78"):]
+    assert "`CLOUD-ERROR:" in branch and "**stderr**" in branch and "INTEGRATION_REF_UNCONFIRMED" in branch
+    assert "run no task" in branch and "cloud or local" in branch
+    assert "stop for the operator to inspect" in branch and "Do not call `start` again" in branch
+    assert "Step 6 does not apply" in branch
+
+
+def test_swarm_restart_failed_ends_after_reporting_with_no_reconcile_and_keeps_the_same_batch_retry():
+    block = _cloud_block()
+    step = block[block.index("6. **Refusals.**"):block.index("7. **Hard limits.**")]
+    step = " ".join(step.split())  # the skill wraps its lines
+    failed = step[step.index("`orchestrator=restart-failed` means"):step.index("Otherwise run")]
+    assert "`cause=`" in failed and "`orchestrator=restart-failed cause=<ERRNO>`" in step
+    assert "ends after you report it" in failed and "run no `reconcile.sh`" in failed
+    assert "same `start` (same run id, same tasks file) may be repeated" in failed
+    assert "reconcile.sh` cannot fix" not in step
+    rest = step[step.index("Otherwise run"):]
+    assert "carried no `orchestrator=` token" in rest and "run `bash scripts/gsd/reconcile.sh` once" in rest
+
+
+# -- the baseline resolver, exercised on synthetic histories ---------------------------
+
+def _g(repo: Path, *args: str) -> str:
+    done = subprocess.run(
+        ["git", "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false",
+         *args],
+        cwd=repo, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True, timeout=60)
+    return done.stdout.strip()
+
+
+def _commit(repo: Path, files: Dict[str, str], message: str) -> str:
+    for rel, text in files.items():
+        (repo / rel).parent.mkdir(parents=True, exist_ok=True)
+        (repo / rel).write_text(text, encoding="utf-8")
+    _g(repo, "add", *files)
+    _g(repo, "commit", "-q", "-m", message)
+    return _g(repo, "rev-parse", "HEAD")
+
+
+def _history(tmp_path: Path, *, merge_stacked: bool, merge_unrelated: bool, cloud_on_main: bool = False,
+             publish_main: bool = True) -> Dict[str, str]:
+    """main -> {stacked, topic, cloud}; the stacked and topic branches edit different lines of the skill."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _g(repo, "init", "-q", "-b", "main")
+    skill = "line one\nline two\nline three\n"
+    first = {"skills/swarm/SKILL.md": skill}
+    if cloud_on_main:
+        first["lib/cloud_dispatch.py"] = "# cloud\n"
+    ids = {"pre": _commit(repo, first, "base")}
+    if publish_main:
+        _g(repo, "update-ref", "refs/remotes/origin/main", ids["pre"])
+    _g(repo, "checkout", "-q", "-b", "stacked")
+    ids["stacked"] = _commit(repo, {"skills/swarm/SKILL.md": skill.replace("one", "tiered")}, "stacked base edit")
+    _g(repo, "update-ref", "refs/remotes/origin/chore/model-tiers-6-2", ids["stacked"])
+    _g(repo, "checkout", "-q", "-b", "topic", ids["pre"])
+    ids["topic"] = _commit(repo, {"skills/swarm/SKILL.md": skill.replace("three", "changed behavior")}, "unrelated topic")
+    _g(repo, "checkout", "-q", "-b", "cloud", ids["pre"])
+    if not cloud_on_main:
+        _commit(repo, {"lib/cloud_dispatch.py": "# cloud\n"}, "add the dispatcher")
+        _commit(repo, {"docs/cloud.md": "cloud\n"}, "docs")
+    if merge_stacked:
+        _g(repo, "merge", "-q", "--no-ff", "-m", "merge the stacked base", "stacked")
+    if merge_unrelated:
+        _g(repo, "merge", "-q", "--no-ff", "-m", "merge an unrelated topic", "topic")
+    ids["repo"] = str(repo)
+    return ids
+
+
+def test_an_unrelated_cloud_free_merge_is_not_the_baseline(tmp_path: Path) -> None:
+    ids = _history(tmp_path, merge_stacked=True, merge_unrelated=True)
+    assert _resolve_base(Path(ids["repo"]), ci=False) == ids["stacked"]  # not the newest merge, the topic
+
+
+def test_an_unrelated_merge_alone_leaves_the_pre_cloud_commit_as_the_baseline(tmp_path: Path) -> None:
+    ids = _history(tmp_path, merge_stacked=False, merge_unrelated=True)
+    assert _resolve_base(Path(ids["repo"]), ci=False) == ids["pre"]
+
+
+def test_a_merge_of_the_declared_stacked_base_moves_the_baseline(tmp_path: Path) -> None:
+    ids = _history(tmp_path, merge_stacked=True, merge_unrelated=False)
+    assert _resolve_base(Path(ids["repo"]), ci=False) == ids["stacked"]
+
+
+def test_missing_history_skips_locally_and_fails_in_ci(tmp_path: Path) -> None:
+    ids = _history(tmp_path, merge_stacked=True, merge_unrelated=False, publish_main=False)
+    repo = Path(ids["repo"])
+    with pytest.raises(pytest.skip.Exception):
+        _resolve_base(repo, ci=False)
+    with pytest.raises(pytest.fail.Exception) as failure:
+        _resolve_base(repo, ci=True)
+    assert "origin/main" in str(failure.value)
+
+
+def test_cloud_work_already_on_the_base_is_a_skip_even_in_ci(tmp_path: Path) -> None:
+    ids = _history(tmp_path, merge_stacked=False, merge_unrelated=False, cloud_on_main=True)
+    repo = Path(ids["repo"])
+    for ci in (False, True):
+        with pytest.raises(pytest.skip.Exception) as skipped:
+            _resolve_base(repo, ci=ci)
+        assert "already on the base" in str(skipped.value)
+
+
+def test_a_history_with_no_cloud_work_anywhere_fails_in_ci(tmp_path: Path) -> None:
+    ids = _history(tmp_path, merge_stacked=False, merge_unrelated=False)
+    repo = Path(ids["repo"])
+    _g(repo, "checkout", "-q", "main")  # HEAD is the base itself and the dispatcher exists nowhere
+    with pytest.raises(pytest.skip.Exception):
+        _resolve_base(repo, ci=False)
+    with pytest.raises(pytest.fail.Exception):
+        _resolve_base(repo, ci=True)
+
+
+def test_a_synthetic_pr_merge_puts_the_stacked_tip_on_the_first_parent_and_still_resolves_to_it(tmp_path: Path) -> None:
+    ids = _history(tmp_path, merge_stacked=False, merge_unrelated=False)
+    repo = Path(ids["repo"])
+    _g(repo, "checkout", "-q", "-b", "synthetic", ids["stacked"])
+    _g(repo, "merge", "-q", "--no-ff", "-m", "synthetic PR merge", "cloud")
+    assert _resolve_base(repo, ci=False) == ids["stacked"]
+    assert _resolve_base(repo, ci=True) == ids["stacked"]
+
+
+def test_a_stacked_base_squash_merged_into_main_with_its_ref_gone_resolves_to_the_squash_commit(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _g(repo, "init", "-q", "-b", "main")
+    skill = "line one\nline two\nline three\n"
+    root = _commit(repo, {"skills/swarm/SKILL.md": skill}, "base")
+    _g(repo, "update-ref", "refs/remotes/origin/main", root)
+    # the stacked base edits line one; the cloud work is cut from it, so the pre-cloud commit is on that line
+    _g(repo, "checkout", "-q", "-b", "stacked")
+    tiered = skill.replace("one", "tiered")
+    stacked = _commit(repo, {"skills/swarm/SKILL.md": tiered}, "stacked base edit")
+    _g(repo, "update-ref", "refs/remotes/origin/chore/model-tiers-6-2", stacked)
+    _g(repo, "checkout", "-q", "-b", "cloud")
+    _commit(repo, {"lib/cloud_dispatch.py": "# cloud\n"}, "add the dispatcher")
+    # main moves on, then the stacked base lands as ONE squash commit that is not a descendant of `stacked`
+    _g(repo, "checkout", "-q", "main")
+    _commit(repo, {"skills/swarm/SKILL.md": skill.replace("three", "later main edit")}, "later main edit")
+    landed = _commit(repo, {"skills/swarm/SKILL.md": tiered.replace("three", "later main edit")}, "squash: stacked base")
+    _g(repo, "update-ref", "refs/remotes/origin/main", landed)
+    _g(repo, "update-ref", "-d", "refs/remotes/origin/chore/model-tiers-6-2")  # branch deleted on merge
+    # the operator merges main into the cloud branch
+    _g(repo, "checkout", "-q", "cloud")
+    _g(repo, "merge", "-q", "--no-ff", "-m", "merge main", "main")
+    assert not _git_ok_in(repo, "merge-base", "--is-ancestor", stacked, landed)  # the squash does not contain it
+    assert _resolve_base(repo, ci=False) == landed
+    assert _resolve_base(repo, ci=True) == landed
