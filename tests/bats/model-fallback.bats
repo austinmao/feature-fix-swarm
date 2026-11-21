@@ -650,7 +650,7 @@ JSON
   [ "$status" -eq 0 ]
   [[ "$output" == *"(1 override(s) rewritten)"* ]]
   [ "$(python3 -c "import json;print(json.load(open('$TMP/.planning/config.json'))['model_overrides']['gsd-planner'])")" = "claude-opus-5-5" ]
-  rm -f "$GSD_FALLBACK_CACHE/claude-fable-5-2.status"
+  rm -f "$GSD_FALLBACK_CACHE/claude-fable-5-2.status" "$GSD_FALLBACK_CACHE/claude-fable-5-1.status"
   GSD_MODEL_PROBE_CMD="$TMP/probe-ok.sh" run bash "$LEVER" "$TMP/.planning"
   [ "$status" -eq 0 ]
   [ "$(python3 -c "import json;print(json.load(open('$TMP/.planning/config.json'))['model_overrides']['gsd-planner'])")" = "claude-fable-5-1" ]
@@ -687,4 +687,67 @@ JSON
   [[ "$output" == *"(0 override(s) rewritten)"* ]]
   diff -q "$TMP/before.json" "$TMP/.planning/config.json"
   [ ! -f "$TMP/.planning/fable-fallback.json" ]
+}
+
+# Probe stub: 5-2 answers, legacy 5-1 does not.
+make_probe_52_only() {
+  cat > "$TMP/probe-52-only.sh" <<'SH'
+#!/bin/sh
+[ "$1" = "claude-fable-5-2" ]
+SH
+  chmod +x "$TMP/probe-52-only.sh"
+}
+
+cfg_value() {
+  python3 -c "import json;print(json.load(open('$TMP/.planning/config.json'))['model_overrides']['$1'])"
+}
+
+@test "FALLBACK-035a: 5-2 up but a pinned 'claude-fable-5-1' is down -> only the 5-1 pin is demoted" {
+  make_probe_52_only
+  cat > "$TMP/.planning/config.json" <<'JSON'
+{ "model_overrides": { "legacy": "claude-fable-5-1", "current": "claude-fable-5-2" } }
+JSON
+  GSD_MODEL_PROBE_CMD="$TMP/probe-52-only.sh" GSD_MODEL_PROBE_CMD_CODEX="$TMP/probe-ok.sh" run bash "$LEVER" "$TMP/.planning"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"claude-fable-5-1 UNAVAILABLE -> claude-opus-5-5 (1 override(s) rewritten)"* ]]
+  [ "$(cfg_value legacy)" = "claude-opus-5-5" ]
+  [ "$(cfg_value current)" = "claude-fable-5-2" ]
+  [ "$(python3 -c "import json;print(sorted(json.load(open('$TMP/.planning/fable-fallback.json'))['paths']))")" = "['model_overrides.legacy']" ]
+}
+
+@test "FALLBACK-035b: marker with a 5-1 original is NOT restored while 5-1 is down, even though 5-2 answers" {
+  make_probe_52_only
+  cat > "$TMP/.planning/config.json" <<'JSON'
+{ "model_overrides": { "legacy": "claude-opus-5-5", "current": "claude-opus-5-5" } }
+JSON
+  cat > "$TMP/.planning/fable-fallback.json" <<'JSON'
+{ "mode": "opus-only",
+  "paths": { "model_overrides.legacy": "claude-fable-5-1", "model_overrides.current": "claude-fable-5-2" },
+  "installed": { "model_overrides.legacy": "claude-opus-5-5", "model_overrides.current": "claude-opus-5-5" } }
+JSON
+  GSD_MODEL_PROBE_CMD="$TMP/probe-52-only.sh" run bash "$LEVER" "$TMP/.planning"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"1 held (claude-fable-5-1 still unavailable)"* ]]
+  [ "$(cfg_value legacy)" = "claude-opus-5-5" ]
+  [ "$(cfg_value current)" = "claude-fable-5-2" ]
+  [ "$(python3 -c "import json;print(sorted(json.load(open('$TMP/.planning/fable-fallback.json'))['paths']))")" = "['model_overrides.legacy']" ]
+}
+
+@test "FALLBACK-035c: with 5-1 up, a marker's 5-1 original is restored and a live 5-1 pin is left alone" {
+  cat > "$TMP/.planning/config.json" <<'JSON'
+{ "model_overrides": { "legacy": "claude-opus-5-5" } }
+JSON
+  cat > "$TMP/.planning/fable-fallback.json" <<'JSON'
+{ "mode": "opus-only", "paths": { "model_overrides.legacy": "claude-fable-5-1" },
+  "installed": { "model_overrides.legacy": "claude-opus-5-5" } }
+JSON
+  GSD_MODEL_PROBE_CMD="$TMP/probe-ok.sh" run bash "$LEVER" "$TMP/.planning"
+  [ "$status" -eq 0 ]
+  [ "$(cfg_value legacy)" = "claude-fable-5-1" ]
+  [ ! -f "$TMP/.planning/fable-fallback.json" ]
+  cp "$TMP/.planning/config.json" "$TMP/before.json"
+  GSD_MODEL_PROBE_CMD="$TMP/probe-ok.sh" run bash "$LEVER" "$TMP/.planning"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"config unchanged"* ]]
+  diff -q "$TMP/before.json" "$TMP/.planning/config.json"
 }

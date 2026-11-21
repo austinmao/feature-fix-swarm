@@ -119,13 +119,24 @@ if [ ! -f "$MARKER" ] && [ "$HAS_FABLE_LITERAL" = false ]; then
   exit 0
 fi
 
+# Availability and recovery are decided per pinned model id. The 5-2 probe covers
+# claude-fable-5-2, the "fable" alias and the bare id; a legacy claude-fable-5-1 pin
+# (in the config, or recorded as a marker original) follows ITS OWN probe.
+HAS_51_CONFIG=false
+if grep -qE '"claude-fable-5-1"' "$CONFIG"; then HAS_51_CONFIG=true; fi
+LEGACY_DOWN=false
+if [ "$HAS_51_CONFIG" = true ] || { [ -f "$MARKER" ] && grep -qF '"claude-fable-5-1"' "$MARKER"; }; then
+  if ! probe_claude_model "claude-fable-5-1"; then LEGACY_DOWN=true; fi
+fi
+ONLY_LEGACY_51=false
+
 if probe_claude_model "$FABLE"; then
   if [ -f "$MARKER" ]; then
     # Do not wrap a here-doc command substitution in an outer double quote.
     # macOS Bash 3.2 misparses the nested Python quotes at execution time even
     # though `bash -n` accepts the file. Assignment context already suppresses
     # word splitting and pathname expansion.
-    RESULT=$(MARKER="$MARKER" CONFIG="$CONFIG" python3 - <<'EOF'
+    RESULT=$(MARKER="$MARKER" CONFIG="$CONFIG" HOLD_LEGACY_51="$LEGACY_DOWN" python3 - <<'EOF'
 import json, os, sys
 marker_path = os.environ["MARKER"]; config_path = os.environ["CONFIG"]
 
@@ -182,6 +193,11 @@ except (OSError, ValueError) as exc:
 # before this field existed; those fall back to unconditional restore.
 installed = marker.get("installed") or {}
 
+# A 5-1 original follows the 5-1 probe, not the 5-2 one: while 5-1 is still down,
+# restoring it would re-pin a dead model just because 5-2 answered.
+hold_legacy = os.environ.get("HOLD_LEGACY_51") == "true"
+held = []
+
 # Marker paths are dot-joined. New rewrites refuse dot-bearing keys outright, but a
 # marker written by an EARLIER version can carry a path with two valid readings —
 # resolving the wrong one writes the original into the wrong node and flips an
@@ -199,6 +215,9 @@ skipped = []            # RAW paths only — indexes `originals` when pruning
 skip_why = {}           # path -> why it was skipped (display only)
 conflicts = []          # (path, human-readable reason)
 for path, original in originals.items():
+    if hold_legacy and original == "claude-fable-5-1":
+        held.append(path)
+        continue
     keys = path.split(".")
     try:
         d = cfg
@@ -242,7 +261,7 @@ for path, original in originals.items():
 if writes:
     atomic_write(config_path, cfg)
 
-unresolved = skipped + [p for p, _ in conflicts]
+unresolved = skipped + [p for p, _ in conflicts] + held
 if unresolved:
     # Prune to ONLY the unresolved paths. Retaining the whole set meant restored
     # entries were re-applied on a later run and the marker could never reach a
@@ -257,6 +276,8 @@ if unresolved:
         notes.append(f"{len(skipped)} unresolvable ("
                      + ", ".join(p + (f" [{skip_why[p]}]" if p in skip_why else "")
                                  for p in skipped) + ")")
+    if held:
+        notes.append(f"{len(held)} held (claude-fable-5-1 still unavailable)")
     if conflicts:
         notes.append(f"{len(conflicts)} changed since fallback, left alone "
                      f"({'; '.join(m for _, m in conflicts)})")
@@ -271,11 +292,16 @@ EOF
   else
     echo "[model-fallback] $FABLE available — config unchanged"
   fi
-  exit 0
+  # A config still pinned to a dead legacy 5-1 falls through to demote ONLY that id.
+  if [ "$HAS_51_CONFIG" = true ] && [ "$LEGACY_DOWN" = true ]; then
+    ONLY_LEGACY_51=true
+  else
+    exit 0
+  fi
 fi
 
-# fable unavailable
-if [ "$HAS_FABLE_LITERAL" = false ]; then
+# fable unavailable (or, with ONLY_LEGACY_51, only the legacy 5-1 pin is dead)
+if [ "$ONLY_LEGACY_51" = false ] && [ "$HAS_FABLE_LITERAL" = false ]; then
   echo "[model-fallback] $FABLE unavailable — already on fallback (marker present), nothing to rewrite"
   exit 0
 fi
@@ -285,7 +311,7 @@ fi
 # legacy claude-fable-5-1 is only demoted when 5-1 ITSELF is unavailable — a live
 # 5-1 pin is served as pinned and left alone even while 5-2 is down.
 KEEP_LEGACY_51=false
-if grep -qE '"claude-fable-5-1"' "$CONFIG" && probe_claude_model "claude-fable-5-1"; then
+if [ "$ONLY_LEGACY_51" = false ] && [ "$HAS_51_CONFIG" = true ] && [ "$LEGACY_DOWN" = false ]; then
   KEEP_LEGACY_51=true
 fi
 
@@ -295,7 +321,7 @@ else
   MODE="opus-only"
 fi
 
-RESULT=$(KEEP_LEGACY_51="$KEEP_LEGACY_51" FABLE="$FABLE" OPUS="$OPUS" CONFIG="$CONFIG" MARKER="$MARKER" MODE="$MODE" python3 - <<'EOF'
+RESULT=$(ONLY_LEGACY_51="$ONLY_LEGACY_51" KEEP_LEGACY_51="$KEEP_LEGACY_51" FABLE="$FABLE" OPUS="$OPUS" CONFIG="$CONFIG" MARKER="$MARKER" MODE="$MODE" python3 - <<'EOF'
 import json, os, sys
 config_path = os.environ["CONFIG"]; fable = os.environ["FABLE"]; opus = os.environ["OPUS"]
 marker_path = os.environ["MARKER"]; mode = os.environ["MODE"]
@@ -334,6 +360,11 @@ forms = {"fable": "opus", fable: opus, "claude-fable-5-1": "claude-opus-5-5", "c
 keep_legacy_51 = os.environ.get("KEEP_LEGACY_51") == "true"
 if keep_legacy_51:
     forms.pop("claude-fable-5-1", None)
+only_legacy = os.environ.get("ONLY_LEGACY_51") == "true"
+if only_legacy:
+    # 5-2 is up: only the dead legacy 5-1 pin is demoted.
+    forms = {"claude-fable-5-1": forms["claude-fable-5-1"]}
+    fable = "claude-fable-5-1"
 paths = {}
 installed = {}
 ambiguous = []
