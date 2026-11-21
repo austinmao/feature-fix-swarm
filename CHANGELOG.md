@@ -11,7 +11,7 @@ all skills.
 ### Fixed (2026-11-21, cloud delegation: round 7)
 
 - `start` now always prints `CLOUD:local tasks=<ids>`, with an empty value when
-  no task is local. `/swarm` skill 2.2.5 runs locally only the ids that line
+  no task is local. `/swarm` skill 2.2.6 runs locally only the ids that line
   names, never the groups of the earlier plan: `start` routes again, and under
   `auto` host pressure can move a task between the two calls, which would run it
   both locally and in the cloud. With no line, or one it cannot parse, it runs
@@ -27,6 +27,11 @@ all skills.
   `INTEGRATION_REF`, or `INTEGRATION_REF_UNCONFIRMED` (exit 78) when an identical
   retry of a crashed start finds one. Runs started by an earlier build have no
   proof, so `cleanup` keeps their refs.
+- An identical retry of `start` whose orchestrator restart fails (the spawn raises
+  `OSError`) adds `orchestrator=restart-failed` to the `RUN_EXISTS` refusal
+  instead of silently dropping the error; the ledger and the local claims are
+  unchanged and the same retry tries again. `/swarm` skill 2.2.6 reports it, runs
+  no local task, and may repeat the identical `start` once the cause is fixed.
 - `plan` scans every task id right after normalization, as `start` does: a
   scanner-positive id is `SECRET_IN_PROMPT` (exit 3) and is never printed, so
   the required plan step no longer exposes one.
@@ -36,7 +41,7 @@ all skills.
 - A retried `start` for an existing run id ends `RUN_EXISTS ... batch=same`,
   `batch=other` or `batch=unknown`, and no longer offers `local=<ids>`: the
   local tasks the first attempt claimed are reported as `local-claimed=<ids>`,
-  because that caller may already have started them. `/swarm` skill 2.2.5 must
+  because that caller may already have started them. `/swarm` skill 2.2.6 must
   not start a claimed local task again without the operator's confirmation, and
   runs none of the local groups that contain one until the operator says which.
 - The batch digest covers the ordered input, `depends_on` included. A changed
@@ -95,7 +100,7 @@ all skills.
   (`batch`). A superset, subset or edited batch is `batch=other`, so extra
   cloud-eligible tasks can no longer be sent to run locally (even under
   `--policy required`). A ledger written before this field gives
-  `batch=unknown`. `/swarm` skill 2.2.5 describes the exact-match rule.
+  `batch=unknown`. `/swarm` skill 2.2.6 describes the exact-match rule.
 - A `git clone` killed at its transfer timeout no longer wedges every later
   fixed-clone launch with `CLONE_PATH_INVALID`. The dispatcher now creates the
   clone directory itself (a plain exclusive `mkdir`; the round 6 entry above

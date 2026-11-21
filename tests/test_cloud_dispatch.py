@@ -1129,6 +1129,30 @@ def test_start_always_prints_the_local_task_list_even_when_it_is_empty(world: Wo
     assert out.splitlines().index("CLOUD:started run=r1 tasks=1") < out.splitlines().index("CLOUD:local tasks=")
 
 
+def test_a_failed_restart_spawn_is_reported_not_swallowed_and_the_same_retry_tries_again(world: World) -> None:
+    """An OSError from the spawn left the retry looking like an ordinary identical one, with no orchestrator and no record."""
+    local = task("t2", "src/b/**", local_only=True, local_reason="touches secrets")
+    assert world.start(tasks=[T1, local])[0] == 0
+    retry = lambda: world.cli(  # noqa: E731
+        "start", "--run", "r1", "--tasks", world.tasks_file([T1, local], "same.json"), "--policy", "auto",
+        "--root", str(world.root))
+    real_spawn = world.svc.spawn
+
+    def no_processes(argv: Any, log: Path, cwd: Path) -> int:
+        raise OSError(11, "Resource temporarily unavailable")
+
+    world.svc.spawn = no_processes
+    rc, out = retry()
+    assert rc == 3 and "RUN_EXISTS" in out and "batch=same local-claimed=t2" in out, out
+    assert "orchestrator=restart-failed" in out and "orchestrator=restarted" not in out, out
+    assert world.doc()["local_claimed"] == ["t2"] and world.doc()["state"] == "active"
+    world.svc.spawn = real_spawn
+    world.spawned.clear()
+    rc, out = retry()
+    assert rc == 3 and "orchestrator=restarted" in out and "restart-failed" not in out and "local-claimed=t2" in out, out
+    assert world.spawned == [cd.orchestrator_argv(world.root, "r1", resume=True)]
+
+
 def test_the_local_claim_is_persisted_before_the_local_ids_are_first_emitted(world: World) -> None:
     """A retry used to hand the original local list back, so a local task the first caller had already started ran twice."""
     local = task("t2", "src/b/**", local_only=True, local_reason="touches secrets")

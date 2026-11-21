@@ -1,7 +1,7 @@
 ---
 name: swarm
 description: "Ad-hoc parallel task executor. Pass natural language tasks directly (or --tasks-file); independent tasks use concurrent host-native volume/execution/judgment roles and dependent tasks run serially. No spec directory required; use feature-implement for full-feature work."
-version: "2.2.5"
+version: "2.2.6"
 permissions:
   filesystem: write
   network: true
@@ -87,13 +87,19 @@ Otherwise skip it entirely and continue below exactly as before.
    cloud. Never run those tasks locally and never call `start` again for that
    run. The refusal line ends with `batch=same`, `batch=same local-claimed=<ids>`,
    `batch=other` or `batch=unknown`, optionally followed by
-   `orchestrator=restarted`: `start` itself compared this batch (every task id,
+   `orchestrator=restarted` or `orchestrator=restart-failed`: `start` itself compared this batch (every task id,
    cloud and local, its content, its dependencies and its order) with the whole
    batch the first attempt started. `batch=same` means an exact match; a
    superset, a subset or an edited batch is `batch=other`, and a run started by
    an older release (no stored batch) or whose inputs are incomplete is
    `batch=unknown`. On `batch=same`, `orchestrator=restarted` means `start`
-   found no orchestrator for the run and started one.
+   found no orchestrator for the run and started one. `orchestrator=restart-failed`
+   means it found none and could not start one (a resource or filesystem
+   failure): the run is active with no orchestrator, `reconcile.sh` cannot fix
+   that, and the local claims stand. Report it to the operator with the run id
+   and the cause to fix; this is the one case in which the same `start` (same
+   run id, same tasks file) may be repeated, once the cause is fixed. Run no
+   local task meanwhile.
    Run `bash scripts/gsd/cloud-dispatch.sh status --run <run> --json` and treat
    the run as started only on `batch=same`: report it as in step 8, and if
    `orchestrator.alive` is false and the line did not say

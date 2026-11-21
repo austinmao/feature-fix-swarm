@@ -1342,6 +1342,10 @@ def _finish_start(svc: Services, root: Path, run: str) -> None:
             _initialize_run(svc, root, run, doc["integration"]["tip"], fresh=False)
 
 
+class _RestartFailed(Exception):
+    """The spawn of a restarted orchestrator raised ``OSError``."""
+
+
 def _restart_unowned_run(svc: Services, root: Path, run: str) -> bool:
     """An initialized, active run that no process owns (its start died before the spawn, or its orchestrator died
     before registering a lifecycle record reconcile could see) gets an ``orchestrate --resume``, which takes the
@@ -1349,7 +1353,10 @@ def _restart_unowned_run(svc: Services, root: Path, run: str) -> bool:
     doc = ledger.read(ledger.run_ledger_path(root, run))
     if not doc.get("initialized") or doc["state"] != ledger.RUN_ACTIVE or not probe_lock_free(root, run):
         return False
-    svc.spawn(orchestrator_argv(root, run, resume=True), ledger.run_dir(root, run) / "orchestrate.log", root)
+    try:
+        svc.spawn(orchestrator_argv(root, run, resume=True), ledger.run_dir(root, run) / "orchestrate.log", root)
+    except OSError as exc:  # no process was started and nothing was recorded: say so, never look like an ordinary retry
+        raise _RestartFailed(str(exc)) from exc
     return True
 
 
@@ -1362,6 +1369,8 @@ def _run_exists(svc: Services, root: Path, run: str, raw: List[Any], sequential:
             _finish_start(svc, root, run)
             if _restart_unowned_run(svc, root, run):
                 tokens += " orchestrator=restarted"
+        except _RestartFailed:  # the claims and the ledger are untouched: the same retry tries again
+            tokens += " orchestrator=restart-failed"
         except (Refused, ledger.LedgerError, OSError):
             pass  # busy (an in-flight start or a live orchestrator) or unreadable: the classification stands
     return Refused("RUN_EXISTS", "run %s already has a ledger: read it with `status --run %s`; never run its tasks "
