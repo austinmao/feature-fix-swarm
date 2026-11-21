@@ -11,14 +11,14 @@ import sys
 
 try:  # ``python -m`` is preferred; retain the fixed script entry point too.
     from .worker_channel import (
-        WorkerChannelRefused, _MAX_WAVE_MANIFEST_BYTES, file_request,
-        parse_gsd_wave_manifest, request,
+        WorkerChannelRefused, _MAX_WAVE_MANIFEST_BYTES, _no_duplicate_object,
+        file_request, parse_gsd_wave_manifest, request,
     )
 except ImportError:  # pragma: no cover - exercised by installed argv wiring
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from run_state.worker_channel import (
-        WorkerChannelRefused, _MAX_WAVE_MANIFEST_BYTES, file_request,
-        parse_gsd_wave_manifest, request,
+        WorkerChannelRefused, _MAX_WAVE_MANIFEST_BYTES, _no_duplicate_object,
+        file_request, parse_gsd_wave_manifest, request,
     )
 from process_identity import ProcessIdentity
 
@@ -152,7 +152,7 @@ def _scope_from_environment() -> tuple[str, dict]:
             or not isinstance(encoded, str) or not 1 <= len(encoded.encode()) <= 4096):
         raise _refuse("WAVE_CHANNEL_UNAVAILABLE")
     try:
-        scope = json.loads(encoded, object_pairs_hook=lambda pairs: _strict_scope(pairs))
+        scope = json.loads(encoded, object_pairs_hook=_no_duplicate_object)
     except (ValueError, TypeError) as error:
         raise _refuse("WAVE_CHANNEL_UNAVAILABLE") from error
     expected = {"repository_id", "run_id", "activity_id", "intent_id", "generation", "supervisor_identity"}
@@ -173,7 +173,7 @@ def _file_channel_from_environment() -> tuple[str, str] | None:
     if not isinstance(encoded, str) or not 1 <= len(encoded.encode()) <= 8192:
         raise _refuse("WAVE_CHANNEL_UNAVAILABLE")
     try:
-        value = json.loads(encoded, object_pairs_hook=lambda pairs: _strict_scope(pairs))
+        value = json.loads(encoded, object_pairs_hook=_no_duplicate_object)
     except (ValueError, TypeError) as error:
         raise _refuse("WAVE_CHANNEL_UNAVAILABLE") from error
     if (not isinstance(value, dict) or set(value) != {"root", "capability"}
@@ -192,15 +192,6 @@ def _self_identity():
         return ProcessIdentity.current()
     except ProcessLookupError:
         return {"pid": os.getpid()}
-
-
-def _strict_scope(pairs):
-    result = {}
-    for key, value in pairs:
-        if key in result:
-            raise ValueError("duplicate scope key")
-        result[key] = value
-    return result
 
 
 def main() -> int:

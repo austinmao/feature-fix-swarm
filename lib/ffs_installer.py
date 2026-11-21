@@ -80,6 +80,7 @@ CODEX_VERSION_POLICY = ">=0.137.0,<0.148.0 or exact 0.154.0 / 0.155.1 / 0.156.1 
 # managed copy went silently stale while doctor reported PASS.
 MANAGED_LIB_FILES: tuple[tuple[str, str], ...] = (
     ("lib/gates.py", "gates.py"),
+    ("lib/clean_code_metrics.py", "clean_code_metrics.py"),
     ("lib/runtime_proof.py", "runtime_proof.py"),
     ("lib/model_requests.py", "model_requests.py"),
     ("lib/host_capabilities.py", "host_capabilities.py"),
@@ -2877,6 +2878,7 @@ def reconcile_consumer(source: Path, target: Path) -> int:
         "lib/host_capabilities.py",
         "lib/process_identity.py",
         "lib/gates.py",
+        "lib/clean_code_metrics.py",
         "lib/runtime_proof.py",
     ]
     # spec-004 INT-003: plan-wall.sh (already covered by the scripts/gsd/*.sh

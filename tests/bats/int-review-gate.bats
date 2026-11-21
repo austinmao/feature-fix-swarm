@@ -21,7 +21,7 @@ setup() {
 }
 
 @test "INT-001: --all tier call pins REVIEW_TIER_BASE=main on review-tier.sh --all" {
-  grep -F 'REVIEW_TIER_BASE=main scripts/gsd/review-tier.sh --all' skills/review-gate/SKILL.md
+  grep -F 'REVIEW_TIER_BASE=main "$FFS_T/scripts/gsd/review-tier.sh" --all' skills/review-gate/SKILL.md
 }
 
 @test "INT-001: LIGHT tier imperatively SKIPs Pass 2 and Pass 3" {
@@ -81,7 +81,7 @@ setup() {
 }
 
 @test "INT-001: review-gate retains the 1.9 contract after host-neutral bump" {
-  grep -F 'version: "1.17.0"' skills/review-gate/SKILL.md
+  grep -F 'version: "1.19.0"' skills/review-gate/SKILL.md
 }
 
 @test "spec 005: pass-1 finding format carries CAUSE/PROVENANCE/PROOF" {

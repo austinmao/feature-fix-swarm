@@ -236,17 +236,22 @@ def _save_store(store: Path, data: dict, *, durable: bool = False) -> None:
             os.unlink(tmp)
 
 
-def _lock_seam_hold(fd: int) -> None:
-    """Test-only event seam: publish the held lock identity, await release."""
-    seam = os.environ.get("GATES_TEST_HOLD_LOCK")
-    if not seam:
-        return
+def _publish_and_hold(seam: str, fd: int) -> None:
+    """Test-only: publish the held lock identity under ``seam``, poll for its release file."""
     st = os.fstat(fd)
     with open(os.path.join(seam, "held"), "w") as fh:
         fh.write("%d:%d" % (st.st_dev, st.st_ino))
     deadline = time.monotonic() + 30
     while not os.path.exists(os.path.join(seam, "release")) and time.monotonic() < deadline:
         time.sleep(0.05)
+
+
+def _lock_seam_hold(fd: int) -> None:
+    """Test-only event seam: publish the held lock identity, await release."""
+    seam = os.environ.get("GATES_TEST_HOLD_LOCK")
+    if not seam:
+        return
+    _publish_and_hold(seam, fd)
 
 
 class _StoreLock:
@@ -3089,12 +3094,7 @@ def _takeover_pause_locked(lock_fd: int) -> None:
     seam = os.environ.get("TAKEOVER_TEST_PAUSE_LOCKED")
     if not seam:
         return
-    st = os.fstat(lock_fd)
-    with open(os.path.join(seam, "held"), "w") as fh:
-        fh.write("%d:%d" % (st.st_dev, st.st_ino))
-    deadline = time.monotonic() + 30
-    while not os.path.exists(os.path.join(seam, "release")) and time.monotonic() < deadline:
-        time.sleep(0.05)
+    _publish_and_hold(seam, lock_fd)
 
 
 def _read_evidence_at(store_dir_fd: int) -> tuple[bytes, os.stat_result]:
