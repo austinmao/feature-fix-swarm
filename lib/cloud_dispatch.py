@@ -1328,7 +1328,7 @@ def _integration_ref_removal_advice(svc: Services, root: Path, ref: str, oid: st
     target = git(svc, root, ["symbolic-ref", "-q", ref])
     if target.ok:
         return ("it is a symbolic ref to %s: inspect that target, and remove only the symbolic ref itself "
-                "(`git symbolic-ref --delete %s`)" % (target.text().strip() or "another ref", ref))
+                "(`git symbolic-ref --delete %s`)" % (_listable(target.text().strip()) or "another ref", ref))
     return "inspect it and delete it by hand (`git update-ref --no-deref -d %s %s`)" % (ref, oid)
 
 
@@ -1376,8 +1376,8 @@ def _merge_created(doc: Dict[str, Any], seq: int, flags: Dict[str, bool]) -> Dic
 
 
 class _RestartFailed(Exception):
-    """The spawn of a restarted orchestrator raised ``OSError``; ``cause`` is its errno name only (never the message,
-    which can carry a path or a command line)."""
+    """The spawn of a restarted orchestrator raised ``OSError``; ``cause`` is its errno name, or the fixed token
+    ``OSERROR`` when it has none (never the message, which can carry a path or a command line)."""
 
     def __init__(self, cause: str) -> None:
         super().__init__(cause)
@@ -3067,8 +3067,10 @@ class Orchestrator:
             return
         if existing is None and not git(self.svc, self.root, ["update-ref", "--no-deref", ref, base_oid, ""]).ok:
             raise StoreError("TASK_BRANCH", "cannot create %s" % ref)
-        if existing is None and not self.record_created(name, gen, seq, {"local": True}):
-            return  # the local branch is journaled as ours before anything else can fail; a stale task drops the step
+        if existing is None:
+            # Journaled as ours before anything else can fail.  The write carries no generation check (locked_update
+            # raises no stale code and _merge_created only adds a proof), and none is needed: this run made the ref.
+            self.record_created(name, gen, seq, {"local": True})
         prior = next((j.get("created") or {} for j in doc.get("journal", []) if j.get("seq") == seq), {})
         # a retry after a failed push finds the branch it made itself: the proof journaled by the attempt that made it stands
         created = {"local": existing is None or prior.get("local") is True,
@@ -3100,7 +3102,8 @@ class Orchestrator:
         self.finish_admit(name, gen, base_oid, seq, created)
 
     def record_created(self, name: str, gen: int, seq: int, flags: Dict[str, bool]) -> bool:
-        """Journal, at once, a creation proof for the admit entry ``seq``; ``False`` when the task moved on."""
+        """Journal, at once, a creation proof for the admit entry ``seq``.  The merge raises no stale-task code, so this
+        is ``True`` unless the ledger itself fails (which propagates)."""
         return self.apply(name, gen, lambda d: _merge_created(d, seq, flags), "creation-proof")
 
     def push_failed(self, name: str, gen: int, ref: str, rc: int, seq: int, why: str = "") -> None:

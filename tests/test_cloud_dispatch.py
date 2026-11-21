@@ -853,6 +853,24 @@ def test_unconfirmed_integration_ref_advice_never_names_a_command_that_follows_a
     assert run_git(world.root, "rev-parse", "refs/heads/victim" if symbolic else ref) == world.base
 
 
+def test_unconfirmed_integration_ref_advice_withholds_a_symbolic_target_the_scanner_flags(
+        world: World, capsys: pytest.CaptureFixture) -> None:
+    assert world.start(tasks=[T1])[0] == 0
+    ref = L.integration_ref("r1")
+    L.locked_update(L.run_ledger_path(world.root, "r1"), lambda d: (d.pop("initialized"), d.pop("integration_ref_created"), d)[2])
+    secret_target = "refs/heads/AKIAIOSFODNN7EXAMPLE"  # a name the secret scanner flags
+    run_git(world.root, "update-ref", secret_target, world.base)
+    run_git(world.root, "update-ref", "--no-deref", "-d", ref)
+    run_git(world.root, "symbolic-ref", ref, secret_target)
+    capsys.readouterr()
+    rc, out = world.cli("start", "--run", "r1", "--tasks", world.tasks_file([T1], "same.json"), "--policy", "auto",
+                        "--root", str(world.root))
+    out += capsys.readouterr().err
+    assert rc == 78 and "INTEGRATION_REF_UNCONFIRMED" in out, out
+    assert "AKIAIOSFODNN7EXAMPLE" not in out, out
+    assert "symbolic ref to [withheld sha256:" in out and "git symbolic-ref --delete %s" % ref in out, out
+
+
 def test_start_over_a_dangling_symbolic_ref_creates_no_branch_behind_it(world: World) -> None:
     run_git(world.root, "symbolic-ref", "refs/heads/ffs/cloud/r1/integration", "refs/heads/victim")  # dangling
     world.start(tasks=[T1])
