@@ -471,9 +471,9 @@ def test_live_client_that_prints_the_not_a_tty_phrase_is_not_failed(install_fake
 @pytest.mark.parametrize(
     "prompt",
     [
-        "Claude-Session: https://claude.ai/code/session_01Eo5hRepnKYHpZRc2ZhMcmr",
+        "Claude-Session: https://claude.ai/code/session_01FixtureOnly0000000000A",
         "owns: src/session_v2handler/**",
-        "see cse_01Eo5hRepnKYHpZRc2Zh for context",
+        "see cse_01FixtureOnly0000000 for context",
         "Task: print that this requires an interactive terminal",
         "Task: handle the Quick safety check dialog; never press Yes, proceed",
     ],
@@ -540,7 +540,7 @@ def test_claude_launch_missing_branch_fails(install_fake, origin, state, tmp_pat
         ({"effort": "-high"}, "EFFORT_INVALID"),
         ({"prompt": ""}, "PROMPT_INVALID"),
         ({"prompt": "a\x00b"}, "PROMPT_INVALID"),
-        ({"prompt": "see session_01Eo5hRepnKYHpZRc2ZhMcmr"}, "PROMPT_AMBIGUOUS"),
+        ({"prompt": "see session_01FixtureOnly0000000000A"}, "PROMPT_AMBIGUOUS"),
     ],
 )
 def test_claude_launch_rejects_bad_inputs(install_fake, origin, state, tmp_path, overrides, code):
