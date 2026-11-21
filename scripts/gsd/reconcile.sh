@@ -146,7 +146,10 @@ for record in "${records[@]}"; do
     if [[ "$argv$relaunch_err_text" == *budget-exhausted* ]]; then echo "RECONCILE:budget-exhausted run=$run"; else echo "RECONCILE:invalid-record run=$run"; fi
     claim_release "$claim" "$generation"; continue
   fi
-  mapfile -t command < <(printf '%s' "$argv" | jq -r '.[]')
+  # bash 3.2 (launchd runs /bin/bash on macOS) has no mapfile; read line by line.
+  # Same semantics as before: one element per JSON array entry, split on newlines.
+  command=()
+  while IFS= read -r line || [ -n "$line" ]; do command+=("$line"); done < <(printf '%s' "$argv" | jq -r '.[]')
   [ "${#command[@]}" -gt 0 ] || { echo "RECONCILE:invalid-argv run=$run"; claim_release "$claim" "$generation"; continue; }
   case "${command[0]}" in /*) ;; *) command[0]="$ROOT/${command[0]}" ;; esac
   executable="$(realpath "${command[0]}" 2>/dev/null || true)"

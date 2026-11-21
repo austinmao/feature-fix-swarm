@@ -8,6 +8,10 @@ all skills.
 
 ## Unreleased
 
+### Fixed (2026-11-19, reconcile relaunch on macOS bash 3.2)
+
+- The launchd reconcile job could not relaunch runs on stock macOS bash 3.2 (`mapfile` is missing there, so the relaunch failed after the budget was charged). It now relaunches stale runs as designed, a behavior change for anyone with the agent installed.
+
 ### Changed (2026-11-20, review-gate runs helpers from the base ref)
 
 - review-gate 1.19.0 no longer executes FFS helper code from the tree it reviews.
