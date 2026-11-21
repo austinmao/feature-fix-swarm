@@ -39,7 +39,7 @@ EOF
   [[ "$output" == *'"verdict":"APPROVED"'* ]]
   [ -f "$BATS_TEST_TMPDIR/codex.args" ]
   [ ! -f "$BATS_TEST_TMPDIR/claude.args" ]
-  grep -F 'model="gpt-6-sol"' "$BATS_TEST_TMPDIR/codex.args"
+  grep -F 'model="gpt-6.2-sol"' "$BATS_TEST_TMPDIR/codex.args"
   grep -F 'model_reasoning_effort="xhigh"' "$BATS_TEST_TMPDIR/codex.args"
 }
 

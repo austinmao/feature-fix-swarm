@@ -489,7 +489,7 @@ fi
 _pw_planner_alias() {
   # Default matches the shipped gsd-config template's gsd-planner override
   # (opus) — Anthropic's guidance is that most workloads start with Opus 5.5,
-  # with Fable 5.1 the frontier escalation tier (plan-checker seat), so the
+  # with Fable 5.2 the frontier escalation tier (plan-checker seat), so the
   # planner default is opus. A config that still pins "fable" is honoured.
   [ -f "$CONFIG" ] || { echo opus; return; }
   jq -r '.model_overrides["gsd-planner"] // "opus"' "$CONFIG" 2>/dev/null || echo opus
@@ -497,7 +497,7 @@ _pw_planner_alias() {
 
 _pw_resolve_claude_id() {
   case "$1" in
-    fable) echo claude-fable-5-1 ;;
+    fable) echo claude-fable-5-2 ;;
     opus) echo claude-opus-5-5 ;;
     sonnet) echo claude-sonnet-5-5 ;;
     haiku) echo claude-haiku-5-5 ;;
@@ -548,14 +548,14 @@ _pw_cross_vendor_fallback_state() {
 _pw_same_vendor_ordered_rungs() {
   local host="$1" planner="$2" model effort out=""
   if [ "$host" = codex ]; then
-    for pair in gpt-6-sol/xhigh gpt-5.6-terra/medium gpt-5.6-luna/low; do
+    for pair in gpt-6.2-sol/xhigh gpt-6.1-terra/medium gpt-6-luna/low; do
       model="${pair%/*}"; effort="${pair#*/}"
       [ "$model" = "$planner" ] && continue
       out="${out}${model}|${effort}
 "
     done
   else
-    for model in claude-fable-5-1 claude-opus-5-5 claude-sonnet-5-5 claude-haiku-5-5; do
+    for model in claude-fable-5-2 claude-opus-5-5 claude-sonnet-5-5 claude-haiku-5-5; do
       [ "$model" = "$planner" ] && continue
       out="${out}${model}|
 "
@@ -752,7 +752,7 @@ _pw_select_and_review() {
   local opp_model opp_effort ordered first_model first_effort rung_file
 
   opposite="$(adversary_kind_for_host "$host")"
-  if [ "$opposite" = codex ]; then opp_model=gpt-6-sol; opp_effort=xhigh
+  if [ "$opposite" = codex ]; then opp_model=gpt-6.2-sol; opp_effort=xhigh
   else opp_model=claude-opus-5-5; opp_effort=""; fi
 
   trail_file="$(mktemp "${TMPDIR:-/tmp}/pw-trail.XXXXXX")"

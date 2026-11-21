@@ -1,14 +1,14 @@
 ---
 name: preflight
 description: "Prove every env var, secret, and service the run will need is present and reachable BEFORE starting an unattended or overnight run. Use at the planning stage — after decompose, before /feature-implement — so the run never stalls at 3am on a missing variable or dead endpoint."
-version: "2.0.0"
+version: "2.0.1"
 ---
 
 # /preflight
 
 ## Host dispatch contract
 
-- Codex: `$skill`, Codex collaboration roles, and GPT-5.6 tiers.
+- Codex: `$skill`, Codex collaboration roles, and GPT-6 tiers.
 - Claude: `/skill`, Agent/Skill tools, and Claude aliases.
 - A bare `/skill` in this shared source denotes the Claude form; Codex dispatches the same named skill as `$skill`.
 

@@ -33,15 +33,15 @@ EOF
 
   run bash "$SCRIPT" "$CODEX_ROOT"
   [ "$status" -eq 0 ]
-  grep -F 'model = "gpt-6-astra"' "$CODEX_ROOT/agents/gsd-planner-fable.toml"
+  grep -F 'model = "gpt-6.2-astra"' "$CODEX_ROOT/agents/gsd-planner-fable.toml"
   # spec-004 AC-004 effort split: fable and opus both materialize at xhigh
-  # (gpt-6-sol judgment repin — opus no longer distinguishes at high)
+  # (gpt-6.2-sol judgment repin — opus no longer distinguishes at high)
   grep -F 'model_reasoning_effort = "xhigh"' "$CODEX_ROOT/agents/gsd-planner-fable.toml"
-  grep -F 'model = "gpt-6-sol"' "$CODEX_ROOT/agents/gsd-reviewer-opus.toml"
+  grep -F 'model = "gpt-6.2-sol"' "$CODEX_ROOT/agents/gsd-reviewer-opus.toml"
   grep -F 'model_reasoning_effort = "xhigh"' "$CODEX_ROOT/agents/gsd-reviewer-opus.toml"
-  grep -F 'model = "gpt-5.6-terra"' "$CODEX_ROOT/agents/gsd-executor-sonnet.toml"
+  grep -F 'model = "gpt-6.1-terra"' "$CODEX_ROOT/agents/gsd-executor-sonnet.toml"
   grep -F 'model_reasoning_effort = "medium"' "$CODEX_ROOT/agents/gsd-executor-sonnet.toml"
-  grep -F 'model = "gpt-5.6-luna"' "$CODEX_ROOT/agents/gsd-scout-haiku.toml"
+  grep -F 'model = "gpt-6-luna"' "$CODEX_ROOT/agents/gsd-scout-haiku.toml"
   grep -F 'model_reasoning_effort = "low"' "$CODEX_ROOT/agents/gsd-scout-haiku.toml"
 }
 
@@ -52,7 +52,7 @@ EOF
 
   run bash "$SCRIPT" "$CODEX_ROOT"
   [ "$status" -eq 0 ]
-  grep -F 'model = "gpt-5.6-terra"' "$CODEX_ROOT/agents/gsd-full-sonnet.toml"
+  grep -F 'model = "gpt-6.1-terra"' "$CODEX_ROOT/agents/gsd-full-sonnet.toml"
   [ "$(cat "$CODEX_ROOT/agents/custom.toml")" = "$before" ]
 }
 
@@ -61,18 +61,39 @@ EOF
   write_agent gsd-native-terra gpt-5.6-terra
   write_agent gsd-native-sol gpt-5.6-sol
   write_agent gsd-native-sol6 gpt-6-sol
+  write_agent gsd-native-astra6 gpt-6-astra
 
   run bash "$SCRIPT" "$CODEX_ROOT"
   [ "$status" -eq 0 ]
+  # Previously pinned ids are served exactly as pinned, never rewritten.
   grep -F 'model = "gpt-5.6-luna"' "$CODEX_ROOT/agents/gsd-native-luna.toml"
   grep -F 'model_reasoning_effort = "low"' "$CODEX_ROOT/agents/gsd-native-luna.toml"
   grep -F 'model = "gpt-5.6-terra"' "$CODEX_ROOT/agents/gsd-native-terra.toml"
   grep -F 'model_reasoning_effort = "medium"' "$CODEX_ROOT/agents/gsd-native-terra.toml"
-  # gpt-5.6-sol remains a recognized native pin (lower admission rung).
   grep -F 'model = "gpt-5.6-sol"' "$CODEX_ROOT/agents/gsd-native-sol.toml"
   grep -F 'model_reasoning_effort = "high"' "$CODEX_ROOT/agents/gsd-native-sol.toml"
   grep -F 'model = "gpt-6-sol"' "$CODEX_ROOT/agents/gsd-native-sol6.toml"
   grep -F 'model_reasoning_effort = "xhigh"' "$CODEX_ROOT/agents/gsd-native-sol6.toml"
+  grep -F 'model = "gpt-6-astra"' "$CODEX_ROOT/agents/gsd-native-astra6.toml"
+  grep -F 'model_reasoning_effort = "xhigh"' "$CODEX_ROOT/agents/gsd-native-astra6.toml"
+}
+
+@test "current Codex tier IDs retain their model and receive canonical effort pins" {
+  write_agent gsd-cur-luna gpt-6-luna
+  write_agent gsd-cur-terra gpt-6.1-terra
+  write_agent gsd-cur-sol gpt-6.2-sol
+  write_agent gsd-cur-astra gpt-6.2-astra
+
+  run bash "$SCRIPT" "$CODEX_ROOT"
+  [ "$status" -eq 0 ]
+  grep -F 'model = "gpt-6-luna"' "$CODEX_ROOT/agents/gsd-cur-luna.toml"
+  grep -F 'model_reasoning_effort = "low"' "$CODEX_ROOT/agents/gsd-cur-luna.toml"
+  grep -F 'model = "gpt-6.1-terra"' "$CODEX_ROOT/agents/gsd-cur-terra.toml"
+  grep -F 'model_reasoning_effort = "medium"' "$CODEX_ROOT/agents/gsd-cur-terra.toml"
+  grep -F 'model = "gpt-6.2-sol"' "$CODEX_ROOT/agents/gsd-cur-sol.toml"
+  grep -F 'model_reasoning_effort = "xhigh"' "$CODEX_ROOT/agents/gsd-cur-sol.toml"
+  grep -F 'model = "gpt-6.2-astra"' "$CODEX_ROOT/agents/gsd-cur-astra.toml"
+  grep -F 'model_reasoning_effort = "xhigh"' "$CODEX_ROOT/agents/gsd-cur-astra.toml"
 }
 
 @test "full Codex role overrides pin generated agents without weakening alias pins" {
@@ -82,18 +103,18 @@ EOF
   write_agent_without_model gsd-frontier
   CONFIG="$BATS_TEST_TMPDIR/native-config.json"
   cat > "$CONFIG" <<'JSON'
-{"model_overrides":{"gsd-volume":"gpt-5.6-luna","gsd-execution":"gpt-5.6-terra","gsd-judgment":"gpt-5.6-sol","gsd-frontier":"fable"}}
+{"model_overrides":{"gsd-volume":"gpt-6-luna","gsd-execution":"gpt-6.1-terra","gsd-judgment":"gpt-5.6-sol","gsd-frontier":"fable"}}
 JSON
 
   GSD_MODEL_CONFIG="$CONFIG" run bash "$SCRIPT" "$CODEX_ROOT"
   [ "$status" -eq 0 ]
-  grep -F 'model = "gpt-5.6-luna"' "$CODEX_ROOT/agents/gsd-volume.toml"
+  grep -F 'model = "gpt-6-luna"' "$CODEX_ROOT/agents/gsd-volume.toml"
   grep -F 'model_reasoning_effort = "low"' "$CODEX_ROOT/agents/gsd-volume.toml"
-  grep -F 'model = "gpt-5.6-terra"' "$CODEX_ROOT/agents/gsd-execution.toml"
+  grep -F 'model = "gpt-6.1-terra"' "$CODEX_ROOT/agents/gsd-execution.toml"
   grep -F 'model_reasoning_effort = "medium"' "$CODEX_ROOT/agents/gsd-execution.toml"
   grep -F 'model = "gpt-5.6-sol"' "$CODEX_ROOT/agents/gsd-judgment.toml"
   grep -F 'model_reasoning_effort = "high"' "$CODEX_ROOT/agents/gsd-judgment.toml"
-  grep -F 'model = "gpt-6-astra"' "$CODEX_ROOT/agents/gsd-frontier.toml"
+  grep -F 'model = "gpt-6.2-astra"' "$CODEX_ROOT/agents/gsd-frontier.toml"
   grep -F 'model_reasoning_effort = "xhigh"' "$CODEX_ROOT/agents/gsd-frontier.toml"
 }
 
@@ -120,7 +141,7 @@ JSON
   printf '%s\n' '{"model_overrides":{}}' > "$CONFIG"
   GSD_MODEL_CONFIG="$CONFIG" bash "$SCRIPT" "$CODEX_ROOT"
   first="$(cat "$CODEX_ROOT/agents/gsd-planner.toml")"
-  grep -F 'model = "gpt-6-astra"' "$CODEX_ROOT/agents/gsd-planner.toml"
+  grep -F 'model = "gpt-6.2-astra"' "$CODEX_ROOT/agents/gsd-planner.toml"
   grep -F 'model_reasoning_effort = "xhigh"' "$CODEX_ROOT/agents/gsd-planner.toml"
 
   GSD_MODEL_CONFIG="$CONFIG" bash "$SCRIPT" "$CODEX_ROOT"
@@ -138,10 +159,10 @@ JSON
   GSD_MODEL_CONFIG="$CONFIG" run bash "$SCRIPT" "$CODEX_ROOT"
   [ "$status" -eq 0 ]
   [[ "$output" == *"materialized 2 agent model pin(s)"* ]]
-  grep -F 'model = "gpt-6-astra"' "$CODEX_ROOT/agents/gsd-planner.toml"
+  grep -F 'model = "gpt-6.2-astra"' "$CODEX_ROOT/agents/gsd-planner.toml"
   # spec-004 AC-004: fable override materializes at xhigh
   grep -F 'model_reasoning_effort = "xhigh"' "$CODEX_ROOT/agents/gsd-planner.toml"
-  grep -F 'model = "gpt-5.6-terra"' "$CODEX_ROOT/agents/gsd-executor.toml"
+  grep -F 'model = "gpt-6.1-terra"' "$CODEX_ROOT/agents/gsd-executor.toml"
   grep -F 'model_reasoning_effort = "medium"' "$CODEX_ROOT/agents/gsd-executor.toml"
 }
 
@@ -152,18 +173,18 @@ JSON
   write_agent_without_model gsd-research-synthesizer
   CONFIG="$BATS_TEST_TMPDIR/config.json"
   cat > "$CONFIG" <<'JSON'
-{"model_overrides":{"gsd-planner":"gpt-6-astra","gsd-plan-checker":"gpt-5.6-sol","gsd-executor":"gpt-5.6-terra","gsd-research-synthesizer":"gpt-5.6-luna"}}
+{"model_overrides":{"gsd-planner":"gpt-6.2-astra","gsd-plan-checker":"gpt-5.6-sol","gsd-executor":"gpt-6.1-terra","gsd-research-synthesizer":"gpt-6-luna"}}
 JSON
 
   GSD_MODEL_CONFIG="$CONFIG" run bash "$SCRIPT" "$CODEX_ROOT"
   [ "$status" -eq 0 ]
   [[ "$output" == *"materialized 4 agent model pin(s)"* ]]
-  grep -F 'model = "gpt-6-astra"' "$CODEX_ROOT/agents/gsd-planner.toml"
+  grep -F 'model = "gpt-6.2-astra"' "$CODEX_ROOT/agents/gsd-planner.toml"
   grep -F 'model_reasoning_effort = "xhigh"' "$CODEX_ROOT/agents/gsd-planner.toml"
   grep -F 'model = "gpt-5.6-sol"' "$CODEX_ROOT/agents/gsd-plan-checker.toml"
   grep -F 'model_reasoning_effort = "high"' "$CODEX_ROOT/agents/gsd-plan-checker.toml"
-  grep -F 'model = "gpt-5.6-terra"' "$CODEX_ROOT/agents/gsd-executor.toml"
+  grep -F 'model = "gpt-6.1-terra"' "$CODEX_ROOT/agents/gsd-executor.toml"
   grep -F 'model_reasoning_effort = "medium"' "$CODEX_ROOT/agents/gsd-executor.toml"
-  grep -F 'model = "gpt-5.6-luna"' "$CODEX_ROOT/agents/gsd-research-synthesizer.toml"
+  grep -F 'model = "gpt-6-luna"' "$CODEX_ROOT/agents/gsd-research-synthesizer.toml"
   grep -F 'model_reasoning_effort = "low"' "$CODEX_ROOT/agents/gsd-research-synthesizer.toml"
 }

@@ -8,6 +8,10 @@ all skills.
 
 ## Unreleased
 
+### Fixed (2026-11-21, model-fallback legacy 5-1 pins)
+
+- `model-fallback.sh` now decides availability and recovery per pinned model id: a config still pinned to a dead `claude-fable-5-1` is demoted to opus even when `claude-fable-5-2` answers, and a marker's 5-1 original is held (not restored) until 5-1 itself is available.
+
 ### Fixed (2026-11-19, reconcile relaunch on macOS bash 3.2)
 
 - The launchd reconcile job could not relaunch runs on stock macOS bash 3.2 (`mapfile` is missing there, so the relaunch failed after the budget was charged). It now relaunches stale runs as designed, a behavior change for anyone with the agent installed.
@@ -57,6 +61,27 @@ all skills.
   (`gsd_wave_bridge.py`), review-output parsing (`spec_review.py`), the retained-event
   lookup (`repair_integration.py`) and the test-seam hold (`gates.py`). Behavior is
   pinned by `tests/test_dedupe_characterization.py`.
+
+### Changed (2026-11-19, model tier refresh)
+
+- Tier table moved to the GPT-6 family releases (6.2 frontier and judgment, 6.1
+  execution, 6 volume). Codex: frontier `gpt-6.2-astra`/xhigh,
+  judgment `gpt-6.2-sol`/xhigh, execution `gpt-6.1-terra`/medium, volume
+  `gpt-6-luna`/low. Claude: frontier `claude-fable-5-2` (was `claude-fable-5-1`);
+  opus/sonnet/haiku unchanged. Live pins moved in `lib/model_requests.py`,
+  `lib/dispatch.py`, the `scripts/gsd/` levers, `prompts/decompose-spec.md`,
+  README and docs.
+- Previously pinned ids are kept as pinned: `gpt-6-astra`, `gpt-6-sol`,
+  `gpt-5.6-terra`, `gpt-5.6-luna`, `gpt-5.6-sol` and `claude-fable-5-1` are not
+  rewritten by `model-equivalents.sh` or `codex-model-sync.sh`.
+  `model-fallback.sh` probes `claude-fable-5-1` itself and demotes it to Opus
+  only when that id is unavailable; both Fable ids stay fenced to Opus for
+  security work.
+- Upgrade note: rewritten agent TOMLs change `role_config_hash`, so in-flight
+  runs hit "resume tuple drift". Resume them with
+  `GSD_FRESH_START_REASON=role-pin-compat-sync`.
+- Skills whose "GPT-5.6 tiers" phrase became "GPT-6 tiers" each got a patch
+  version bump.
 
 ### Added (2026-11-17, operator-only guard hook, #253)
 

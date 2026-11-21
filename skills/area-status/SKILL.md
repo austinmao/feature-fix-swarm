@@ -1,14 +1,14 @@
 ---
 name: area-status
 description: "Area health check: is a named area of the codebase actually done, evidenced, and safe to call green — not just described as done. Fan out volume, execution, and judgment roles over deterministic facts, evidence age, and post-evidence commit drift; write a graded, ref-pinned report. `--live` gates any outward probe behind a typed check-grant."
-version: "1.0.0"
+version: "1.0.1"
 ---
 
 # /area-status <area> [--live]
 
 ## Host dispatch contract
 
-- Codex: invoke skills as `$skill`; use Codex collaboration roles and GPT-5.6 model tiers.
+- Codex: invoke skills as `$skill`; use Codex collaboration roles and GPT-6 model tiers.
 - Claude: invoke skills as `/skill`; use Claude Agent/Skill tools and Claude model aliases.
 - Examples that name both hosts are routing contracts. Never send one host's command syntax to the other.
 - A bare `/skill` in this shared source denotes the Claude form; Codex dispatches the same named skill as `$skill`.

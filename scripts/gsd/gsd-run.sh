@@ -262,7 +262,7 @@ if [ -z "$MODEL_REQUEST_JSON" ]; then
     sonnet) MODEL_REQUEST_JSON='{"kind":"tier","name":"execution"}' ;;
     opus) MODEL_REQUEST_JSON='{"kind":"tier","name":"judgment"}' ;;
     haiku) MODEL_REQUEST_JSON='{"kind":"tier","name":"volume"}' ;;
-    fable) MODEL_REQUEST_JSON='{"kind":"exact","id":"claude-fable-5-1"}' ;;
+    fable) MODEL_REQUEST_JSON='{"kind":"exact","id":"claude-fable-5-2"}' ;;
     gpt-*|o[1-9]*|claude-*|gemini-*|deepseek-*|qwen-*|minimax-*)
       echo "gsd-run: raw vendor model ids require GSD_MODEL_REQUEST={kind:exact,id:...}" >&2
       exit 2
@@ -1359,7 +1359,7 @@ claude_lead_model() {
     case "$LEAD_TIER" in
       sonnet|claude-sonnet-*) model="claude-sonnet-5-5" ;;
       opus|claude-opus-*) model="claude-opus-5-5" ;;
-      fable|claude-fable-*) model="claude-fable-5-1" ;;
+      fable|claude-fable-*) model="claude-fable-5-2" ;;
       haiku|claude-haiku-*) model="claude-haiku-5-5" ;;
       *) model="$LEAD_TIER" ;;
     esac

@@ -25,10 +25,10 @@ better than self-review (F1 23.8% vs 24.6%) — statistically indistinguishable
 
 | Request | Claude resolution | Codex resolution | Default effort | Runs |
 |---|---|---|---|---|
-| **frontier** | `claude-fable-5-1` | `gpt-6-astra` | xhigh | Plan checking and explicit escalation — the single low-volume, highest-leverage seat |
-| **judgment** | `claude-opus-5-5` | `gpt-6-sol` | xhigh | Planning, debugging, verification, code/security review |
-| **execution** | `claude-sonnet-5-5` | `gpt-5.6-terra` | medium | Thin orchestration, implementation, research and research synthesis, integration, Nyquist work |
-| **volume** | `claude-haiku-5-5` | `gpt-5.6-luna` | low | Status collection and other mechanical passes — bounded-context inputs only |
+| **frontier** | `claude-fable-5-2` | `gpt-6.2-astra` | xhigh | Plan checking and explicit escalation — the single low-volume, highest-leverage seat |
+| **judgment** | `claude-opus-5-5` | `gpt-6.2-sol` | xhigh | Planning, debugging, verification, code/security review |
+| **execution** | `claude-sonnet-5-5` | `gpt-6.1-terra` | medium | Thin orchestration, implementation, research and research synthesis, integration, Nyquist work |
+| **volume** | `claude-haiku-5-5` | `gpt-6-luna` | low | Status collection and other mechanical passes — bounded-context inputs only |
 
 Defaults are declared in `templates/model-requests.json`. A request is either
 `{"kind":"tier","name":"frontier|judgment|execution|volume"}` or
@@ -47,7 +47,7 @@ most expensive tier. A role only reaches frontier through an explicit pin
 
 Read the assignments as the producer/reviewer rule in action: the planner
 runs on judgment (Opus 5.5 — Anthropic's guidance is that most workloads start
-there) while its plan checker runs on frontier (Fable 5.1) and the plan wall
+there) while its plan checker runs on frontier (Fable 5.2) and the plan wall
 adds a further distinct reviewer (below); executors run on execution while
 their verification and security reviewers run on judgment. Never use the same
 resolved model on both sides of a check.
@@ -63,7 +63,8 @@ from what each side actually resolved to — not from the tier names. Historical
 frontier and judgment could collapse onto the same Codex model (both resolved
 to `gpt-5.6-sol`, distinguished only by effort); the gpt-6-astra/gpt-6-sol
 repin gives them distinct models again, but the `relation` field still exists
-for the day a future repin re-collapses two tiers onto one model.
+for the day a future repin re-collapses two tiers onto one model. The
+2026-11-19 refresh keeps them distinct on `gpt-6.2-astra` and `gpt-6.2-sol`.
 
 ## The plan wall
 
@@ -118,10 +119,10 @@ an untyped model request:
 
 | Claude | Codex | Effort |
 |---|---|---|
-| fable | `gpt-6-astra` | `xhigh` |
-| opus | `gpt-6-sol` | `xhigh` |
-| sonnet | `gpt-5.6-terra` | `medium` |
-| haiku | `gpt-5.6-luna` | `low` |
+| fable | `gpt-6.2-astra` | `xhigh` |
+| opus | `gpt-6.2-sol` | `xhigh` |
+| sonnet | `gpt-6.1-terra` | `medium` |
+| haiku | `gpt-6-luna` | `low` |
 
 fable and opus resolve to distinct Codex models (Astra and Sol, respectively)
 via `codex_equiv_model`; `codex_equiv_effort` carries their effort (`*fable*` →
@@ -131,10 +132,16 @@ expensive Claude model. An explicit exact Fable request is not this
 compatibility mapping: it never falls back and its provenance gate cannot be
 satisfied by Sol or Opus.
 
+Older native Codex ids (`gpt-6-astra`, `gpt-6-sol`, `gpt-5.6-terra`,
+`gpt-5.6-luna`, `gpt-5.6-sol`) and `claude-fable-5-1` stay valid. They are not
+tier aliases: they are served exactly as pinned and never rewritten to the
+current tier models (`model-fallback.sh` demotes `claude-fable-5-1` only when
+that id itself is unavailable).
+
 **`GSD_LEAD_MODEL=fable` is unchanged and deliberate.** It keeps its exact
-`claude-fable-5-1` request semantics, including host-pinning and fail-closed
+`claude-fable-5-2` request semantics, including host-pinning and fail-closed
 guards — an operator naming fable wants Fable, and a tier conversion would
-silently substitute `gpt-6-astra@xhigh` on a Codex host. The tier system adds
+silently substitute `gpt-6.2-astra@xhigh` on a Codex host. The tier system adds
 `{"kind":"tier","name":"frontier"}` as the portable spelling alongside it,
 not a replacement for it.
 
@@ -149,7 +156,7 @@ for 24h in `$GSD_FALLBACK_CACHE` (default `~/.cache/gsd-model-probe`), bounded
 by `GSD_MODEL_PROBE_TIMEOUT` (default 120s).
 
 **Substitution** — `fable → opus` (`:11`). It rewrites both the short alias
-form (`"fable"`) and the full id form (`"claude-fable-5-1"`), so it works
+form (`"fable"`) and the full id form (`"claude-fable-5-2"`; `"claude-fable-5-1"` and bare `"claude-fable-5"` remain legacy forms), so it works
 whichever way your config pins models.
 
 **Marker** — every rewrite is recorded to `.planning/fable-fallback.json`

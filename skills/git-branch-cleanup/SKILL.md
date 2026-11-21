@@ -1,7 +1,7 @@
 ---
 name: git-branch-cleanup
 description: "Triage branches against the base branch, merge only CI-green non-gated ones, prune merged refs + worktrees. Squash-merge + operator-gate aware."
-version: "1.0.0"
+version: "1.0.1"
 user-invocable: true
 ---
 
@@ -9,7 +9,7 @@ user-invocable: true
 
 ## Host dispatch contract
 
-- Codex: `$skill`, Codex collaboration roles, and GPT-5.6 tiers.
+- Codex: `$skill`, Codex collaboration roles, and GPT-6 tiers.
 - Claude: `/skill`, Agent/Skill tools, and Claude aliases.
 - A bare `/skill` in this shared source denotes the Claude form; Codex dispatches the same named skill as `$skill`.
 

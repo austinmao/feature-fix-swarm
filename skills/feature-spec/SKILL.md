@@ -1,14 +1,14 @@
 ---
 name: feature-spec
 description: "Spec-first pipeline: speckit.specify → speckit.plan → speckit.clarify → spec-decompose (swarm) → preflight (default) → autonomy-grant (MAX-AUTH auto-grant default; --gated to review). Produces spec.md + plan.md + tasks.md + a proven preflight + a grant ledger, ready for /feature-implement NNN --autonomous."
-version: 2.11.0
+version: 2.11.1
 ---
 
 # /feature-spec [NNN | "description"]
 
 ## Host dispatch contract
 
-- Codex: invoke skills as `$skill`; use Codex collaboration roles and GPT-5.6 model tiers.
+- Codex: invoke skills as `$skill`; use Codex collaboration roles and GPT-6 model tiers.
 - Claude: invoke skills as `/skill`; use Claude Agent/Skill tools and Claude model aliases.
 - Examples that name both hosts are routing contracts. Never send one host's command syntax to the other.
 - A bare `/skill` in this shared source denotes the Claude form; Codex dispatches the same named skill as `$skill`.

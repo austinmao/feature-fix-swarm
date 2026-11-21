@@ -1,14 +1,14 @@
 ---
 name: spec-status
 description: "Status check for the current spec run: what's done, running, tested, blocked, and next. Fan out volume, execution, and judgment roles over git, .planning, gates, runner state, evidence, and hygiene; write a status report and host-native handoff."
-version: "1.2.1"
+version: "1.2.2"
 ---
 
 # /spec-status [NNN] [--continue-compact] [--no-handoff]
 
 ## Host dispatch contract
 
-- Codex: invoke skills as `$skill`; use Codex collaboration roles and GPT-5.6 model tiers.
+- Codex: invoke skills as `$skill`; use Codex collaboration roles and GPT-6 model tiers.
 - Claude: invoke skills as `/skill`; use Claude Agent/Skill tools and Claude model aliases.
 - Examples that name both hosts are routing contracts. Never send one host's command syntax to the other.
 - A bare `/skill` in this shared source denotes the Claude form; Codex dispatches the same named skill as `$skill`.

@@ -1,7 +1,7 @@
 ---
 name: land-queue
 description: "Serially land finished branches: collect from takeover records, estate discovery, and explicit args; rebase, implement, review, watch CI, merge under exact grant, finalize, and journal every step. v1 is strictly serial."
-version: "1.0.0"
+version: "1.0.1"
 user-invocable: true
 ---
 
@@ -9,7 +9,7 @@ user-invocable: true
 
 ## Host dispatch contract
 
-- Codex: `$skill`, Codex collaboration roles, and GPT-5.6 tiers.
+- Codex: `$skill`, Codex collaboration roles, and GPT-6 tiers.
 - Claude: `/skill`, Agent/Skill tools, and Claude aliases.
 - A bare `/skill` in this shared source denotes the Claude form; Codex dispatches the same named skill as `$skill`.
 

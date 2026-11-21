@@ -21,10 +21,10 @@ ROOT = Path(__file__).resolve().parents[1]
 @pytest.mark.parametrize(
     ("tier", "model", "effort"),
     [
-        ("frontier", "gpt-6-astra", "xhigh"),
-        ("judgment", "gpt-6-sol", "xhigh"),
-        ("execution", "gpt-5.6-terra", "medium"),
-        ("volume", "gpt-5.6-luna", "low"),
+        ("frontier", "gpt-6.2-astra", "xhigh"),
+        ("judgment", "gpt-6.2-sol", "xhigh"),
+        ("execution", "gpt-6.1-terra", "medium"),
+        ("volume", "gpt-6-luna", "low"),
     ],
 )
 def test_native_codex_tier_public_resolution(tier, model, effort):

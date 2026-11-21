@@ -1,7 +1,7 @@
 ---
 name: code-uplift
 description: "Review + refactor code that's already written — same gsd machinery as feature-spec/feature-implement but findings-driven instead of spec-driven. Adversarial cross-model review, refactor phases, test uplift to the coverage floor, smoke/e2e via canary-gate, review-gate finish tail."
-version: "1.2.0"
+version: "1.2.1"
 allowed-tools:
   - Read
   - Write
@@ -16,7 +16,7 @@ allowed-tools:
 
 ## Host dispatch contract
 
-- Codex: `$skill`, Codex collaboration roles, and GPT-5.6 tiers.
+- Codex: `$skill`, Codex collaboration roles, and GPT-6 tiers.
 - Claude: `/skill`, Agent/Skill tools, and Claude aliases.
 - A bare `/skill` in this shared source denotes the Claude form; Codex dispatches the same named skill as `$skill`.
 
