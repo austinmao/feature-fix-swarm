@@ -1722,6 +1722,22 @@ unattended.
   record (family, verdict, diff sha, patch id, tree) is in the ledger.
 - `cleanup --remote` does not delete the provider-created `claude/ffs-*`
   branch. Delete it by hand.
+- A process that runs as your user at the same time is outside the threat
+  model. The dispatcher checks names and then acts on them (the fixed launch
+  clone and its checkout, staging recovery, the candidate ref). A second
+  process with your user id that renames a directory or edits a ref between
+  the check and the action can make the dispatcher write to or remove the
+  replacement. Such a process can already delete your files directly. Do not
+  run other tools against the clone parent or the `ffs/cloud/*` refs while a
+  run is active.
+- Staging recovery removes an empty `.ffs-cloud-new-*` entry or an empty
+  marker file in the clone parent when you own it. Keep nothing of your own
+  under those names.
+- `cleanup` keeps a task branch whose creation the ledger did not confirm.
+  This includes a branch the run itself made when the first push failed and a
+  retry succeeded, or when the process died right after the push. The ref is
+  printed as `CLOUD:cleanup-kept ... (creation not confirmed)`. Delete it by
+  hand before you reuse the run id.
 
 ## Known deviations from the design contract
 
