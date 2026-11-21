@@ -108,7 +108,7 @@ Otherwise skip it entirely and continue below exactly as before.
    `batch=unknown`. On `batch=same`, `orchestrator=restarted` means `start`
    found no orchestrator for the run and started one. `orchestrator=restart-failed`
    means it found none and could not start one (a resource or filesystem
-   failure; `cause=` is the errno name): the run is active with no orchestrator
+   failure; `cause=` is the errno name, or `OSERROR` when there is none): the run is active with no orchestrator
    and no lifecycle record, so `reconcile.sh` has nothing to restart, and the
    local claims stand. This branch ends after you report it: tell the operator
    the run id and the cause to fix, run no `reconcile.sh`, no local task and no
