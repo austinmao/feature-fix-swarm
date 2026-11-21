@@ -701,6 +701,29 @@ def test_requirements_non_registry_is_unattributed(world, line):
     assert rep["unattributed"] is True
 
 
+@pytest.mark.parametrize("line,plain", [
+    ("flask", True), ("requests[socks]>=2.0,<3 ; python_version>'3'", True), ("a>=1 , <2", True),
+    ("flask==2.0 --hash=sha256:ab --hash=sha256:cd", True), ("a;marker --hash=sha256:ab#x", True),
+    ("a>==1,<==2", True), ("a @ https://x.invalid/p.zip", False), ("a>=1@x", False), ("a;m#x", False),
+    ("a --hash=", False), ("a;--hash=x#y", False),
+], ids=lambda value: repr(value)[:40])
+def test_requirement_line_matcher_decides_the_same_after_the_rewrite(line, plain):
+    assert bool(cc._REQ_REGISTRY_LINE.match(line)) is plain
+
+
+@pytest.mark.parametrize("line", [
+    "a" + ">==," * 4000 + "@",                       # an optional "=" next to a class that also matches "=" doubled the work per item
+    "a" + " " * 60000 + "@",                         # adjacent whitespace runs split many ways
+    "a>=1" + " " * 60000 + ",@",
+    "a;" + " --hash=x" * 8000 + " #@",               # "[^#]*" overlapping the --hash tokens
+    "a" + " --hash=x" * 8000 + " @",
+], ids=["doubled-equals", "whitespace-run", "spec-then-whitespace", "semicolon-then-hash-tokens", "hash-tokens"])
+def test_requirement_line_matcher_is_linear_on_adversarial_input(line):
+    started = time.monotonic()
+    assert cc._REQ_REGISTRY_LINE.match(line) is None
+    assert time.monotonic() - started < 1.0
+
+
 @pytest.mark.parametrize("name,before,after", [
     ("pyproject.toml", '[project]\ndependencies = ["requests"]\n', '[project]\ndependencies = ["requests", "evil"]\n'),
     ("Cargo.toml", '[dependencies]\nserde = "1"\n', '[dependencies]\nserde = "1"\ntokio = "1"\n'),
