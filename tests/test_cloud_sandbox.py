@@ -860,9 +860,20 @@ def test_nohup_background_child_is_dead_after_run_verify(world):
 
 @NEEDS_SANDBOX
 def test_timeout_also_kills_detached_children(world):
-    code = SETSID_CHILD % ("pass", "60")
+    # /usr/bin/perl is a real binary. /usr/bin/python3 is an Xcode shim that can spend
+    # seconds starting xcodebuild inside the sandbox (its cache dir is unwritable there),
+    # which on a slow runner ate the whole 3 s timeout before any child existed.
+    code = (
+        "use POSIX qw(setsid); $| = 1;\n"
+        "if (fork() == 0) {\n"
+        "  setsid();\n"
+        "  if (fork() == 0) { print \"grandchild $$\\n\"; sleep 300; exit 0; }\n"
+        "  sleep 1; exit 0;\n"
+        "}\n"
+        "sleep 60;\n"
+    )
     started = time.time()
-    rc, log = verify(world, "/usr/bin/python3 - <<'EOF'\n%sEOF\n" % code, timeout_s=3)
+    rc, log = verify(world, "/usr/bin/perl - <<'EOF'\n%sEOF\n" % code, timeout_s=3)
     assert rc == sb.RC_TIMEOUT and time.time() - started < 40
     pids = child_pids(log)
     assert pids, log
