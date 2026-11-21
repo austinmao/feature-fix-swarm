@@ -9,6 +9,7 @@ plays the cloud worker (writes the manifest with the real nonce and pushes the r
 from __future__ import annotations
 
 import copy
+import errno
 import fcntl
 import functools
 import io
@@ -1163,18 +1164,35 @@ def test_a_failed_restart_spawn_is_reported_not_swallowed_and_the_same_retry_tri
     real_spawn = world.svc.spawn
 
     def no_processes(argv: Any, log: Path, cwd: Path) -> int:
-        raise OSError(11, "Resource temporarily unavailable")
+        raise OSError(errno.EAGAIN, "Resource temporarily unavailable")
 
     world.svc.spawn = no_processes
     rc, out = retry()
     assert rc == 3 and "RUN_EXISTS" in out and "batch=same local-claimed=t2" in out, out
-    assert "orchestrator=restart-failed" in out and "orchestrator=restarted" not in out, out
+    assert "orchestrator=restart-failed cause=" + errno.errorcode[errno.EAGAIN] in out and "orchestrator=restarted" not in out, out
+    assert "Resource temporarily" not in out, out  # the errno name only: a message can carry a path or a command line
     assert world.doc()["local_claimed"] == ["t2"] and world.doc()["state"] == "active"
     world.svc.spawn = real_spawn
     world.spawned.clear()
     rc, out = retry()
     assert rc == 3 and "orchestrator=restarted" in out and "restart-failed" not in out and "local-claimed=t2" in out, out
     assert world.spawned == [cd.orchestrator_argv(world.root, "r1", resume=True)]
+
+
+@pytest.mark.parametrize("error, cause", [(OSError(2, "No such file or directory: '/secret/path'"), "ENOENT"),
+                                          (OSError("no errno here"), "OSERROR")])
+def test_a_failed_restart_spawn_cause_is_a_sanitized_errno_name(
+        world: World, error: OSError, cause: str) -> None:
+    assert world.start(tasks=[T1])[0] == 0
+
+    def no_processes(argv: Any, log: Path, cwd: Path) -> int:
+        raise error
+
+    world.svc.spawn = no_processes
+    rc, out = world.cli("start", "--run", "r1", "--tasks", world.tasks_file([T1], "same.json"), "--policy", "auto",
+                        "--root", str(world.root))
+    assert rc == 3 and out.rstrip().endswith("orchestrator=restart-failed cause=" + cause), out
+    assert "secret" not in out and "no errno here" not in out, out
 
 
 def test_the_local_claim_is_persisted_before_the_local_ids_are_first_emitted(world: World) -> None:

@@ -227,3 +227,16 @@ def test_swarm_exit_78_from_start_is_relayed_and_stops_everything():
     assert "run no task" in branch and "cloud or local" in branch
     assert "stop for the operator to inspect" in branch and "Do not call `start` again" in branch
     assert "Step 6 does not apply" in branch
+
+
+def test_swarm_restart_failed_ends_after_reporting_with_no_reconcile_and_keeps_the_same_batch_retry():
+    block = _cloud_block()
+    step = block[block.index("6. **Refusals.**"):block.index("7. **Hard limits.**")]
+    step = " ".join(step.split())  # the skill wraps its lines
+    failed = step[step.index("`orchestrator=restart-failed` means"):step.index("Otherwise run")]
+    assert "`cause=`" in failed and "`orchestrator=restart-failed cause=<ERRNO>`" in step
+    assert "ends after you report it" in failed and "run no `reconcile.sh`" in failed
+    assert "same `start` (same run id, same tasks file) may be repeated" in failed
+    assert "reconcile.sh` cannot fix" not in step
+    rest = step[step.index("Otherwise run"):]
+    assert "carried no `orchestrator=` token" in rest and "run `bash scripts/gsd/reconcile.sh` once" in rest

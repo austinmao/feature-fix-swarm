@@ -100,7 +100,7 @@ Otherwise skip it entirely and continue below exactly as before.
    cloud. Never run those tasks locally and never call `start` again for that
    run. The refusal line ends with `batch=same`, `batch=same local-claimed=<ids>`,
    `batch=other` or `batch=unknown`, optionally followed by
-   `orchestrator=restarted` or `orchestrator=restart-failed`: `start` itself compared this batch (every task id,
+   `orchestrator=restarted` or `orchestrator=restart-failed cause=<ERRNO>`: `start` itself compared this batch (every task id,
    cloud and local, its content, its dependencies and its order) with the whole
    batch the first attempt started. `batch=same` means an exact match; a
    superset, a subset or an edited batch is `batch=other`, and a run started by
@@ -108,15 +108,16 @@ Otherwise skip it entirely and continue below exactly as before.
    `batch=unknown`. On `batch=same`, `orchestrator=restarted` means `start`
    found no orchestrator for the run and started one. `orchestrator=restart-failed`
    means it found none and could not start one (a resource or filesystem
-   failure): the run is active with no orchestrator, `reconcile.sh` cannot fix
-   that, and the local claims stand. Report it to the operator with the run id
-   and the cause to fix; this is the one case in which the same `start` (same
-   run id, same tasks file) may be repeated, once the cause is fixed. Run no
-   local task meanwhile.
-   Run `bash scripts/gsd/cloud-dispatch.sh status --run <run> --json` and treat
+   failure; `cause=` is the errno name): the run is active with no orchestrator
+   and no lifecycle record, so `reconcile.sh` has nothing to restart, and the
+   local claims stand. This branch ends after you report it: tell the operator
+   the run id and the cause to fix, run no `reconcile.sh`, no local task and no
+   cloud task, and do nothing else. The same `start` (same run id, same tasks
+   file) may be repeated, once, after the cause is fixed.
+   Otherwise run `bash scripts/gsd/cloud-dispatch.sh status --run <run> --json` and treat
    the run as started only on `batch=same`: report it as in step 8, and if
-   `orchestrator.alive` is false and the line did not say
-   `orchestrator=restarted`, run `bash scripts/gsd/reconcile.sh` once so a dead
+   `orchestrator.alive` is false and the line carried no `orchestrator=` token,
+   run `bash scripts/gsd/reconcile.sh` once so a dead
    orchestrator is restarted. `local-claimed=<ids>` names the local tasks the
    first attempt claimed and may already have started: do not start a claimed
    local task again without the operator's confirmation, and run none of the

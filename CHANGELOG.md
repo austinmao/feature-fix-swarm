@@ -35,8 +35,11 @@ all skills.
 - An identical retry of `start` whose orchestrator restart fails (the spawn raises
   `OSError`) adds `orchestrator=restart-failed` to the `RUN_EXISTS` refusal
   instead of silently dropping the error; the ledger and the local claims are
-  unchanged and the same retry tries again. `/swarm` skill 2.2.6 reports it, runs
-  no local task, and may repeat the identical `start` once the cause is fixed.
+  unchanged and the same retry tries again. The token now carries the errno name
+  only (`orchestrator=restart-failed cause=ENOENT`, never the message, which can
+  hold a path). `/swarm` skill 2.2.7 reports it and ends there: no
+  `reconcile.sh` (the run has no lifecycle record to restart), no task, and the
+  identical `start` may be repeated once the cause is fixed.
 - `/swarm` skill 2.2.7: `CLOUD-REFUSED: SECRET_IN_PROMPT` from `plan` (or `start`)
   ends the invocation. The skill relays the redacted refusal and dispatches
   nothing, cloud or local, under `auto`, `prefer` and `required` and under

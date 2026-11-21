@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import copy
+import errno
 import fcntl
 import hashlib
 import json
@@ -1365,7 +1366,17 @@ def _finish_start(svc: Services, root: Path, run: str) -> None:
 
 
 class _RestartFailed(Exception):
-    """The spawn of a restarted orchestrator raised ``OSError``."""
+    """The spawn of a restarted orchestrator raised ``OSError``; ``cause`` is its errno name only (never the message,
+    which can carry a path or a command line)."""
+
+    def __init__(self, cause: str) -> None:
+        super().__init__(cause)
+        self.cause = cause
+
+
+def _errno_name(exc: OSError) -> str:
+    name = errno.errorcode.get(exc.errno) if isinstance(exc.errno, int) else None
+    return name if name and re.fullmatch(r"E[A-Z0-9]+", name) else "OSERROR"
 
 
 def _restart_unowned_run(svc: Services, root: Path, run: str) -> bool:
@@ -1378,7 +1389,7 @@ def _restart_unowned_run(svc: Services, root: Path, run: str) -> bool:
     try:
         svc.spawn(orchestrator_argv(root, run, resume=True), ledger.run_dir(root, run) / "orchestrate.log", root)
     except OSError as exc:  # no process was started and nothing was recorded: say so, never look like an ordinary retry
-        raise _RestartFailed(str(exc)) from exc
+        raise _RestartFailed(_errno_name(exc)) from exc
     return True
 
 
@@ -1391,8 +1402,8 @@ def _run_exists(svc: Services, root: Path, run: str, raw: List[Any], sequential:
             _finish_start(svc, root, run)
             if _restart_unowned_run(svc, root, run):
                 tokens += " orchestrator=restarted"
-        except _RestartFailed:  # the claims and the ledger are untouched: the same retry tries again
-            tokens += " orchestrator=restart-failed"
+        except _RestartFailed as exc:  # the claims and the ledger are untouched: the same retry tries again
+            tokens += " orchestrator=restart-failed cause=%s" % exc.cause
         except (Refused, ledger.LedgerError, OSError):
             pass  # busy (an in-flight start or a live orchestrator) or unreadable: the classification stands
     return Refused("RUN_EXISTS", "run %s already has a ledger: read it with `status --run %s`; never run its tasks "
