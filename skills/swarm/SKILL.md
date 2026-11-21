@@ -1,7 +1,7 @@
 ---
 name: swarm
 description: "Ad-hoc parallel task executor. Pass natural language tasks directly (or --tasks-file); independent tasks use concurrent host-native volume/execution/judgment roles and dependent tasks run serially. No spec directory required; use feature-implement for full-feature work."
-version: "2.2.6"
+version: "2.2.7"
 permissions:
   filesystem: write
   network: true
@@ -57,6 +57,13 @@ Otherwise skip it entirely and continue below exactly as before.
    one stays absent (the task then runs locally). Write the list to a temp
    file (`FILE`); `P` is the policy.
 2. **Plan.** Run `bash scripts/gsd/cloud-dispatch.sh plan --tasks FILE --policy P --with-doctor`.
+   If it exits 3 with `CLOUD-REFUSED: SECRET_IN_PROMPT` (a task id looks like a
+   secret), that is terminal for this invocation: relay the redacted refusal
+   line and STOP. Dispatch nothing, cloud or local, under `auto`, `prefer` and
+   `required` alike, and under `--dry-run`. Step 6's local fallback does not
+   apply: a retry of an already started run with an edited batch is refused here
+   before `start` can say `RUN_EXISTS`, and its unchanged tasks may be running in
+   the cloud.
 3. **`--dry-run`.** Print the plan table (groups, route, provider, reasons,
    refusals, preconditions) and STOP. Do not run the reconcile pass below, do
    not start anything, do not execute any task.
@@ -77,11 +84,11 @@ Otherwise skip it entirely and continue below exactly as before.
    line does not name. An empty value means run no local task. If `start`
    exited 0 but that line is missing or cannot be parsed, run no local task,
    report the run id, and tell the operator the local list is unknown.
-   If `plan` itself exits 3 (`CLOUD-REFUSED: SECRET_IN_PROMPT`: a task id looks
-   like a secret), relay the line and treat it as a refusal as in step 6.
 6. **Refusals.** Exit code 3 means refused. Relay the `CLOUD-REFUSED:` line.
    Under `auto` or `prefer`, continue with every task locally; under
-   `required`, stop. **Exception: `CLOUD-REFUSED: RUN_EXISTS`** is not a
+   `required`, stop. **Exception: `CLOUD-REFUSED: SECRET_IN_PROMPT`** (from
+   `plan` or `start`) is terminal as in step 2: dispatch nothing, cloud or local.
+   **Exception: `CLOUD-REFUSED: RUN_EXISTS`** is not a
    refusal to offload. The run was already started (a retry after a lost
    acknowledgement, or a reused run id) and its tasks may be running in the
    cloud. Never run those tasks locally and never call `start` again for that

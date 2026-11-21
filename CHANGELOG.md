@@ -37,6 +37,13 @@ all skills.
   instead of silently dropping the error; the ledger and the local claims are
   unchanged and the same retry tries again. `/swarm` skill 2.2.6 reports it, runs
   no local task, and may repeat the identical `start` once the cause is fixed.
+- `/swarm` skill 2.2.7: `CLOUD-REFUSED: SECRET_IN_PROMPT` from `plan` (or `start`)
+  ends the invocation. The skill relays the redacted refusal and dispatches
+  nothing, cloud or local, under `auto`, `prefer` and `required` and under
+  `--dry-run`; the local fallback of the other refusals no longer applies. A
+  retry of an already started run with an edited batch is refused by `plan`
+  before `start` can say `RUN_EXISTS`, and its unchanged tasks may be running in
+  the cloud.
 - `plan` scans every task id right after normalization, as `start` does: a
   scanner-positive id is `SECRET_IN_PROMPT` (exit 3) and is never printed, so
   the required plan step no longer exposes one.

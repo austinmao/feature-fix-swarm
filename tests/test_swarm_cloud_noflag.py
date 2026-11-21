@@ -196,3 +196,23 @@ def test_swarm_runs_local_tasks_only_from_the_start_output_never_from_the_plan()
     step = block[block.index("5. **Start cloud groups.**"):block.index("6. **Refusals.**")]
     assert "`CLOUD:local tasks=`" in step and "never from the plan" in step
     assert "empty" in step and "run no local task" in step and "report" in step
+
+
+def _cloud_block() -> str:
+    text = (ROOT / SWARM).read_text(encoding="utf-8")
+    return text[text.index(BEGIN):text.index(END)]
+
+
+def test_swarm_secret_in_prompt_from_plan_is_terminal_and_never_falls_back_to_local():
+    """A refused plan of an edited retry must not send tasks that may already run in the cloud to the local path."""
+    block = _cloud_block()
+    plan = block[block.index("2. **Plan.**"):block.index("3. **`--dry-run`.**")]
+    assert "SECRET_IN_PROMPT" in plan and "terminal" in plan and "STOP" in plan
+    assert "Dispatch nothing, cloud or local" in plan and "`--dry-run`" in plan
+    assert all(policy in plan for policy in ("`auto`", "`prefer`", "`required`"))
+    start = block[block.index("5. **Start cloud groups.**"):block.index("6. **Refusals.**")]
+    assert "treat it as a refusal as in step 6" not in start
+    refusals = block[block.index("6. **Refusals.**"):block.index("7. **Hard limits.**")]
+    exception = refusals[refusals.index("SECRET_IN_PROMPT"):refusals.index("RUN_EXISTS")]
+    assert "terminal" in exception and "dispatch nothing, cloud or local" in exception
+    assert refusals.index("continue with every task locally") < refusals.index("SECRET_IN_PROMPT")
