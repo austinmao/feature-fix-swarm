@@ -1306,19 +1306,26 @@ def _orch_lock_held(root: Path, run: str) -> Any:
 
 def _mark_initialized(doc: Dict[str, Any]) -> Dict[str, Any]:
     doc["initialized"] = True
+    doc["integration_ref_created"] = True  # written with the record, only after this start's update-ref succeeded
     return doc
 
 
 def _initialize_run(svc: Services, root: Path, run: str, tip: str, *, fresh: bool) -> None:
     """Create the integration ref and commit the initialization record (``initialized``), under the orchestrator lock.
 
-    ``fresh`` is a start that just reserved the run: the ref must not exist yet.  A retry finishing a start that
-    died earlier also accepts a plain ref already at ``tip``.  A ref that cannot be created or accepted rolls the
-    reservation back (nothing else has acted on an uninitialized run, and the lock is ours), freeing the run id."""
+    The ref must not exist yet.  A ref found there is never adopted, not even one at ``tip``: the ledger proves a
+    creation only through ``integration_ref_created``, written with the initialization record after the update-ref
+    succeeded, so a ref left by a crash (or by somebody else) cannot be told from one this start made.  A ref that
+    cannot be created rolls the reservation back (nothing else has acted on an uninitialized run, and the lock is
+    ours), freeing the run id.  ``fresh`` only picks the message."""
     ref = ledger.integration_ref(run)
     created = git(svc, root, ["update-ref", "--no-deref", ref, tip, ""]).ok
-    if not created and (fresh or rev_parse(svc, root, ref) != tip or git(svc, root, ["symbolic-ref", "-q", ref]).ok):
+    if not created:
         _release_reservation(root, run, tasks_written=True)
+        if not fresh and rev_parse(svc, root, ref) is not None:
+            raise StoreError("INTEGRATION_REF_UNCONFIRMED", "%s already exists and nothing proves this run created it "
+                             "(a crashed start, or another party); inspect it and delete it by hand "
+                             "(`git update-ref -d %s`), then start again" % (ref, ref))
         raise StoreError("INTEGRATION_REF", "could not create %s" % ref)
     try:
         ledger.locked_update(ledger.run_ledger_path(root, run), _mark_initialized)
@@ -1887,11 +1894,13 @@ def _integration_unmerged(svc: Services, root: Path, run: str, base_sha: str, ur
     return True
 
 
-def _owned_refs(doc: Dict[str, Any], run: str) -> Dict[str, Optional[frozenset]]:
+def _owned_refs(doc: Dict[str, Any], run: str, *, remote: bool = False) -> Dict[str, Optional[frozenset]]:
     """The refs the dispatcher creates for this run, derived from the ledger, each with the OIDs it may
     legitimately hold (``None``: the ledger recorded none, so the ref is kept, never deleted).  Any other ref under
     the run prefix is somebody else's.  An earlier generation's OIDs come from its journaled admit (the task branch
-    is created at that ``base_oid``) and integrate (candidate and publish OIDs); the per-task fields are reset on retry."""
+    is created at that ``base_oid``) and integrate (candidate and publish OIDs); the per-task fields are reset on retry.
+    A task branch (local, or with ``remote`` the pushed one) and the integration ref count only with proof that this run
+    created them: the admit intent records ``base_oid`` before anything is scanned or pushed, so it proves nothing."""
     published: Dict[Tuple[str, int], set] = {}  # (task, generation) -> every publish OID the ledger knows of
     branches: Dict[Tuple[str, int], set] = {}  # ... every task-branch OID
     candidates: Dict[Tuple[str, int], set] = {}  # ... every candidate OID
@@ -1905,9 +1914,11 @@ def _owned_refs(doc: Dict[str, Any], run: str) -> Dict[str, Optional[frozenset]]
             published.setdefault(key, set()).add(data["publish_oid"])
             if OID_RE.match(str(data.get("candidate_oid") or "")):
                 candidates.setdefault(key, set()).add(data["candidate_oid"])
-        elif j.get("op") == ledger.OP_ADMIT and OID_RE.match(str(data.get("base_oid") or "")):
+        elif (j.get("op") == ledger.OP_ADMIT and OID_RE.match(str(data.get("base_oid") or ""))
+              and (j.get("created") or {}).get("remote" if remote else "local") is True):
             branches.setdefault(key, set()).add(data["base_oid"])
-    owned: Dict[str, Optional[frozenset]] = {ledger.integration_ref(run): frozenset([doc["integration"]["tip"]])}
+    owned: Dict[str, Optional[frozenset]] = {
+        ledger.integration_ref(run): frozenset([doc["integration"]["tip"]]) if doc.get("integration_ref_created") else None}
     for name, entry in doc["tasks"].items():
         for gen in range(1, entry["generation"] + 1):
             def recorded(oid: Any, journaled: Dict[Tuple[str, int], set]) -> Optional[frozenset]:
@@ -1915,7 +1926,7 @@ def _owned_refs(doc: Dict[str, Any], run: str) -> Dict[str, Optional[frozenset]]
                 if gen == entry["generation"] and oid:
                     known.add(oid)
                 return frozenset(known) if known else None
-            owned[ledger.task_branch_ref(run, name, gen)] = recorded(entry.get("task_branch_oid"), branches)
+            owned[ledger.task_branch_ref(run, name, gen)] = recorded(None, branches)
             owned[ledger.candidate_ref(run, name, gen)] = recorded(entry.get("candidate_oid"), candidates)
             owned[ledger.publication_ref(run, name, gen)] = frozenset(published[(name, gen)]) if (name, gen) in published else None
     return owned
@@ -1954,7 +1965,7 @@ def _delete_remote_branches(svc: Services, root: Path, run: str, url: str,
             failed.append("remote:" + _listable(ref))
             continue
         if owned[ref] is None:
-            svc.emit("%scleanup-kept ref=remote:%s (no OID recorded in the ledger)" % (PREFIX, ref))
+            svc.emit("%scleanup-kept ref=remote:%s (creation not confirmed)" % (PREFIX, ref))
             continue
         if refs[ref] not in owned[ref]:
             svc.emit("%scleanup-kept ref=remote:%s (moved off the recorded OID)" % (PREFIX, ref))
@@ -2002,8 +2013,8 @@ def cmd_cleanup(svc: Services, args: argparse.Namespace) -> int:
                 oid = _ref_oid(svc, root, ref)
                 if ref not in owned:
                     svc.emit("%scleanup-kept ref=%s (not created by the dispatcher)" % (PREFIX, _listable(ref)))
-                elif owned[ref] is None:  # the ledger recorded no OID for it: it may hold anything now
-                    svc.emit("%scleanup-kept ref=%s (no OID recorded in the ledger)" % (PREFIX, ref))
+                elif owned[ref] is None:  # no proof the run created it or no OID recorded: it may hold anything now
+                    svc.emit("%scleanup-kept ref=%s (creation not confirmed)" % (PREFIX, ref))
                 elif oid is None or (owned[ref] is not None and oid not in owned[ref]):
                     left.append(ref)  # moved off the recorded OID (or symbolic): somebody else's work may be on it
                 else:
@@ -2012,7 +2023,8 @@ def cmd_cleanup(svc: Services, args: argparse.Namespace) -> int:
             raise incomplete(left, 0)
         if args.remote:
             deleted, failed = _delete_remote_branches(svc, root, run, doc["origin_url"], {
-                r: o for r, o in owned.items() if r.startswith("refs/heads/") and not r.endswith("/integration")})
+                r: o for r, o in _owned_refs(doc, run, remote=True).items()
+                if r.startswith("refs/heads/") and not r.endswith("/integration")})
             svc.emit("%scleanup remote-branches-deleted=%d" % (PREFIX, deleted))
             if failed:  # before any local deletion, so the rerun's unmerged guard still has its integration ref
                 raise incomplete(failed, 0)
@@ -3003,6 +3015,7 @@ class Orchestrator:
             return
         if existing is None and not git(self.svc, self.root, ["update-ref", "--no-deref", ref, base_oid, ""]).ok:
             raise StoreError("TASK_BRANCH", "cannot create %s" % ref)
+        created = {"local": existing is None, "remote": False}  # creation proof, recorded once the push is confirmed
         findings = self.outbound_findings(doc, entry["provider"], base_oid)
         if findings:
             self.to_operator(name, gen, ledger.B_SCAN_REFUSED, ["outbound scan refused the push: " + ", ".join(findings)], seq)
@@ -3011,6 +3024,8 @@ class Orchestrator:
         if not push_ref_valid(self.run_id, ref) or not self.grant_ok(key):
             self.to_operator(name, gen, ledger.B_GRANT_MISSING, ["missing grant %s" % key], seq)
             return
+        seen, seen_refs = ls_remote(self.svc, doc["origin_url"], ref)
+        created["remote"] = seen and ref not in seen_refs  # absent right before the push: this push creates it
         pushed = self.svc.run(["git", "-C", str(self.root), "push", "--no-force", "--no-verify", "--no-follow-tags",
                                "--recurse-submodules=no", doc["origin_url"],
                                "%s:%s" % (base_oid, ref)], timeout=GIT_PUSH_TIMEOUT_S, env=remote_env())
@@ -3022,7 +3037,7 @@ class Orchestrator:
         if not ok or refs.get(ref) != base_oid:
             self.push_failed(name, gen, ref, 0, seq, "ls-remote did not confirm the push")
             return
-        self.finish_admit(name, gen, base_oid, seq)
+        self.finish_admit(name, gen, base_oid, seq, created)
 
     def push_failed(self, name: str, gen: int, ref: str, rc: int, seq: int, why: str = "") -> None:
         """Count a failed admit push in the ledger; after ``PUSH_FAILURE_LIMIT`` attempts the task needs an
@@ -3041,9 +3056,18 @@ class Orchestrator:
                 "the push of %s failed %d times (for example a protected-branch rejection); fix the cause, then "
                 "`resolve --action retest`" % (ref, box["n"])], seq)
 
-    def finish_admit(self, name: str, gen: int, base_oid: str, seq: int) -> None:
-        self.apply(name, gen, lambda d: ledger.transition(
-            d, name, ledger.EV_DEPS_MET, generation=gen, journal_seq=seq, base_oid=base_oid, task_branch_oid=base_oid), "admit")
+    def finish_admit(self, name: str, gen: int, base_oid: str, seq: int, created: Optional[Dict[str, bool]] = None) -> None:
+        """``created``: which task-branch refs this process saw absent and then made.  It is journaled in the write that
+        settles the admit, i.e. after the push was confirmed; a replay passes none, so its refs are never cleanup-owned."""
+        def settle(d: Dict[str, Any]) -> Dict[str, Any]:
+            if created and any(created.values()):
+                for entry in d.get("journal", []):
+                    if entry.get("seq") == seq:
+                        entry["created"] = dict(created)
+            return ledger.transition(d, name, ledger.EV_DEPS_MET, generation=gen, journal_seq=seq, base_oid=base_oid,
+                                     task_branch_oid=base_oid)
+
+        self.apply(name, gen, settle, "admit")
 
     def grant_ok(self, key: str) -> bool:
         try:

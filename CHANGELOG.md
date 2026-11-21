@@ -16,6 +16,17 @@ all skills.
   `auto` host pressure can move a task between the two calls, which would run it
   both locally and in the cloud. With no line, or one it cannot parse, it runs
   no local task and reports. Without `--cloud` nothing changes.
+- `cleanup` deletes a task branch (local or `--remote`) or the integration ref only
+  when the ledger proves the run created it: the admit journal records `created`
+  once the push of a branch it saw absent is confirmed, and the initialization
+  record carries `integration_ref_created`. The admit intent (recorded before
+  the scan and the push) no longer counts. Any other ref, such as a branch that
+  existed before the run or one left by an abandoned, scan-refused task, is kept
+  and printed `CLOUD:cleanup-kept ref=... (creation not confirmed)`; cleanup does
+  not fail. `start` no longer adopts an existing integration ref: it refuses with
+  `INTEGRATION_REF`, or `INTEGRATION_REF_UNCONFIRMED` (exit 78) when an identical
+  retry of a crashed start finds one. Runs started by an earlier build have no
+  proof, so `cleanup` keeps their refs.
 - `plan` scans every task id right after normalization, as `start` does: a
   scanner-positive id is `SECRET_IN_PROMPT` (exit 3) and is never printed, so
   the required plan step no longer exposes one.

@@ -802,17 +802,26 @@ def test_resume_refuses_a_run_whose_start_never_committed_its_initialization(wor
 
 
 @pytest.mark.parametrize("ref_made", [False, True])
-def test_an_identical_retry_finishes_a_start_that_died_before_its_initialization_record(world: World, ref_made: bool) -> None:
+def test_an_identical_retry_finishes_a_start_that_died_before_its_initialization_record(
+        world: World, capsys: pytest.CaptureFixture, ref_made: bool) -> None:
     """Without this exit the run id would be wedged: resume refuses the run, cleanup refuses it and start says RUN_EXISTS."""
     assert world.start(tasks=[T1])[0] == 0
-    L.locked_update(L.run_ledger_path(world.root, "r1"), lambda d: (d.pop("initialized"), d)[1])
+    L.locked_update(L.run_ledger_path(world.root, "r1"), lambda d: (d.pop("initialized"), d.pop("integration_ref_created"), d)[2])
     if not ref_made:
         run_git(world.root, "update-ref", "-d", L.integration_ref("r1"))
     other = world.cli("start", "--run", "r1", "--tasks", world.tasks_file([T1, T2], "more.json"), "--policy", "auto",
                       "--root", str(world.root))
     assert other[0] == 3 and "batch=other" in other[1] and "initialized" not in world.doc()
+    capsys.readouterr()
     rc, out = world.cli("start", "--run", "r1", "--tasks", world.tasks_file([T1], "same.json"), "--policy", "auto",
                         "--root", str(world.root))
+    out += capsys.readouterr().err  # a store error goes to stderr
+    if ref_made:
+        # nothing proves this start created the ref (the crash may have come before or after update-ref): never adopt it
+        assert rc != 0 and "INTEGRATION_REF_UNCONFIRMED" in out and "RUN_EXISTS" not in out, out
+        assert not L.run_ledger_path(world.root, "r1").exists()
+        assert run_git(world.root, "rev-parse", L.integration_ref("r1")) == world.base
+        return
     assert rc == 3 and "RUN_EXISTS" in out and "batch=same" in out, out
     assert world.doc()["initialized"] is True
     assert run_git(world.root, "rev-parse", L.integration_ref("r1")) == world.base
@@ -1894,6 +1903,48 @@ def test_cleanup_remote_keeps_a_task_branch_that_moved_on_the_server(world: Worl
     assert run_git(world.origin, "rev-parse", remote_ref) == moved
     assert run_git(world.root, "rev-parse", remote_ref)  # nothing local was deleted either
     assert L.run_ledger_path(world.root, "r1").exists()
+
+
+@pytest.mark.parametrize("scan_refused", [True, False])
+def test_cleanup_remote_keeps_a_task_branch_that_existed_before_the_run_pushed_anything(
+        world: World, monkeypatch: pytest.MonkeyPatch, scan_refused: bool) -> None:
+    """The admit intent records the base OID before anything is scanned or pushed, so a pre-existing branch at that OID
+    passed the lease and was deleted.  Only a branch this run saw absent and then pushed is the dispatcher's."""
+    remote_ref = L.task_branch_ref("r1", "t1", 1)
+    base = world.base
+    run_git(world.root, "push", "-q", "origin", base + ":" + remote_ref)  # a colleague's branch, at the base
+    if scan_refused:
+        monkeypatch.setattr(cd.Orchestrator, "outbound_findings", lambda self, doc, provider, tip: ["sk-key"])
+    assert world.start(tasks=[T1])[0] == 0
+    world.drive()
+    if scan_refused:
+        assert world.doc()["tasks"]["t1"]["blocker"] == "scan-refused"
+        assert world.cli("abandon", "--run", "r1", "--task", "t1", "--root", str(world.root))[0] == 0
+        world.drive()
+    rc, out = world.cli("cleanup", "--run", "r1", "--remote", "--discard-unmerged", "--root", str(world.root))
+    assert rc == 0, out
+    assert "CLOUD:cleanup-kept ref=remote:%s (creation not confirmed)" % remote_ref in out, out
+    assert run_git(world.origin, "rev-parse", remote_ref) == base
+
+
+def test_cleanup_deletes_a_task_branch_the_run_created_and_confirmed(world: World) -> None:
+    assert world.start(tasks=[T1])[0] == 0
+    world.drive()
+    remote_ref = L.task_branch_ref("r1", "t1", 1)
+    assert run_git(world.origin, "rev-parse", remote_ref)
+    rc, out = world.cli("cleanup", "--run", "r1", "--remote", "--discard-unmerged", "--root", str(world.root))
+    assert rc == 0 and "creation not confirmed" not in out and "remote-branches-deleted=1" in out, out
+    assert run_git(world.origin, "for-each-ref", "refs/heads/ffs/cloud/r1/") == ""
+
+
+def test_cleanup_keeps_the_integration_ref_when_the_ledger_never_confirmed_creating_it(world: World) -> None:
+    assert world.start(tasks=[T1])[0] == 0
+    world.drive()
+    L.locked_update(L.run_ledger_path(world.root, "r1"), lambda d: (d.pop("integration_ref_created"), d)[1])
+    rc, out = world.cli("cleanup", "--run", "r1", "--discard-unmerged", "--root", str(world.root))
+    ref = L.integration_ref("r1")
+    assert rc == 0 and "CLOUD:cleanup-kept ref=%s (creation not confirmed)" % ref in out, out
+    assert run_git(world.root, "rev-parse", ref)
 
 
 def test_cleanup_remote_delete_is_leased_to_the_recorded_oid(world: World) -> None:
