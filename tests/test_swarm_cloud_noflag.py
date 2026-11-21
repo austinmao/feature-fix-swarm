@@ -63,9 +63,11 @@ def base() -> str:
     # Accept a merged-in parent only when it carries no cloud work and descends
     # from the pre-cloud commit; that excludes the cloud side of a synthetic PR
     # merge and a sibling cloud branch, and a base that does not descend from
-    # the stacked pre-cloud commit. Newest merge first; otherwise fall through.
+    # the stacked pre-cloud commit. All merges in range are considered, newest
+    # first (a synthetic PR merge puts the branch's own merges off the first
+    # parent chain); otherwise fall through to the pre-cloud commit.
     merged = _git(
-        "log", "--first-parent", "--merges", "--format=%P", f"{adders[0]}..HEAD",
+        "log", "--merges", "--format=%P", f"{adders[0]}..HEAD",
     ).split("\n")
     for line in merged:
         clean = [
