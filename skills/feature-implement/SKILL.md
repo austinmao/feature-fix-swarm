@@ -1,7 +1,7 @@
 ---
 name: feature-implement
 description: "Execute a decomposed feature via the gsd-core loop with preflight-only host fallback, no stateful cross-vendor replay, autonomy grants, gates.py completion authority, and a fail-closed review/ship tail. --adhoc uses the same walls over gsd-quick."
-version: "2.23.0"
+version: "2.23.1"
 allowed-tools:
   - Read
   - Edit
@@ -14,7 +14,7 @@ allowed-tools:
 
 ## Host dispatch contract
 
-- Codex: invoke skills as `$skill`; use Codex collaboration roles and GPT-5.6 model tiers.
+- Codex: invoke skills as `$skill`; use Codex collaboration roles and GPT-6 model tiers.
 - Claude: invoke skills as `/skill`; use Claude Agent/Skill tools and Claude model aliases.
 - Examples that name both hosts are routing contracts. Never send one host's command syntax to the other.
 - A bare `/skill` in this shared source denotes the Claude form; Codex dispatches the same named skill as `$skill`.

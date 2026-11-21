@@ -193,7 +193,7 @@ def _real_host(tmp_path: Path, monkeypatch, *, group_dir=None) -> tuple[Path, Pa
         fake.write_text(f"#!{sys.executable}\n" + _REVIEW)
         fake.chmod(0o700)
     catalog = tmp_path / "models.json"
-    catalog.write_text(json.dumps({"models": [{"slug": "gpt-5.6-terra"}]}))
+    catalog.write_text(json.dumps({"models": [{"slug": "gpt-6.1-terra"}, {"slug": "gpt-5.6-terra"}]}))
     monkeypatch.setattr(managed_qualification, "_observer_module", lambda: _Observer)
     monkeypatch.setattr(managed_qualification, "verify_runtime", _verify_runtime)
     monkeypatch.setattr(host_capabilities, "admit_cli", lambda binary: {

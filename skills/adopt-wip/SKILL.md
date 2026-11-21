@@ -1,14 +1,14 @@
 ---
 name: adopt-wip
 description: "Salvage coherent uncommitted work left in a stalled worktree or abandoned agent session. Use when resuming a run, when a parallel worktree contains valuable WIP, or when deciding whether to adopt, finish, and ship existing work instead of rebuilding from scratch."
-version: "1.2.0"
+version: "1.2.1"
 ---
 
 # /adopt-wip
 
 ## Host dispatch contract
 
-- Codex: `$skill`, Codex collaboration roles, and GPT-5.6 tiers.
+- Codex: `$skill`, Codex collaboration roles, and GPT-6 tiers.
 - Claude: `/skill`, Agent/Skill tools, and Claude aliases.
 - A bare `/skill` in this shared source denotes the Claude form; Codex dispatches the same named skill as `$skill`.
 

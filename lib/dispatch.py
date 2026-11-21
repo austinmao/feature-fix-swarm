@@ -27,20 +27,24 @@ STATUS_MAP = {
     'F': 'failed', 'f': 'failed', 'S': 'skipped', 's': 'skipped',
 }
 
-# Codex tiers: gpt-5.6-luna/terra and gpt-6-sol are canonical
-# (scripts/gsd/model-equivalents.sh; judgment repinned gpt-5.6-sol -> gpt-6-sol).
-# The gpt-5.6-sol and gpt-5.4/5.5 families are kept so tasks.md files written
-# before their respective repins still resolve to a tier instead of silently
-# falling through to mid-tier.
-LOW_TIER_MODELS = {"haiku", "gpt-5.6-luna", "gpt-5.4-mini"}
-MID_TIER_MODELS = {"sonnet", "gpt-5.6-terra", "gpt-5.4"}
-HIGH_TIER_MODELS = {"opus", "gpt-6-sol", "gpt-5.6-sol", "gpt-5.5"}
+# Codex tiers: gpt-6-luna, gpt-6.1-terra, gpt-6.2-sol and gpt-6.2-astra are canonical
+# (scripts/gsd/model-equivalents.sh; tier refresh 6.2).
+# The previous pins (gpt-5.6-luna/terra/sol, gpt-6-sol) and the gpt-5.4/5.5
+# families are kept so tasks.md files written before their respective repins
+# still resolve to a tier instead of silently falling through to mid-tier.
+LOW_TIER_MODELS = {"haiku", "gpt-6-luna", "gpt-5.6-luna", "gpt-5.4-mini"}
+MID_TIER_MODELS = {"sonnet", "gpt-6.1-terra", "gpt-5.6-terra", "gpt-5.4"}
+HIGH_TIER_MODELS = {"opus", "gpt-6.2-astra", "gpt-6.2-sol", "gpt-6-sol", "gpt-5.6-sol", "gpt-5.5"}
 
 COST_PER_TASK = {
     "haiku": 0.02,
     "sonnet": 0.30,
     "opus": 2.00,
     "fable": 0.50,
+    "gpt-6-luna": 0.05,
+    "gpt-6.1-terra": 0.30,
+    "gpt-6.2-astra": 2.00,
+    "gpt-6.2-sol": 2.00,
     "gpt-5.6-luna": 0.05,
     "gpt-5.6-terra": 0.30,
     "gpt-6-sol": 2.00,
@@ -84,6 +88,8 @@ RETURN_CONTRACTS = {
 _ESCALATION_LADDER = {
     "haiku": "sonnet",
     "sonnet": "opus",
+    "gpt-6-luna": "gpt-6.1-terra",
+    "gpt-6.1-terra": "gpt-6.2-sol",
     "gpt-5.6-luna": "gpt-5.6-terra",
     "gpt-5.6-terra": "gpt-6-sol",
     "gpt-5.4-mini": "gpt-5.4",

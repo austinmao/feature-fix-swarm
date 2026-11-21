@@ -28,6 +28,12 @@ fi
 updated=0
 native_codex_pin() {
   case "$1" in
+    gpt-6.2-astra) printf '%s\t%s\n' gpt-6.2-astra xhigh ;;
+    gpt-6.2-sol) printf '%s\t%s\n' gpt-6.2-sol xhigh ;;
+    gpt-6.1-terra) printf '%s\t%s\n' gpt-6.1-terra medium ;;
+    gpt-6-luna) printf '%s\t%s\n' gpt-6-luna low ;;
+    gpt-6-astra) printf '%s\t%s\n' gpt-6-astra xhigh ;;
+    gpt-6-sol) printf '%s\t%s\n' gpt-6-sol xhigh ;;
     gpt-5.6-sol) printf '%s\t%s\n' gpt-5.6-sol high ;;
     gpt-5.6-terra) printf '%s\t%s\n' gpt-5.6-terra medium ;;
     gpt-5.6-luna) printf '%s\t%s\n' gpt-5.6-luna low ;;
@@ -37,7 +43,7 @@ native_codex_pin() {
 
 native_codex_effort_is_valid() {
   case "$1:$2" in
-    gpt-5.6-sol:high|gpt-5.6-sol:xhigh|gpt-5.6-terra:medium|gpt-5.6-terra:high|gpt-5.6-luna:low|gpt-5.6-luna:medium) return 0 ;;
+    gpt-6.2-astra:xhigh|gpt-6.2-astra:high|gpt-6-astra:xhigh|gpt-6-astra:high|gpt-6-sol:xhigh|gpt-6-sol:high|gpt-6.2-sol:xhigh|gpt-6.2-sol:high|gpt-6.1-terra:medium|gpt-6.1-terra:high|gpt-6-luna:low|gpt-6-luna:medium|gpt-5.6-sol:high|gpt-5.6-sol:xhigh|gpt-5.6-terra:medium|gpt-5.6-terra:high|gpt-5.6-luna:low|gpt-5.6-luna:medium) return 0 ;;
     *) return 1 ;;
   esac
 }

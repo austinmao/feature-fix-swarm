@@ -1,14 +1,14 @@
 ---
 name: autonomy-grant
 description: "Pre-approve the operator gates an unattended run will hit — prod push, deploy, merge, DNS — so the run proceeds through them without stopping. Use at plan approval, while the operator is present, to build the typed approval ledger that /feature-implement --autonomous checks mechanically."
-version: "1.5.0"
+version: "1.5.1"
 ---
 
 # /autonomy-grant
 
 ## Host dispatch contract
 
-- Codex: `$skill`, Codex collaboration roles, and GPT-5.6 tiers.
+- Codex: `$skill`, Codex collaboration roles, and GPT-6 tiers.
 - Claude: `/skill`, Agent/Skill tools, and Claude aliases.
 - A bare `/skill` in this shared source denotes the Claude form; Codex dispatches the same named skill as `$skill`.
 

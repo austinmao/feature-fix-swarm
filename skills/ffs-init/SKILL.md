@@ -1,14 +1,14 @@
 ---
 name: ffs-init
 description: "Umbrella FFS initialization: install repo-scoped dependencies (Phase 0), then build or refresh the environment registry (config/environments.yaml) — propose rows from repo evidence, review them in one batched session, apply atomically, validate, update in place. Never leaks a secret VALUE (names only) and never re-asks a declined proposal."
-version: "1.2.0"
+version: "1.2.1"
 ---
 
 # /ffs-init [--detect-only|--answers <file>|--yes|--update|--check|--force|--reset-declines|--skip-deps]
 
 ## Host dispatch contract
 
-- Codex: invoke skills as `$skill`; use Codex collaboration roles and GPT-5.6 model tiers.
+- Codex: invoke skills as `$skill`; use Codex collaboration roles and GPT-6 model tiers.
 - Claude: invoke skills as `/skill`; use Claude Agent/Skill tools and Claude model aliases.
 - Examples that name both hosts are routing contracts. Never send one host's command syntax to the other.
 - A bare `/skill` in this shared source denotes the Claude form; Codex dispatches the same named skill as `$skill`.

@@ -37,7 +37,7 @@ from test_m4_upstream_context_acceptance import (
 
 _REVIEW = '''import json, os, pathlib, sys, time
 if sys.argv[1:] == ["debug", "models", "--bundled"]:
-    print(json.dumps({"models": [{"slug": "gpt-5.6-terra"}]})); raise SystemExit(0)
+    print(json.dumps({"models": [{"slug": "gpt-6.1-terra"}, {"slug": "gpt-5.6-terra"}]})); raise SystemExit(0)
 prompt = sys.argv[-1]
 credential = pathlib.Path(os.environ["CODEX_HOME"]) / "auth.json"
 if prompt.startswith("Artifact-only review request:"):
@@ -51,7 +51,7 @@ if prompt.startswith("Artifact-only review request:"):
     sessions = credential.parent / "sessions"
     sessions.mkdir()
     records = [{"type":"session_meta","payload":{"id":"fixture-thread","cwd":os.getcwd()}},
-               {"type":"turn_context","payload":{"cwd":os.getcwd(),"model":"gpt-5.6-terra","effort":"medium","turn_id":"fixture-turn"}},
+               {"type":"turn_context","payload":{"cwd":os.getcwd(),"model":"gpt-6.1-terra","effort":"medium","turn_id":"fixture-turn"}},
                {"type":"response_item","payload":{"type":"message","role":"assistant"}}]
     (sessions / "rollout-fixture-thread.jsonl").write_text("".join(json.dumps(r)+"\\n" for r in records))
     print(json.dumps({"type":"thread.started","thread_id":"fixture-thread"}), flush=True)
@@ -118,7 +118,7 @@ def _fixture_host(tmp_path, monkeypatch):
     fake.write_text(f"#!{sys.executable}\n" + _REVIEW)
     fake.chmod(0o700)
     catalog = tmp_path / "models.json"
-    catalog.write_text(json.dumps({"models": [{"slug": "gpt-5.6-terra"}]}))
+    catalog.write_text(json.dumps({"models": [{"slug": "gpt-6.1-terra"}, {"slug": "gpt-5.6-terra"}]}))
 
     def stage(_template, home, worktree):
         home = Path(home)

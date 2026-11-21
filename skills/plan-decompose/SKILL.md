@@ -1,7 +1,7 @@
 ---
 name: plan-decompose
 description: "Create and decompose a lightweight plan with opposite-first review, one bounded read-only active-host fallback, and bounded self-repair; returns success or an evidence-backed terminal block."
-version: "1.11.0"
+version: "1.11.1"
 permissions:
   filesystem: write
   network: false
@@ -24,7 +24,7 @@ metadata:
 
 ## Host dispatch contract
 
-- Codex: `$skill`, Codex collaboration roles, and GPT-5.6 tiers.
+- Codex: `$skill`, Codex collaboration roles, and GPT-6 tiers.
 - Claude: `/skill`, Agent/Skill tools, and Claude aliases.
 - A bare `/skill` in this shared source denotes the Claude form; Codex dispatches the same named skill as `$skill`.
 

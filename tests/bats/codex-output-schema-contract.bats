@@ -24,7 +24,7 @@ setup() {
 @test "codex accepts schemas/review-finding.schema.json as --output-schema and returns the object shape" {
   # Production dispatch path, not a hand-rolled invocation — the contract
   # under test is adversary_invoke's exact codex+schema wiring.
-  run bash -c ". '$LIB'; adversary_invoke codex 120 gpt-5.6-luna low \
+  run bash -c ". '$LIB'; adversary_invoke codex 120 gpt-6-luna low \
     'Return the empty findings object: {\"findings\":[]}. Output only JSON.' \
     '$SCHEMA' 2>&1"
 
