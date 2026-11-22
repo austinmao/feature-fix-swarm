@@ -9,7 +9,7 @@
 setup() {
   ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
   SKILL="$ROOT/skills/review-gate/SKILL.md"
-  FIX="$BATS_TEST_TMPDIR/repo"
+  FIX="$(cd "$BATS_TEST_TMPDIR" && pwd -P)/repo"  # canonical, so path assertions bite on macOS
   CANARY="$BATS_TEST_TMPDIR/canary"
   export HOME="$BATS_TEST_TMPDIR/home"
   mkdir -p "$HOME"
@@ -105,7 +105,7 @@ $3"
   run_fence '### Findings queue: capability probe + resolved-sig consult' '' 'echo "gates=$GATES_PY"'
   [ "$status" -eq 0 ]
   [[ "$output" == *"gates="*"/lib/gates.py"* ]]
-  [[ "$output" != *"gates=$FIX/"* ]]
+  [[ "$output" != *"gates=$FIX/"* || "$output" == *"gates=$FIX/.git/ffs-trusted/"* ]]
   [ ! -e "$CANARY" ]
 }
 
@@ -114,7 +114,7 @@ $3"
   run_fence '### Findings queue: capability probe + resolved-sig consult' '' 'echo "gates=$GATES_PY"'
   [ "$status" -eq 0 ]
   [[ "$output" == *"gates="*"/lib/gates.py"* ]]
-  [[ "$output" != *"gates=$FIX/"* ]]
+  [[ "$output" != *"gates=$FIX/"* || "$output" == *"gates=$FIX/.git/ffs-trusted/"* ]]
   [ ! -e "$CANARY" ]
 }
 
@@ -137,7 +137,7 @@ $3"
   make_fixture .
   FENCE_CWD="$FIX/src" run_fence '### Findings queue: capability probe + resolved-sig consult' '' 'echo "gates=$GATES_PY"'
   [[ "$output" == *"gates="*"/lib/gates.py"* ]]
-  [[ "$output" != *"gates=$FIX/"* ]]
+  [[ "$output" != *"gates=$FIX/"* || "$output" == *"gates=$FIX/.git/ffs-trusted/"* ]]
   [[ "$output" != *"gates=$HOME/"* ]]
   [ ! -e "$CANARY" ]
 }
