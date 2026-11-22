@@ -52,6 +52,9 @@ no repo-local copy shadows them. These are manifest-tracked like skills, so
 `lib/runtime_proof.py` so vendored consumers stop running stale gate logic.
 review-gate runs these helpers from a copy of the merge-base with `origin/main` (else `main`), never
 from the reviewed working tree, so commit the reconciled runtime to `main`.
+When the base ref has no FFS runtime it uses the user-scope copies of
+`adversary-host.sh`, `run-bounded.sh`, `review-tier.sh` and `security-surface.sh`
+under `~/.claude/lib/feature-fix-swarm/scripts/gsd/`.
 
 A pre-existing hand-copied file at the managed path (the old workaround for
 this gap) is an unmanaged collision: the install blocks and preserves it

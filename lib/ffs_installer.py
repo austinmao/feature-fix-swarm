@@ -152,6 +152,12 @@ MANAGED_LIB_FILES: tuple[tuple[str, str], ...] = (
     # socratic-slice.sh hard-sources this sibling at startup; without it the
     # staged copy is dead on arrival
     ("scripts/gsd/fence-data.sh", "scripts/gsd/fence-data.sh"),
+    # review-gate's fallback runtime when the base ref has no FFS runtime;
+    # adversary-host.sh sources run-bounded.sh, review-tier.sh sources security-surface.sh.
+    ("scripts/gsd/adversary-host.sh", "scripts/gsd/adversary-host.sh"),
+    ("scripts/gsd/run-bounded.sh", "scripts/gsd/run-bounded.sh"),
+    ("scripts/gsd/review-tier.sh", "scripts/gsd/review-tier.sh"),
+    ("scripts/gsd/security-surface.sh", "scripts/gsd/security-surface.sh"),
     # PreToolUse Bash guard registered in ~/.claude/settings.json (headless Claude
     # stages lib/feature-fix-swarm wholesale, so the staged hook finds its copy).
     ("scripts/hooks/operator-only-guard.sh", "operator-only-guard.sh"),

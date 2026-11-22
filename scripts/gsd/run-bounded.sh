@@ -57,7 +57,7 @@ run_bounded() {
     return "$_rc"
   elif command -v python3 >/dev/null 2>&1; then
     # -c (not a heredoc) so the child inherits the caller's stdin untouched.
-    python3 -c 'import os, signal, subprocess, sys
+    python3 -I -c 'import os, signal, subprocess, sys
 try:
     process = subprocess.Popen(sys.argv[2:], start_new_session=True)
     sys.exit(process.wait(timeout=float(sys.argv[1])))

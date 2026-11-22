@@ -200,3 +200,21 @@ def test_metrics_tools_are_an_optional_documented_dependency() -> None:
         assert re.search(rf"^{tool}\|binary\|optional\|", roster, re.M), tool
     docs = (LIB.parent / "docs/dependencies.md").read_text()
     assert "crapper" in docs and "dryer" in docs and "FFS_UB_TOOLS_DIR" in docs
+
+
+def test_find_tool_ignores_tools_inside_the_reviewed_repo(tmp_path, monkeypatch):
+    """A relative PATH entry or FFS_UB_TOOLS_DIR resolves against the reviewed
+    checkout, so a branch could supply the binary the gate runs."""
+    repo = tmp_path / "repo"
+    tool = repo / "bin" / "crapper"
+    tool.parent.mkdir(parents=True)
+    tool.write_text("#!/bin/sh\n")
+    tool.chmod(0o755)
+    (repo / "crapper" / "crapper").parent.mkdir()
+    shutil.copy2(tool, repo / "crapper" / "crapper")
+    monkeypatch.chdir(repo)
+    monkeypatch.setenv("PATH", "bin" + os.pathsep + "/usr/bin" + os.pathsep + "/bin")
+    monkeypatch.setenv("FFS_UB_TOOLS_DIR", ".")
+    assert ccm.find_tool("crapper") is None
+    monkeypatch.setenv("FFS_UB_TOOLS_DIR", str(repo))
+    assert ccm.find_tool("crapper") is None
