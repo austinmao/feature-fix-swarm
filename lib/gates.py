@@ -2920,10 +2920,27 @@ def _store_path() -> Path:
             # the ABSOLUTE main .git dir, which is the fix. Bare/odd layouts
             # (name != .git) fall through to the historic default.
             if common.name == ".git":
-                return common.parent / ".feature-fix-swarm" / "evidence.json"
+                store = common.parent / ".feature-fix-swarm" / "evidence.json"
+                _refuse_tracked_store(store)
+                return store
     except (OSError, subprocess.SubprocessError):
         pass
     return Path(".feature-fix-swarm/evidence.json")
+
+
+def _refuse_tracked_store(store: Path) -> None:
+    """A committed store would let a branch plant grants or resolved findings.
+    icase: macOS checkouts are case-insensitive; matching the directory also
+    catches a committed symlink in its place."""
+    try:
+        tracked = subprocess.run(["git", "-C", str(store.parent.parent), "ls-files", "--",
+                                  f":(icase){store.parent.name}"],
+                                 capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise SystemExit(f"evidence store {store}: cannot prove it is not tracked by git ({exc})") from exc
+    if tracked.returncode != 0 or tracked.stdout.strip():
+        raise SystemExit(f"evidence store {store} is tracked by git; remove it from the index "
+                         "(git rm --cached) or set GATES_STORE")
 
 
 def _resolved_store_path() -> Path:

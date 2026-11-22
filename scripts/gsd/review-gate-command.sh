@@ -96,7 +96,7 @@ if [ -n "$_spec_md" ]; then
   elif [ "$_int_rc" -eq 2 ] && printf '%s\n' "$_int_out" | grep -qxF 'unknown command: intent-check'; then
     echo "WARN: gates.py lacks intent-check (rollout skew); intent wall skipped" >&2
   else
-    python3 -c 'import json,sys; print(json.dumps({"verdict":"REVISE","note":sys.argv[1]+" — intent breached; no review round spent. Delete more or stop."}))' "$_int_out"
+    python3 -I -c 'import json,sys; print(json.dumps({"verdict":"REVISE","note":sys.argv[1]+" — intent breached; no review round spent. Delete more or stop."}))' "$_int_out"
     exit 1
   fi
 fi
@@ -205,7 +205,7 @@ if printf '%s\n' "$FINAL_VERDICT" | grep -Eq '^VERDICT: BLOCK[[:space:]]*$'; the
   done <<<"$CLEAN_OUTPUT"
   [ "$_n_find" -gt 0 ] || python3 "$GATES_PY" findings-queue add review-gate-command.sh \
     "unparsed BLOCK verdict" --severity HIGH --spec "$SID" >/dev/null 2>&1 || true
-  printf '{"verdict":"REVISE","findings":%s}\n' "$(printf '%s' "$CLEAN_OUTPUT" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')"
+  printf '{"verdict":"REVISE","findings":%s}\n' "$(printf '%s' "$CLEAN_OUTPUT" | python3 -I -c 'import json,sys; print(json.dumps(sys.stdin.read()))')"
   exit 1
 fi
 
@@ -218,7 +218,7 @@ if [ -n "$GATES_PY" ] && [ -n "$RESIDUAL_FOCUS" ]; then
   _rg_sigs="$(printf '%s' "$RESIDUAL_FOCUS" | grep -oE '^- [0-9a-f]{12} ' | awk '{print $2}' | sort -u)"
   while IFS= read -r _rg_sig; do
     [ -n "$_rg_sig" ] || continue
-    _rg_full="$(python3 "$GATES_PY" findings-queue list 2>/dev/null | python3 -c '
+    _rg_full="$(python3 "$GATES_PY" findings-queue list 2>/dev/null | python3 -I -c '
 import json, sys
 pfx = sys.argv[1]
 try:

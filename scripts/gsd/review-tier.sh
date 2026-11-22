@@ -133,7 +133,7 @@ NAME_ONLY_OUT="$(git diff --name-only "${DIFF_TARGET[@]}" 2>/dev/null)"
 rc=$?
 [ $rc -ne 0 ] && fail_safe "git diff --name-only failed"
 
-NUMSTAT_OUT="$(git diff --numstat "${DIFF_TARGET[@]}" 2>/dev/null)"
+NUMSTAT_OUT="$(GIT_ATTR_SOURCE=4b825dc642cb6eb9a060e54bf8d69288fbee4904 git diff --numstat "${DIFF_TARGET[@]}" 2>/dev/null)"
 rc=$?
 [ $rc -ne 0 ] && fail_safe "git diff --numstat failed"
 
@@ -145,6 +145,7 @@ fi
 LINE_COUNT=0
 HAS_SECURITY_PATH=0
 HAS_MIGRATION_PATH=0
+HAS_BINARY=0
 
 if [ -n "$NAME_ONLY_OUT" ]; then
   while IFS= read -r path; do
@@ -160,7 +161,10 @@ if [ -n "$NUMSTAT_OUT" ]; then
   while IFS=$'\t' read -r add del _path; do
     [ -z "${add:-}" ] && continue
     if [ "$add" = "-" ] || [ "$del" = "-" ]; then
-      continue # binary: counted in FILE_COUNT above, contributes 0 lines
+      # binary (or, on git < 2.40 where GIT_ATTR_SOURCE is ignored, marked
+      # binary/-diff by the reviewed branch): line count unknown, so never light.
+      HAS_BINARY=1
+      continue
     fi
     LINE_COUNT=$((LINE_COUNT + add + del))
   done <<EOF
@@ -177,7 +181,7 @@ if [ "$FILE_COUNT" -gt 20 ] || [ "$HAS_SECURITY_PATH" -eq 1 ] || [ "$HAS_MIGRATI
   else
     REASON="large diff (>20 files)"
   fi
-elif [ "$FILE_COUNT" -lt 5 ] && [ "$LINE_COUNT" -lt 200 ]; then
+elif [ "$FILE_COUNT" -lt 5 ] && [ "$LINE_COUNT" -lt 200 ] && [ "$HAS_BINARY" -eq 0 ]; then
   TIER=light
   REASON="small diff"
 else

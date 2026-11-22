@@ -248,7 +248,7 @@ PF_SKILL = ROOT / "skills" / "preflight" / "SKILL.md"
 # The "sha256:" prefix is the credential scanner's own sanctioned form for a
 # legitimate digest literal (env-registry.sh _WHITELIST) — keep it.
 REVIEW_GATE_SHA256 = (
-    "sha256:470176f3d4096510f09a017caf126aba3e09612ef7caa9ad5733f3ddf82b9649")
+    "sha256:a743d5a554d1337b44551ab10aadde2b10c2c5aea0f74df5a204d685b18f2a24")
 
 
 def test_int004a_review_gate_zero_seam_tokens():

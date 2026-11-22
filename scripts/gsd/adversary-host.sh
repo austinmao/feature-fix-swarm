@@ -44,7 +44,8 @@ adversary_model_request_helper() {
   local candidate
   for candidate in \
     "$(dirname "${BASH_SOURCE[0]:-$0}")/../../lib/model_requests.py" \
-    "$(dirname "${BASH_SOURCE[0]:-$0}")/../../packages/feature-fix-swarm/lib/model_requests.py"; do
+    "$(dirname "${BASH_SOURCE[0]:-$0}")/../../packages/feature-fix-swarm/lib/model_requests.py" \
+    "$(dirname "${BASH_SOURCE[0]:-$0}")/../../model_requests.py"; do
     if [ -f "$candidate" ]; then
       printf '%s\n' "$candidate"
       return 0
@@ -58,7 +59,8 @@ adversary_model_request_helper() {
 # context and cannot accidentally omit an attempt or invocation event.
 adversary_gates() {
   local candidate
-  for candidate in "$(dirname "${BASH_SOURCE[0]:-$0}")/../../lib/gates.py" "$(dirname "${BASH_SOURCE[0]:-$0}")/../../packages/feature-fix-swarm/lib/gates.py"; do
+  # The last candidate is the user-scope install layout (lib/ files sit at its root).
+  for candidate in "$(dirname "${BASH_SOURCE[0]:-$0}")/../../lib/gates.py" "$(dirname "${BASH_SOURCE[0]:-$0}")/../../packages/feature-fix-swarm/lib/gates.py" "$(dirname "${BASH_SOURCE[0]:-$0}")/../../gates.py"; do
     [ -f "$candidate" ] && { printf '%s\n' "$candidate"; return 0; }
   done
   echo "adversary-host: gates.py unavailable" >&2
@@ -109,7 +111,7 @@ adversary_resolve_model_request() {
   local host="$1" request="$2" helper resolved
   helper="$(adversary_model_request_helper)" || return $?
   resolved="$(/usr/bin/python3 "$helper" resolve "$request" --host "$host")" || return $?
-  printf '%s' "$resolved" | /usr/bin/python3 -c '
+  printf '%s' "$resolved" | /usr/bin/python3 -I -c '
 import json, re, sys
 r = json.load(sys.stdin)
 if r["kind"] == "exact" and not re.match(r"^(?:gpt-|o[1-9](?:-|$)|claude-)", r["model"]):
@@ -318,18 +320,23 @@ adversary_invoke() {
     rm -rf "$data_dir"
     return "$rc"
   else
-    local bin="${ADVERSARY_BIN_CLAUDE:-claude}"
+    local bin="${ADVERSARY_BIN_CLAUDE:-claude}" data_dir rc
     if ! command -v "$bin" >/dev/null 2>&1; then
       return 127
     fi
+    data_dir="$(mktemp -d "${TMPDIR:-/tmp}/ffs-claude-data-only.XXXXXX")" || return 1
     # A review is data-only. Keep Claude non-agentic, non-persistent, and off
-    # the consumer's ambient MCP/tool surface just as Codex is read-only.
-    printf '%s' "$prompt" | run_bounded "$timeout_s" env \
+    # the consumer's ambient MCP/tool surface just as Codex is read-only. Run it
+    # from an empty directory with user settings only, so the reviewed repo's
+    # .claude/settings.json hooks and CLAUDE.md never load.
+    printf '%s' "$prompt" | (cd "$data_dir" && run_bounded "$timeout_s" env \
       -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN \
       "$bin" --strict-mcp-config --mcp-config '{"mcpServers":{}}' \
+      --setting-sources user \
       --permission-mode plan --tools '' --no-session-persistence \
-      -p --model "$model"
+      -p --model "$model")
     rc="${PIPESTATUS[1]}"
+    rm -rf "$data_dir"
     return "$rc"
   fi
 }

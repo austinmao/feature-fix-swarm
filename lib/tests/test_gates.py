@@ -343,6 +343,49 @@ def test_store_path_resolves_worktree_to_main_checkout(tmp_path, monkeypatch) ->
     assert str(gates._store_path()).endswith(".feature-fix-swarm/evidence.json")
 
 
+def test_store_path_refuses_a_git_tracked_default_store(tmp_path, monkeypatch) -> None:
+    """A committed .feature-fix-swarm/evidence.json would let a branch plant
+    resolved findings or grants; the default store must never be tracked."""
+    import subprocess as sp
+    repo = tmp_path / "repo"
+    (repo / ".feature-fix-swarm").mkdir(parents=True)
+    sp.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True)
+    (repo / ".feature-fix-swarm" / "evidence.json").write_text("{}")
+    sp.run(["git", "add", "-f", ".feature-fix-swarm/evidence.json"], cwd=repo, check=True)
+    monkeypatch.delenv("GATES_STORE", raising=False)
+    monkeypatch.chdir(repo)
+    with pytest.raises(SystemExit, match="tracked by git"):
+        gates._store_path()
+
+
+def test_store_path_refuses_planted_store_aliases(tmp_path, monkeypatch) -> None:
+    """A committed symlink or a case variant of .feature-fix-swarm must not
+    smuggle a store past the tracked-file check."""
+    for plant in ("symlink", "case"):
+        _assert_planted_store_refused(tmp_path / plant, monkeypatch, plant)
+
+
+def _assert_planted_store_refused(tmp_path, monkeypatch, plant) -> None:
+    import pytest
+    import subprocess as sp
+    repo = tmp_path / "repo"
+    repo.mkdir(parents=True)
+    sp.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True)
+    if plant == "symlink":
+        (repo / "data").mkdir()
+        (repo / "data" / "evidence.json").write_text("{}")
+        (repo / ".feature-fix-swarm").symlink_to("data")
+        sp.run(["git", "add", "-f", "data", ".feature-fix-swarm"], cwd=repo, check=True)
+    else:
+        (repo / ".Feature-Fix-Swarm").mkdir()
+        (repo / ".Feature-Fix-Swarm" / "evidence.json").write_text("{}")
+        sp.run(["git", "add", "-f", ".Feature-Fix-Swarm"], cwd=repo, check=True)
+    monkeypatch.delenv("GATES_STORE", raising=False)
+    monkeypatch.chdir(repo)
+    with pytest.raises(SystemExit, match="tracked by git"):
+        gates._store_path()
+
+
 def test_no_progress_when_same_failure_repeats() -> None:
     assert gates.no_progress(["FAILED test_a - AssertionError",
                               "FAILED test_a - AssertionError"]) is True

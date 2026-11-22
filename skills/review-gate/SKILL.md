@@ -1,7 +1,7 @@
 ---
 name: review-gate
 description: "Host-neutral pre-merge review gate. Tries the opposite CLI first, allows one explicit read-only active-host fallback, and fails closed when mandatory review evidence is unavailable. Blocks shipping on HIGH/CRITICAL findings."
-version: "1.19.1"
+version: "1.20.0"
 ---
 
 # /review-gate
@@ -149,7 +149,10 @@ else
   DIFF_ARGS=("$DIFF_TARGET"...HEAD -- . "${BOOKKEEPING_EXCLUDES[@]}")
   DIFF_BASE="$(git merge-base "$DIFF_TARGET" HEAD)"
 fi
-DIFF=$(git diff "${DIFF_ARGS[@]}" 2>/dev/null)
+# The empty tree as attribute source (git 2.40+) ignores the reviewed branch's
+# .gitattributes, so -diff/binary marks cannot hide text; real binaries stay one line.
+export GIT_ATTR_SOURCE=4b825dc642cb6eb9a060e54bf8d69288fbee4904
+DIFF=$(git diff --no-textconv --no-ext-diff "${DIFF_ARGS[@]}" 2>/dev/null)
 
 if [ -z "$DIFF" ]; then
   echo "review-gate: no diff found. Nothing to review."
@@ -160,7 +163,7 @@ fi
 # printed, because a later fence may run in a fresh shell. Absent tools print nothing.
 FFS_T="$HOME/.claude/lib/feature-fix-swarm"; FFS_REF="$(git merge-base HEAD refs/remotes/origin/main 2>/dev/null || git merge-base HEAD refs/heads/main 2>/dev/null)" && eval "$(git show "${FFS_REF}:scripts/gsd/trusted-runtime.sh" 2>/dev/null || git show "${FFS_REF}:packages/feature-fix-swarm/scripts/gsd/trusted-runtime.sh" 2>/dev/null || echo false)" && ffs_trusted_runtime "$FFS_REF" || true
 _mb_py="$FFS_T/lib/clean_code_metrics.py"; [ -f "$_mb_py" ] || _mb_py="$FFS_T/clean_code_metrics.py"
-METRICS_BLOCK="$(git diff -U0 "${DIFF_ARGS[@]}" 2>/dev/null | (cd "$(git rev-parse --show-toplevel)" && python3 "$_mb_py" --base "$DIFF_BASE") 2>/dev/null)"
+METRICS_BLOCK="$(git diff -U0 --no-textconv --no-ext-diff "${DIFF_ARGS[@]}" 2>/dev/null | (cd "$(git rev-parse --show-toplevel)" && python3 "$_mb_py" --base "$DIFF_BASE") 2>/dev/null)"
 if [ -n "$METRICS_BLOCK" ]; then printf 'METRICS_BLOCK (advisory data for Pass 3):\n%s\n' "$METRICS_BLOCK"; fi
 ```
 
@@ -307,7 +310,7 @@ else
     echo "[review-gate] WARN: findings-queue list failed — proceeding without a resolved-sig skip-list." >&2
     DEGRADED_PERSISTENCE=1
   else
-    RESOLVED_SIGS="$(printf '%s' "$_fq_list" | python3 -c 'import json,sys; print(" ".join(f["sig"] for f in json.load(sys.stdin) if f.get("resolved")))' 2>/dev/null)"
+    RESOLVED_SIGS="$(printf '%s' "$_fq_list" | python3 -I -c 'import json,sys; print(" ".join(f["sig"] for f in json.load(sys.stdin) if f.get("resolved")))' 2>/dev/null)"
   fi
 fi
 ```
@@ -670,7 +673,7 @@ if [ -n "$GATES_PY" ]; then
     echo "[review-gate] WARN: findings-queue add failed for $FINDING_FILE — proceeding without persistence for this finding." >&2
     DEGRADED_PERSISTENCE=1
   else
-    _sig="$(printf '%s' "$_fq_add_out" | python3 -c 'import json,sys; print(json.load(sys.stdin)["sig"])' 2>/dev/null)"
+    _sig="$(printf '%s' "$_fq_add_out" | python3 -I -c 'import json,sys; print(json.load(sys.stdin)["sig"])' 2>/dev/null)"
     case " $RESOLVED_SIGS " in
       *" $_sig "*)
         # resolved in a prior run — DROP from ranking, never re-litigate.
