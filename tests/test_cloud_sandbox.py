@@ -671,7 +671,7 @@ def test_clipboard_unreachable_and_untouched(world):
         subprocess.run(["pbcopy"], input=marker, check=True)
         rc, log = verify(world, "pbpaste; echo paste-rc=$?; echo poisoned | pbcopy; echo copy-rc=$?")
         assert marker.decode() not in log, "the sandbox read the clipboard"
-        assert "paste-rc=0" not in log or "paste-rc=0" in log and marker.decode() not in log
+        assert "paste-rc=" in log, log  # the probe ran to its report, so the absence of the marker above means something
         assert "copy-rc=0" not in log, log
         assert subprocess.run(["pbpaste"], capture_output=True).stdout == marker, "the sandbox changed the clipboard"
     finally:
