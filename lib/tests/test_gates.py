@@ -410,6 +410,167 @@ def test_store_path_allows_tracked_project_install_files(tmp_path, monkeypatch) 
         assert gates._store_path().resolve() == (ffs / "evidence.json").resolve()
 
 
+def _git(cwd, *args) -> str:
+    import subprocess as sp
+    return sp.run(["git", "-c", "user.email=t@t", "-c", "user.name=t", "-c", "protocol.file.allow=always",
+                   *args], cwd=cwd, check=True, capture_output=True, text=True).stdout.strip()
+
+
+def _plant_store(checkout, dirname=".feature-fix-swarm") -> None:
+    (checkout / dirname).mkdir(parents=True)
+    (checkout / dirname / "evidence.json").write_text("{}")
+    _git(checkout, "add", "-f", dirname)
+
+
+def test_store_path_refuses_unicode_aliases_of_the_store_dir(tmp_path, monkeypatch) -> None:
+    """APFS folds U+017F to s and U+FB01 to fi; git's icase is ASCII-only."""
+    import pytest
+    monkeypatch.delenv("GATES_STORE", raising=False)
+    for index, name in enumerate((".feature-fix-\u017fwarm", ".feature-\ufb01x-swarm")):
+        repo = tmp_path / str(index)
+        repo.mkdir()
+        _git(repo, "init", "-q")
+        blob = _git(repo, "hash-object", "-w", "/dev/null")  # index only: no directory to compare on disk
+        _git(repo, "update-index", "--add", "--cacheinfo", f"100644,{blob},{name}/evidence.json")
+        monkeypatch.chdir(repo)
+        with pytest.raises(SystemExit, match="tracked by git") as refused:
+            gates._store_path()
+        assert "--cached" not in str(refused.value)
+
+
+def test_store_path_refuses_a_tracked_dir_that_is_the_store_dir_on_disk(tmp_path, monkeypatch) -> None:
+    """Whatever the filesystem folds, a tracked name that is the same directory is refused."""
+    import pytest
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _plant_store(repo, "other")
+    real = gates.os.lstat
+    monkeypatch.setattr(gates.os, "lstat", lambda path, **kw: real(
+        str(path).replace(".feature-fix-swarm", "other"), **kw))
+    monkeypatch.delenv("GATES_STORE", raising=False)
+    monkeypatch.chdir(repo)
+    with pytest.raises(SystemExit, match="tracked by git"):
+        gates._store_path()
+
+
+def test_store_path_checks_layouts_without_a_dot_git_common_dir(tmp_path, monkeypatch) -> None:
+    import pytest
+    source = tmp_path / "source"
+    source.mkdir()
+    _git(source, "init", "-q", "-b", "main")
+    _git(source, "commit", "-q", "--allow-empty", "-m", "init")
+    _git(tmp_path, "init", "-q", "--separate-git-dir", "sep.git", "separate")
+    _git(tmp_path, "clone", "-q", "--bare", "source", "bare.git")
+    _git(tmp_path / "bare.git", "worktree", "add", "-q", str(tmp_path / "linked"), "-b", "side")
+    (tmp_path / "super").mkdir()
+    _git(tmp_path / "super", "init", "-q")
+    _git(tmp_path / "super", "submodule", "add", "-q", str(source), "sub")
+    monkeypatch.delenv("GATES_STORE", raising=False)
+    for checkout in (tmp_path / "separate", tmp_path / "linked", tmp_path / "super" / "sub"):
+        monkeypatch.chdir(checkout)
+        assert gates._store_path() == gates.Path(".feature-fix-swarm/evidence.json")
+        _plant_store(checkout)
+        with pytest.raises(SystemExit, match="tracked by git"):
+            gates._store_path()
+
+
+def test_store_path_refuses_when_git_cannot_answer_inside_a_repo(tmp_path, monkeypatch) -> None:
+    import pytest
+    monkeypatch.delenv("GATES_STORE", raising=False)
+    plain, broken = tmp_path / "plain", tmp_path / "broken" / "sub"
+    plain.mkdir()
+    broken.mkdir(parents=True)
+    (tmp_path / "broken" / ".git").write_text("gitdir: /nonexistent\n")
+    (plain / ".git").mkdir()  # an empty stray directory is not a checkout
+    monkeypatch.chdir(plain)
+    assert gates._store_path() == gates.Path(".feature-fix-swarm/evidence.json")
+    monkeypatch.chdir(broken)
+    with pytest.raises(SystemExit, match="cannot prove.*GATES_STORE"):
+        gates._store_path()
+    corrupt = tmp_path / "corrupt"
+    corrupt.mkdir()
+    _git(corrupt, "init", "-q")
+    (corrupt / ".git" / "index").write_text("garbage")
+    monkeypatch.chdir(corrupt)
+    with pytest.raises(SystemExit, match="cannot prove.*GATES_STORE"):
+        gates._store_path()
+
+
+def test_store_path_ignores_inherited_git_environment(tmp_path, monkeypatch) -> None:
+    import pytest
+    repo, other = tmp_path / "repo", tmp_path / "other"
+    for path in (repo, other):
+        path.mkdir()
+        _git(path, "init", "-q")
+    _plant_store(repo)
+    monkeypatch.delenv("GATES_STORE", raising=False)
+    monkeypatch.chdir(repo)
+    for env in ({"GIT_INDEX_FILE": "/nonexistent"}, {"GIT_DIR": str(other / ".git")}, {"GIT_DIR": "/nonexistent"},
+                {"GIT_DIR": str(other / ".git"), "GIT_WORK_TREE": str(other)},
+                {"GIT_DIR": str(repo / ".git"), "GIT_COMMON_DIR": str(other / ".git")}):
+        with monkeypatch.context() as patch:
+            for name, value in env.items():
+                patch.setenv(name, value)
+            with pytest.raises(SystemExit, match="tracked by git"):
+                gates._store_path()
+            assert gates._main_checkout_root().resolve() == repo.resolve()
+
+
+def test_store_path_refuses_a_checkout_known_only_from_the_environment(tmp_path, monkeypatch) -> None:
+    import pytest
+    (tmp_path / "gd").mkdir()
+    _git(tmp_path / "gd", "init", "-q")
+    tree = tmp_path / "tree"
+    tree.mkdir()
+    monkeypatch.delenv("GATES_STORE", raising=False)
+    monkeypatch.setenv("GIT_DIR", str(tmp_path / "gd" / ".git"))
+    monkeypatch.setenv("GIT_WORK_TREE", str(tree))
+    monkeypatch.chdir(tree)
+    with pytest.raises(SystemExit, match="cannot prove"):
+        gates._store_path()
+
+
+def test_store_path_runs_nothing_from_a_committed_bare_directory(tmp_path, monkeypatch) -> None:
+    """A branch can commit a bare-shaped directory whose config names a program."""
+    import pytest
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    pkg = repo / "pkg"
+    (pkg / "objects").mkdir(parents=True)
+    (pkg / "refs").mkdir()
+    (pkg / "HEAD").write_text("ref: refs/heads/main\n")
+    marker = tmp_path / "ran"
+    hook = tmp_path / "hook.sh"
+    hook.write_text(f"#!/bin/sh\ntouch '{marker}'\n")
+    hook.chmod(0o755)
+    (pkg / "config").write_text(
+        f"[core]\n\trepositoryformatversion = 0\n\tbare = false\n\tworktree = {pkg}\n\tfsmonitor = {hook}\n")
+    (repo / "file").write_text("x")
+    _git(repo, "add", "file")
+    (pkg / "index").write_bytes((repo / ".git" / "index").read_bytes())
+    monkeypatch.delenv("GATES_STORE", raising=False)
+    monkeypatch.chdir(pkg)
+    with pytest.raises(SystemExit, match="cannot prove"):
+        gates._store_path()
+    assert not marker.exists()
+
+
+def test_store_path_survives_undecodable_tracked_names(tmp_path, monkeypatch) -> None:
+    import subprocess as sp
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    blob = _git(repo, "hash-object", "-w", "/dev/null")
+    for name in (b"src/\xff.txt", b"\xff.txt", b".feature-fix-swarm/vendor/\xff.txt"):
+        sp.run([b"git", b"-c", b"core.protectHFS=false", b"update-index", b"--add", b"--cacheinfo",
+                b"100644," + blob.encode() + b"," + name], cwd=repo, check=True)
+    monkeypatch.delenv("GATES_STORE", raising=False)
+    monkeypatch.chdir(repo)
+    assert gates._store_path().name == "evidence.json"
+
+
 def test_no_progress_when_same_failure_repeats() -> None:
     assert gates.no_progress(["FAILED test_a - AssertionError",
                               "FAILED test_a - AssertionError"]) is True
