@@ -156,7 +156,7 @@ esac'
   # fresh-estate document with a REAL matching record for the default
   # target (WR-01) — never an empty branch list posing as evidence.
   export ESTATE_DOC="$BATS_TEST_TMPDIR/estate-doc.json"
-  printf '{"branches": [{"branch": "spec/merged", "landed": true}]}\n' > "$ESTATE_DOC"
+  printf '{"branches": [{"branch": "spec/merged", "landed": true, "disposition": "delete-safe"}]}\n' > "$ESTATE_DOC"
 
   # REAL durable queue journal (CR-01/WR-01): the default happy manifest is
   # built through the production accessor, never a synthetic document.
@@ -321,7 +321,7 @@ fixture_sane() { # failure here would be infrastructure, so prove it first
   make_real_journal q-wrong run-0304 \
     spec/unmerged "$UNMERGED_OID" 202 "$(python3 -c "print('c'*40)")"
   export CONSOLIDATE_QUEUE_ID=q-wrong
-  printf '{"branches": [{"branch": "spec/unmerged", "landed": true}]}\n' > "$ESTATE_DOC"
+  printf '{"branches": [{"branch": "spec/unmerged", "landed": true, "disposition": "delete-safe"}]}\n' > "$ESTATE_DOC"
   run run_block --execute
   [ "$status" -eq 1 ]
   [ ! -s "$EFFECTS" ]
@@ -557,10 +557,22 @@ PYEOF
   [ ! -s "$EFFECTS" ]
 }
 
+@test "[ESTATE] landed content with retained payload or session hold is refused" {
+  fixture_sane; build_sandbox
+  extract_block
+  # landed is content evidence only: ignored payload / a stopped resumable
+  # session classifies as retain-worktree-payload and must never be executed
+  printf '{"branches": [{"branch": "spec/merged", "landed": true, "disposition": "retain-worktree-payload", "worktree_ignored": 2}]}\n' > "$ESTATE_DOC"
+  run run_block --execute
+  [ "$status" -eq 1 ]
+  grep -qi "fresh-estate disposition!=delete-safe" <<<"$output"
+  [ ! -s "$EFFECTS" ]
+}
+
 @test "[ESTATE] duplicate estate rows for one target are refused" {
   fixture_sane; build_sandbox
   extract_block
-  printf '{"branches": [{"branch": "spec/merged", "landed": true}, {"branch": "spec/merged", "landed": true}]}\n' > "$ESTATE_DOC"
+  printf '{"branches": [{"branch": "spec/merged", "landed": true, "disposition": "delete-safe"}, {"branch": "spec/merged", "landed": true, "disposition": "delete-safe"}]}\n' > "$ESTATE_DOC"
   run run_block --execute
   [ "$status" -eq 1 ]
   grep -qi "fresh-estate duplicate" <<<"$output"

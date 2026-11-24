@@ -214,6 +214,24 @@ def planning_state(wt_path):
     return st
 
 
+FINISHED_STATUS = re.compile(r"\b(complete|completed|done|shipped|archived)\b", re.I)
+
+
+def session_hold(planning):
+    """True when gsd session state reserves the worktree.
+
+    A run PID file (live or stale) or an unfinished STATE.md status means a
+    stopped or resumable session may still own the work; a dead PID is not
+    deletion proof.
+    """
+    if not planning:
+        return False
+    if "runner_pid_alive" in planning:
+        return True
+    status = planning.get("status")
+    return bool(status) and not FINISHED_STATUS.search(status)
+
+
 def classify(rec):
     """One disposition per branch — the consolidation plan's unit of work.
 
@@ -234,7 +252,7 @@ def classify(rec):
         or rec.get("worktree_ignored", -1) != 0
         or rec.get("worktree_locked") or rec.get("worktree_prunable")
         or rec.get("worktree_ownership_error")
-        or (rec.get("planning") or {}).get("runner_pid_alive")
+        or session_hold(rec.get("planning"))
     ):
         return "retain-worktree-payload"
     if rec.get("landed"):

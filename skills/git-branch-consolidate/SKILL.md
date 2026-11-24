@@ -286,6 +286,11 @@ for b, h, pr, m in tuples:
         refuse("fresh-estate target missing for " + b)
     if rec.get("landed") is not True:
         refuse("fresh-estate landed!=true for " + b)
+    # landed is content evidence only; the disposition folds in dirty,
+    # ignored, locked/prunable, ownership and session-hold payload checks.
+    if rec.get("disposition") != "delete-safe":
+        refuse("fresh-estate disposition!=delete-safe for " + b
+               + " (" + str(rec.get("disposition")) + ")")
 digest = hashlib.sha256(json.dumps(
     [repo_root, base, sorted([[b, h, p, m] for b, h, p, m in tuples])],
     separators=(",", ":")).encode()).hexdigest()
