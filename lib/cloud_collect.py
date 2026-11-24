@@ -1206,7 +1206,22 @@ def _review_result(rc: int, out: str, meta: Dict[str, str]) -> StepResult:
     if verdict == "REVISE":
         return StepResult(False, ST_REJECTED, B_REVIEW_REVISE, excerpt[:MAX_DETAIL], meta)
     blocker = B_REVIEW_CAP if verdict == "cap" else B_REVIEW_UNAVAILABLE
-    return StepResult(False, ST_NEEDS_OPERATOR, blocker, "review %s (rc=%d)" % (verdict, rc), meta)
+    detail = "review %s (rc=%d)" % (verdict, rc)
+    if verdict == "UNAVAILABLE":
+        reason = _review_reason(text)
+        if reason:
+            detail += ": " + reason
+    return StepResult(False, ST_NEEDS_OPERATOR, blocker, detail, meta)
+
+
+_REASON_RE = re.compile(r"^CLOUD-REVIEW-REASON: ([A-Za-z0-9 ._:/=()-]{1,200})$")
+
+
+def _review_reason(text: str) -> str:
+    """The script's one-line reason when the reviewer never ran (round accounting failed).  Only a text that is
+    exactly that line counts, so reviewer prose is never shown, and it is redacted like any other excerpt."""
+    found = _REASON_RE.match(text.strip())
+    return _safe_text(found.group(1), MAX_DETAIL) if found else ""
 
 
 # --------------------------------------------------------------------------

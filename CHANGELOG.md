@@ -37,6 +37,11 @@ all skills.
   id and one branch is an ancestor of the other's base, the second no longer
   fast-forwards it. A remote branch at exactly the wanted OID is still accepted on
   retry (no push, no creation credit); one at another OID is `branch-conflict`.
+- `cloud-review.sh` reports `UNAVAILABLE` (exit 3), not `cap`, when the round accounting
+  fails for a store reason, such as a default evidence store that became tracked by git.
+  Exit 1 of `loop-round` is a cap only when `gates.py` also printed its `LOOP-CAP:` line.
+  The script prints one sanitized `CLOUD-REVIEW-REASON:` line and the dispatcher shows it
+  in the `review-unavailable` detail.
 
 ### Changed (2026-11-21, review-gate keeps the reviewed branch out of its own runtime)
 

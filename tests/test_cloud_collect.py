@@ -935,6 +935,18 @@ def test_revise_still_rejects_and_keeps_the_model_line_out_of_the_text(world):
     assert "CLOUD-REVIEW-MODEL" not in res.detail and res.data["model"] == "gpt-6.2-sol"
 
 
+def test_an_unavailable_review_shows_the_scripts_sanitized_reason(world):
+    data = candidate_for(world)
+    out = "CLOUD-REVIEW-REASON: round accounting failed (rc=1): evidence store is tracked by git\nCLOUD-REVIEW: UNAVAILABLE\n"
+    res = cc.review(repo=str(world.main), run=RUN, task=TASK, generation=GEN, producer="codex", base_oid=world.base,
+                    candidate_oid=data["candidate_oid"], manifest=data["manifest"], runner=lambda *_a: (3, out))
+    assert res.blocker == cc.B_REVIEW_UNAVAILABLE and "evidence store is tracked by git" in res.detail
+    prose = "CLOUD-REVIEW-REASON: x\nreviewer chatter\nCLOUD-REVIEW: UNAVAILABLE\n"  # not exactly the one line: ignored
+    res = cc.review(repo=str(world.main), run=RUN, task=TASK, generation=GEN, producer="codex", base_oid=world.base,
+                    candidate_oid=data["candidate_oid"], manifest=data["manifest"], runner=lambda *_a: (3, prose))
+    assert res.detail == "review UNAVAILABLE (rc=3)"
+
+
 def test_review_script_runs_in_the_target_repository_not_the_callers_directory(world, tmp_path, monkeypatch):
     """cloud-review.sh resolves the default evidence store from its working directory."""
     data = candidate_for(world)

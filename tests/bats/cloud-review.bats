@@ -181,6 +181,65 @@ EOF
   [ ! -e "$CODEX_CALLS" ]
 }
 
+# A repository whose default evidence store directory is tracked: gates.py refuses it with a plain
+# message and exit 1, which is the same status the round cap uses.
+tracked_store_repo() {
+  REPO="$BATS_TEST_TMPDIR/tracked"
+  mkdir -p "$REPO/.feature-fix-swarm"
+  git -C "$REPO" init -q
+  : > "$REPO/.feature-fix-swarm/vendored.txt"
+  git -C "$REPO" add .feature-fix-swarm/vendored.txt
+  git -C "$REPO" -c user.name=t -c user.email=t@example.invalid commit -q -m tracked
+}
+
+@test "a refused (tracked) evidence store is UNAVAILABLE, not cap, and names the reason" {
+  make_codex 'VERDICT: APPROVE\n'
+  tracked_store_repo
+  cd "$REPO"
+  unset GATES_STORE
+  run env ADVERSARY_BIN_CODEX="$BIN/codex-stub" ADVERSARY_BIN_CLAUDE="$BIN/claude-stub" \
+    bash "$SCRIPT" r1 t1 claude "$DIFF" "$SUMMARY" 1
+  [ "$status" -eq 3 ]
+  [ "$(last_line)" = "CLOUD-REVIEW: UNAVAILABLE" ]
+  [[ "$output" != *"CLOUD-REVIEW: cap"* ]]
+  [[ "$output" == *"CLOUD-REVIEW-REASON: round accounting failed (rc=1)"* ]]
+  [ ! -e "$CODEX_CALLS" ]
+}
+
+# stub_gates <exit-code> <stdout-line> : the script run from a copy whose gates.py is a stub
+stub_gates() {
+  STUB="$BATS_TEST_TMPDIR/stub"
+  mkdir -p "$STUB/scripts" "$STUB/lib"
+  cp -R "$ROOT/scripts/gsd" "$STUB/scripts/gsd"
+  cat > "$STUB/lib/gates.py" <<STUBEND
+import sys
+if sys.argv[1] == "loop-round":
+    print("$2")
+    sys.exit($1)
+print("$BATS_TEST_TMPDIR/stub-store.json")
+STUBEND
+}
+
+@test "loop-round exit 1 without the documented cap marker fails closed as UNAVAILABLE" {
+  make_codex 'VERDICT: APPROVE\n'
+  stub_gates 1 "something unrelated happened"
+  run env ADVERSARY_BIN_CODEX="$BIN/codex-stub" ADVERSARY_BIN_CLAUDE="$BIN/claude-stub" \
+    bash "$STUB/scripts/gsd/cloud-review.sh" r1 t1 claude "$DIFF" "$SUMMARY" 1
+  [ "$status" -eq 3 ]
+  [ "$(last_line)" = "CLOUD-REVIEW: UNAVAILABLE" ]
+  [ ! -e "$CODEX_CALLS" ]
+}
+
+@test "loop-round exit 1 with the documented cap marker is still cap" {
+  make_codex 'VERDICT: APPROVE\n'
+  stub_gates 1 "LOOP-CAP: review:cloud:t1:g1 round 3 exceeds sealed max 2 (run r1)"
+  run env ADVERSARY_BIN_CODEX="$BIN/codex-stub" ADVERSARY_BIN_CLAUDE="$BIN/claude-stub" \
+    bash "$STUB/scripts/gsd/cloud-review.sh" r1 t1 claude "$DIFF" "$SUMMARY" 1
+  [ "$status" -eq 4 ]
+  [ "$(last_line)" = "CLOUD-REVIEW: cap" ]
+  [ ! -e "$CODEX_CALLS" ]
+}
+
 @test "round cap is per generation and per task" {
   make_codex 'VERDICT: APPROVE\n'
   review claude 1; review claude 1

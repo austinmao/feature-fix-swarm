@@ -19,6 +19,8 @@
 # final line
 #   CLOUD-REVIEW: APPROVE|REVISE|UNAVAILABLE|cap
 # Exit: 0 APPROVE, 1 REVISE, 3 UNAVAILABLE, 4 round cap reached, 2 usage.
+# A failed round accounting that is not the documented cap (gates.py's LOOP-CAP: line) is UNAVAILABLE and
+# prints one CLOUD-REVIEW-REASON: line (sanitized) before the final line.
 # Verdict rule: ONLY the last non-empty line of the reviewer output counts, and it
 # must match ^VERDICT: (APPROVE|REVISE)$ exactly; anything else is UNAVAILABLE.
 # Lines of worker text that start with VERDICT: are neutralized in the prompt.
@@ -87,13 +89,23 @@ trap 'rm -rf "$WORK"' EXIT
 ROUND_KEY="review:cloud:$TASK:g$GEN"
 [ "$ATTEMPT" = "0" ] || ROUND_KEY="$ROUND_KEY:a$ATTEMPT"
 python3 "$GATES" loop-round "$RUN" "$ROUND_KEY" --max "$MAX_ROUNDS" --durable \
-  >"$WORK/round.out" 2>&1
+  >"$WORK/round.out" 2>"$WORK/round.err"
 round_rc=$?
-cat "$WORK/round.out" >&2
+cat "$WORK/round.out" "$WORK/round.err" >&2
+# Exit 1 is shared: the round cap (gates.py prints its LOOP-CAP: line on stdout) and a refused store
+# (tracked evidence directory, malformed ledger) both use it. Only the documented cap marker is a cap;
+# any other failure is UNAVAILABLE, with a sanitized one-line reason the dispatcher can show.
+round_unavailable() { # round_unavailable <rc>
+  local why
+  why="$(head -n 1 "$WORK/round.err" 2>/dev/null | tr -cd 'A-Za-z0-9 ._:/=()-' | cut -c1-160)"
+  printf 'CLOUD-REVIEW-REASON: round accounting failed (rc=%s): %s\n' "$1" "${why:-no detail}"
+  finish UNAVAILABLE 3
+}
 case "$round_rc" in
   0) ;;
-  1) finish cap 4 ;;
-  *) finish UNAVAILABLE 3 ;;
+  1) if grep -q '^LOOP-CAP: ' "$WORK/round.out"; then finish cap 4; fi
+     round_unavailable 1 ;;
+  *) round_unavailable "$round_rc" ;;
 esac
 
 # The reviewer runs from a scratch directory below, and adversary-host.sh writes its evidence rows
