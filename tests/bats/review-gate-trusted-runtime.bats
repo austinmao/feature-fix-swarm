@@ -1,7 +1,7 @@
 #!/usr/bin/env bats
 # review-gate-trusted-runtime.bats — the review gate must never execute FFS
 # helper code from the tree it reviews. Each skill fence loads helpers from a
-# snapshot of the base ref (merge-base with main), so a branch that edits
+# snapshot of the base tip (origin/main, else main), so a branch that edits
 # gates.py, review-tier.sh, adversary-host.sh or clean_code_metrics.py cannot
 # change how its own review runs. Every fence runs in a fresh bash process,
 # because hosts may run fences in separate shells.
@@ -53,6 +53,21 @@ make_fixture() {
   git -C "$FIX" add -A && git -C "$FIX" -c user.name=t -c user.email=t@t commit -qm evil
   echo 'x = 2' > "$FIX/src/app.py"
   git -C "$FIX" add src/app.py
+}
+
+# advance_base — main moves past the branch's fork point with newer helpers.
+# The branch can choose its fork point, so the gate must not run the fork's copies.
+advance_base() {
+  local wt="$BATS_TEST_TMPDIR/main-wt" rt
+  git -C "$FIX" worktree add -q "$wt" main
+  rt="$wt/$1"
+  printf '#!/usr/bin/env bash\necho "light tip-tier"\n' > "$rt/scripts/gsd/review-tier.sh"
+  printf 'detect_orchestrator_host() { echo claude; }\nadversary_kind_for_host() { echo tip; }\n' \
+    > "$rt/scripts/gsd/adversary-host.sh"
+  printf 'print("COMPLEXITY tip-helper")\n' > "$rt/lib/clean_code_metrics.py"
+  printf 'import sys\nsys.exit("evidence store x is tracked by git")\n' > "$rt/lib/gates.py"
+  git -C "$wt" -c user.name=t -c user.email=t@t commit -qam tip
+  git -C "$FIX" worktree remove --force "$wt"
 }
 
 # fake_install — a user-scope FFS install under the sandboxed HOME.
@@ -139,6 +154,81 @@ $3"
   [[ "$output" == *"gates="*"/lib/gates.py"* ]]
   [[ "$output" != *"gates=$FIX/"* || "$output" == *"gates=$FIX/.git/ffs-trusted/"* ]]
   [[ "$output" != *"gates=$HOME/"* ]]
+  [ ! -e "$CANARY" ]
+}
+
+@test "every fence uses the base tip, not the branch's fork point" {
+  make_fixture .
+  advance_base .
+  run_fence '### Pre-check — choose the opposite CLI' '' 'echo "kind=$REVIEW_KIND"'
+  [[ "$output" == *"kind=tip"* ]] || false
+  run_fence '### Tier selection (v1.4.0)' 'DIFF_TARGET=--staged' 'echo "reason=$TIER_REASON"'
+  [[ "$output" == *"reason=tip-tier"* ]] || false
+  run_fence '### Capture diff' '' ''
+  [[ "$output" == *"COMPLEXITY tip-helper"* ]] || false
+  run_fence '### Findings queue: capability probe + resolved-sig consult' '' 'echo reached'
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"GATE: FAIL"* ]] || false
+  [ ! -e "$CANARY" ]
+  # the remaining fences carry the same loader line
+  [ "$(grep -c 'ffs_trusted_runtime "$FFS_REF"' "$SKILL")" -eq 6 ]
+  [ "$(grep 'ffs_trusted_runtime "$FFS_REF"' "$SKILL" | sed 's/^ *//' | sort -u | wc -l)" -eq 1 ]
+}
+
+@test "the base tip is origin/main before a local main (packaged layout)" {
+  make_fixture packages/feature-fix-swarm
+  git -C "$FIX" update-ref refs/remotes/origin/main main
+  advance_base packages/feature-fix-swarm
+  run_fence '### Pre-check — choose the opposite CLI' '' 'echo "kind=$REVIEW_KIND"'
+  [[ "$output" == *"kind=codex"* ]] || false
+  git -C "$FIX" update-ref refs/remotes/origin/main main
+  run_fence '### Pre-check — choose the opposite CLI' '' 'echo "kind=$REVIEW_KIND"'
+  [[ "$output" == *"kind=tip"* ]] || false
+  [ ! -e "$CANARY" ]
+}
+
+@test "a branch with no history in common with main still gets main's runtime" {
+  make_fixture .
+  git -C "$FIX" checkout -q --orphan 124-orphan
+  git -C "$FIX" -c user.name=t -c user.email=t@t commit -qm orphan
+  run_fence '### Pre-check — choose the opposite CLI' '' 'echo "kind=$REVIEW_KIND"'
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"kind=codex"* ]] || false
+  [ ! -e "$CANARY" ]
+}
+
+@test "a branch or tag named like a base ref does not replace it" {
+  make_fixture .
+  advance_base .
+  for name in main origin/main refs/heads/main refs/remotes/origin/main; do
+    git -C "$FIX" update-ref "refs/tags/$name" 123-branch
+    [ "$name" = main ] || git -C "$FIX" update-ref "refs/heads/$name" 123-branch
+  done
+  # no origin/main: the local main answers
+  run_fence '### Pre-check — choose the opposite CLI' '' 'echo "kind=$REVIEW_KIND"'
+  [[ "$output" == *"kind=tip"* ]] || false
+  [ ! -e "$CANARY" ]
+  # origin/main only
+  git -C "$FIX" update-ref refs/remotes/origin/main refs/heads/main
+  git -C "$FIX" update-ref -d refs/heads/main
+  run_fence '### Pre-check — choose the opposite CLI' '' 'echo "kind=$REVIEW_KIND"'
+  [[ "$output" == *"kind=tip"* ]] || false
+  [ ! -e "$CANARY" ]
+  # neither: no look-alike is used
+  git -C "$FIX" update-ref -d refs/remotes/origin/main
+  fake_install
+  run_fence '### Pre-check — choose the opposite CLI' '' 'echo "kind=$REVIEW_KIND"'
+  [[ "$output" == *"kind=installed"* ]] || false
+  [ ! -e "$CANARY" ]
+}
+
+@test "an origin/main without its object falls back to the local main" {
+  make_fixture .
+  mkdir -p "$FIX/.git/refs/remotes/origin"
+  printf '%040d\n' 1 > "$FIX/.git/refs/remotes/origin/main"
+  run_fence '### Pre-check — choose the opposite CLI' '' 'echo "kind=$REVIEW_KIND"'
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"kind=codex"* ]] || false
   [ ! -e "$CANARY" ]
 }
 
