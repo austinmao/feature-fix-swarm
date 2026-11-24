@@ -95,7 +95,7 @@ Otherwise skip it entirely and continue below exactly as before.
 6. **Refusals.** Exit code 3 means refused. Relay the `CLOUD-REFUSED:` line.
    Under `auto` or `prefer`, continue with every task locally; under
    `required`, stop. **A refusal from `plan` falls back to local only when the
-   run does not exist:** first run `bash scripts/gsd/cloud-dispatch.sh status --run <run>`;
+   run does not exist:** first run `bash scripts/gsd/cloud-dispatch.sh status --run <run>` (the run id of steps 4 and 5);
    only its stderr line `CLOUD-ERROR: LEDGER_MISSING` proves there is no run.
    Any other result (a status document, or any other error) means a run with
    this id may already be running tasks in the cloud: run nothing, cloud or
