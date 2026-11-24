@@ -63,6 +63,14 @@ def _git_ok_in(root: Path, *args: str) -> bool:
 MAIN_REF = "origin/main"
 
 
+def _base_carries_the_cloud_block(git, git_ok, commit: str) -> bool:
+    """True when the commit's own tree proves the cloud work has landed: the dispatcher and the swarm skill's block."""
+    if not git_ok("cat-file", "-e", f"{commit}:lib/cloud_dispatch.py"):
+        return False
+    skill = git("show", f"{commit}:{SWARM}")
+    return skill.count(BEGIN) == 1 and skill.count(END) == 1
+
+
 def _resolve_base(root: Path, ci: bool) -> str:
     """The commit whose skill text the cloud branch must equal outside the cloud block.
 
@@ -73,8 +81,9 @@ def _resolve_base(root: Path, ci: bool) -> str:
     was never on main). All merges in range are considered, newest first (a synthetic PR merge puts the branch's own
     merges off the first-parent chain); otherwise the pre-cloud commit stands. Nothing here reads any other ref.
 
-    With no cloud-adding commit in range the cloud work is already on the base and the comparison is skipped; in CI that
-    must be true, not a misread history."""
+    With no cloud-adding commit in range the comparison retires, and only when the base tree itself carries the cloud
+    block (the dispatcher and the skill's block markers): then there is no pre-cloud text left to compare with. Without
+    that proof it is missing history, a skip on a developer machine and a failure in CI."""
     def git(*args: str) -> str:
         return _git_in(root, ci, *args)
 
@@ -87,9 +96,10 @@ def _resolve_base(root: Path, ci: bool) -> str:
         f"{merge_base}..HEAD", "--", "lib/cloud_dispatch.py",
     ).split()
     if not adders:
-        if ci and not git_ok("cat-file", "-e", f"{merge_base}:lib/cloud_dispatch.py"):
-            pytest.fail(f"no commit adds lib/cloud_dispatch.py after {merge_base[:12]} and it is not on the base either")
-        pytest.skip("cloud work is already on the base; no pre-cloud baseline")
+        if _base_carries_the_cloud_block(git, git_ok, merge_base):
+            pytest.skip("cloud work is already on the base; no pre-cloud baseline")
+        _unavailable(f"no commit adds lib/cloud_dispatch.py after {merge_base[:12]} and the base does not carry "
+                     "the cloud block either", ci)
     pre = git("rev-parse", f"{adders[0]}^").strip()
     merged = git("log", "--merges", "--format=%P", f"{adders[0]}..HEAD").split("\n")
     for line in merged:
@@ -301,14 +311,17 @@ def _commit(repo: Path, files: Dict[str, str], message: str) -> str:
     return _g(repo, "rev-parse", "HEAD")
 
 
+CLOUD_SKILL = f"line one\n{BEGIN}\ncloud block\n{END}\nline two\nline three\n"
+
+
 def _history(tmp_path: Path, *, merge_main: bool, merge_unrelated: bool, cloud_on_main: bool = False,
-             publish_main: bool = True) -> Dict[str, str]:
+             publish_main: bool = True, block_on_main: bool = True) -> Dict[str, str]:
     """main (moves on after `pre`) with branches topic and cloud cut from `pre`; main and topic edit different lines."""
     repo = tmp_path / "repo"
     repo.mkdir()
     _g(repo, "init", "-q", "-b", "main")
     skill = "line one\nline two\nline three\n"
-    first = {"skills/swarm/SKILL.md": skill}
+    first = {"skills/swarm/SKILL.md": CLOUD_SKILL if cloud_on_main and block_on_main else skill}
     if cloud_on_main:
         first["lib/cloud_dispatch.py"] = "# cloud\n"
     ids = {"pre": _commit(repo, first, "base")}
@@ -362,6 +375,19 @@ def test_cloud_work_already_on_the_base_is_a_skip_even_in_ci(tmp_path: Path) -> 
         with pytest.raises(pytest.skip.Exception) as skipped:
             _resolve_base(repo, ci=ci)
         assert "already on the base" in str(skipped.value)
+
+
+def test_a_base_without_the_cloud_block_is_never_a_landed_base(tmp_path: Path) -> None:
+    """The dispatcher alone is not the proof: the retirement needs the skill's block in the base tree too, and a CI
+    run without it fails instead of skipping the comparison."""
+    ids = _history(tmp_path, merge_main=False, merge_unrelated=False, cloud_on_main=True, block_on_main=False)
+    repo = Path(ids["repo"])
+    with pytest.raises(pytest.skip.Exception) as skipped:
+        _resolve_base(repo, ci=False)
+    assert "does not carry the cloud block" in str(skipped.value)
+    with pytest.raises(pytest.fail.Exception) as failure:
+        _resolve_base(repo, ci=True)
+    assert "does not carry the cloud block" in str(failure.value)
 
 
 def test_a_history_with_no_cloud_work_anywhere_fails_in_ci(tmp_path: Path) -> None:

@@ -45,6 +45,9 @@ all skills.
 - The no-flag test (`tests/test_swarm_cloud_noflag.py`) resolves its baseline from
   `origin/main` only. It no longer reads the obsolete stacked remote-tracking ref, so
   a checkout that kept that ref and one that pruned it compare against the same text.
+  When the cloud work is already on the base the comparison items retire only if the
+  base tree itself carries the dispatcher and the skill's cloud block; a CI run
+  without that proof fails instead of skipping.
 
 ### Changed (2026-11-21, review-gate keeps the reviewed branch out of its own runtime)
 
