@@ -619,10 +619,14 @@ def codex_env_id(config: Dict[str, Any]) -> Optional[str]:
     return value or None
 
 
-def gates_check(svc: Services, run: str, action: str) -> bool:
-    """``gates.py check-grant``: exit 0 granted, 1 not, anything else is a store error (refuse)."""
+def gates_check(svc: Services, run: str, action: str, root: Path) -> bool:
+    """``gates.py check-grant``: exit 0 granted, 1 not, anything else is a store error (refuse).
+
+    It runs in ``root`` (the repository the run belongs to), so the default evidence store and a relative
+    ``GATES_STORE`` are that repository's, never the caller's working directory's.  An absolute ``GATES_STORE``
+    is unaffected."""
     result = svc.run([sys.executable or "python3", str(LIB_DIR / "gates.py"), "check-grant", run, "--action", action],
-                     timeout=GATES_TIMEOUT_S)
+                     cwd=root, timeout=GATES_TIMEOUT_S)
     if result.rc == 0:
         return True
     if result.rc == 1:
@@ -630,8 +634,8 @@ def gates_check(svc: Services, run: str, action: str) -> bool:
     raise Refused("GRANT_STORE_ERROR", "gates.py check-grant exited %d" % result.rc)
 
 
-def granted_set(svc: Services, run: str, keys: Iterable[str]) -> List[str]:
-    return sorted(key for key in set(keys) if gates_check(svc, run, key))
+def granted_set(svc: Services, run: str, keys: Iterable[str], root: Path) -> List[str]:
+    return sorted(key for key in set(keys) if gates_check(svc, run, key, root))
 
 
 def push_ref_valid(run: str, ref: str) -> bool:
@@ -1133,7 +1137,7 @@ def cmd_plan(svc: Services, args: argparse.Namespace) -> int:
     if args.run is not None:
         required = plan["preconditions"]["grants_missing"]
         try:
-            granted: List[str] = granted_set(svc, args.run, required)
+            granted: List[str] = granted_set(svc, args.run, required, root)
         except Refused:  # an unreadable grants store counts as "nothing granted" for a read-only plan
             granted = []
         plan = route(svc, root, tasks, policy=args.policy, run=args.run, config=config, doctor=doctor,
@@ -1204,11 +1208,11 @@ def scan_text(text: str, label: str) -> List[str]:
         return ["scan-refused:%s" % exc.reason]
 
 
-def check_start_grants(svc: Services, run: str, plan: Dict[str, Any]) -> List[str]:
+def check_start_grants(svc: Services, run: str, plan: Dict[str, Any], root: Path) -> List[str]:
     missing = list(plan["preconditions"]["grants_missing"])
     if not missing:
         return []
-    return [key for key in missing if key not in set(granted_set(svc, run, missing))]
+    return [key for key in missing if key not in set(granted_set(svc, run, missing, root))]
 
 
 def refuse_start_grants(missing: List[str]) -> None:
@@ -1276,7 +1280,7 @@ def cmd_start(svc: Services, args: argparse.Namespace) -> int:
         raise Refused("DOCTOR_NOT_GREEN", failing(checks))
     plan = route(svc, root, tasks, policy=args.policy, run=run, config=config, doctor="green",
                  refusals=[], grants=None)
-    missing = check_start_grants(svc, run, plan)
+    missing = check_start_grants(svc, run, plan, root)
     if missing:
         refuse_start_grants(missing)
     records = cloud_records(plan, tasks)
@@ -1893,7 +1897,7 @@ def cmd_resolve(svc: Services, args: argparse.Namespace) -> int:
             raise Refused("DEPENDENCY_REPORT_INVALID", "the report names no package and is not marked unattributed")
         if report["digest"] != entry.get("deps_digest"):
             raise Refused("STALE_APPROVAL", "the stored dependency report is not the one recorded for this result")
-        missing = [key for key in required if not gates_check(svc, run, key)]
+        missing = [key for key in required if not gates_check(svc, run, key, root)]
         if missing:
             raise Refused("GRANT_MISSING", "missing grants: %s" % ", ".join(missing))
         snapshot = (entry["generation"], entry.get("bound_oid"), report["digest"])
@@ -2017,7 +2021,7 @@ def _delete_remote_branches(svc: Services, root: Path, run: str, url: str,
     delete is leased to that OID, so a branch that moved is kept and reported.  A branch with no recorded OID is
     kept too.  The integration ref is published locally, never to the remote, so a remote one is somebody else's."""
     owned = owned or {}
-    if not gates_check(svc, run, "push:origin/ffs/cloud/%s" % run):
+    if not gates_check(svc, run, "push:origin/ffs/cloud/%s" % run, root):
         raise Refused("GRANT_MISSING", "missing grants: push:origin/ffs/cloud/%s" % run)
     ok, refs = ls_remote(svc, url, "refs/heads/ffs/cloud/%s/*" % run)
     if not ok:
@@ -3148,7 +3152,7 @@ class Orchestrator:
 
     def grant_ok(self, key: str) -> bool:
         try:
-            return gates_check(self.svc, self.run_id, key)
+            return gates_check(self.svc, self.run_id, key, self.root)
         except Refused as exc:
             self.log("grant check %s: %s" % (key, exc.code))
             return False

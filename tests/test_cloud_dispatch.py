@@ -1658,7 +1658,77 @@ def test_lifecycle_record_registers_the_resume_argv(world: World) -> None:
 def test_unreadable_grants_store_refuses_rather_than_assuming(world: World) -> None:
     (world.tmp / "gates.json").write_text("{not json")
     with pytest.raises(cd.Refused):
-        cd.gates_check(world.svc, "r1", "cloud-dispatch:claude")
+        cd.gates_check(world.svc, "r1", "cloud-dispatch:claude", world.root)
+
+
+def _other_repo(world: World) -> Path:
+    """A second, unrelated checkout: the working directory an operator might run the dispatcher from."""
+    other = world.tmp / "other"
+    run_git(world.tmp, "init", "-q", "-b", "main", str(other))
+    return other
+
+
+def _grant_in(cwd: Path, run: str, *actions: str) -> None:
+    cmd = [sys.executable, str(LIB / "gates.py"), "grant", run, "--ttl-hours", "24", "--reason", "test"]
+    for action in actions:
+        cmd += ["--action", action]
+    assert subprocess.run(cmd, capture_output=True, cwd=str(cwd), env=dict(os.environ)).returncode == 0
+
+
+def test_gates_check_reads_the_grant_store_of_the_target_root_not_the_working_directory(
+        world: World, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("GATES_STORE")
+    other = _other_repo(world)
+    key = "cloud-dispatch:claude"
+    _grant_in(other, "r1", key)  # a grant recorded in the wrong repository
+    monkeypatch.chdir(other)
+    assert cd.gates_check(world.svc, "r1", key, world.root) is False
+    _grant_in(world.root, "r1", key)
+    assert cd.gates_check(world.svc, "r1", key, world.root) is True  # still running from the other checkout
+
+
+def test_a_relative_gates_store_is_the_target_roots_not_the_working_directorys(
+        world: World, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("GATES_STORE", "rel/gates.json")
+    other = _other_repo(world)
+    _grant_in(world.root, "r1", "cloud-dispatch:claude")
+    assert (world.root / "rel" / "gates.json").exists()
+    monkeypatch.chdir(other)
+    assert cd.gates_check(world.svc, "r1", "cloud-dispatch:claude", world.root) is True
+
+
+def test_start_is_refused_when_the_grant_exists_only_in_another_checkout(
+        world: World, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("GATES_STORE")
+    other = _other_repo(world)
+    _grant_in(other, "r1", "cloud-dispatch:claude", "cloud-dispatch:codex", "push:origin/ffs/cloud/r1")
+    monkeypatch.chdir(other)
+    rc, out = world.start(grant=False)
+    assert rc == 3 and "CLOUD-REFUSED: GRANT_MISSING" in out
+    assert not L.run_ledger_path(world.root, "r1").exists()
+    _grant_in(world.root, "r1", "cloud-dispatch:claude", "cloud-dispatch:codex", "push:origin/ffs/cloud/r1")
+    assert world.start(grant=False)[0] == 0
+
+
+def test_cleanup_remote_uses_the_target_roots_grant_not_the_working_directorys(
+        world: World, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("GATES_STORE")
+    monkeypatch.chdir(world.root)
+    assert world.start()[0] == 0
+    world.drive()
+    other = _other_repo(world)
+    monkeypatch.chdir(other)
+    rc, out = world.cli("cleanup", "--run", "r1", "--remote", "--discard-unmerged", "--root", str(world.root))
+    assert rc == 0 and "remote-branches-deleted=2" in out
+
+
+def test_the_orchestrators_grant_check_runs_in_its_own_root(world: World, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("GATES_STORE")
+    other = _other_repo(world)
+    _grant_in(world.root, "r1", "push:origin/ffs/cloud/r1")
+    monkeypatch.chdir(other)
+    assert world.orchestrator().grant_ok("push:origin/ffs/cloud/r1") is True
+    assert world.orchestrator().grant_ok("cloud-dispatch:claude") is False
 
 
 def test_host_pressure_high_is_reported(world: World) -> None:

@@ -961,12 +961,14 @@ def _kill_group(proc: "subprocess.Popen[bytes]") -> None:
         pass
 
 
-def default_runner(argv: Sequence[str], env: Dict[str, str], timeout_s: int) -> Tuple[int, str]:
-    """Run the reviewer in its own process group; a timeout kills the whole group (K6)."""
+def default_runner(argv: Sequence[str], env: Dict[str, str], timeout_s: int,
+                   cwd: Optional[str] = None) -> Tuple[int, str]:
+    """Run the reviewer in its own process group; a timeout kills the whole group (K6).
+    ``cwd`` is the repository the review belongs to: the script's grant-store lookups resolve there."""
     try:
         proc = subprocess.Popen(
             list(argv), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-            env=env, start_new_session=True)
+            env=env, start_new_session=True, cwd=cwd)
     except (OSError, subprocess.SubprocessError):
         return 124, ""
     try:
@@ -1166,7 +1168,10 @@ def review(
         argv = ["bash", script or _script_path(), run, task, producer, diff_file, summary_file, str(generation)]
         if attempt > 0:
             argv.append(str(attempt))
-        rc, out = (runner or default_runner)(argv, _review_env(run), REVIEW_TIMEOUT_S)
+        if runner is not None:
+            rc, out = runner(argv, _review_env(run), REVIEW_TIMEOUT_S)
+        else:  # the review's evidence store is the target repository's, never the caller's working directory
+            rc, out = default_runner(argv, _review_env(run), REVIEW_TIMEOUT_S, cwd=repo)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     return _review_result(rc, out, meta)

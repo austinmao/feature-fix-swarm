@@ -1057,12 +1057,23 @@ means granted, 1 not granted, anything else is treated as a refusal.
 | `install:<pkg>` | `resolve --action accept-deps` for each added or changed package. | At `resolve`. |
 | `install:unattributed:<digest12>` | `resolve --action accept-deps` when the change cannot be attributed to named registry packages. `<digest12>` is the first 12 characters of the report digest, which the decision text prints. It binds the grant to this one report. | At `resolve`. |
 
-Record grants with the FFS grant ledger:
+Record grants with the FFS grant ledger, **from the repository you pass as
+`--root`** (the main worktree). The dispatcher runs every grant check, and the
+review's round accounting, with that repository as the working directory, so
+the default evidence store (`.feature-fix-swarm/evidence.json` of that
+repository) is the one it reads. A grant recorded while standing in another
+checkout is not seen, and a grant in another checkout never authorizes
+`start`, a push, or `cleanup --remote` for this one.
 
 ```bash
+cd <root>   # the repository passed as --root
 python3 lib/gates.py grant <run> --action cloud-dispatch:claude \
   --action push:origin/ffs/cloud/<run> --ttl-hours 24 --reason "cloud run"
 ```
+
+`GATES_STORE` still overrides the default. An absolute path is used as it is,
+from anywhere. A relative path is read relative to `--root`, so grant from
+`--root` or use an absolute path.
 
 Grants expire. An expired grant stops the next admit or submit with
 `grant-missing` or `exposure-not-granted`. Grant again and run

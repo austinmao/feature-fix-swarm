@@ -265,6 +265,22 @@ PY
   [ "$status" -eq 0 ]
 }
 
+@test "a relative GATES_STORE is pinned before the reviewer directory: round and evidence rows share one store" {
+  make_codex 'VERDICT: APPROVE\n'
+  mkdir -p "$BATS_TEST_TMPDIR/repo" && cd "$BATS_TEST_TMPDIR/repo"
+  export GATES_STORE="rel/gates.json"
+  review claude 1 "Run.A_1"
+  [ "$status" -eq 0 ]
+  [ "$(last_line)" = "CLOUD-REVIEW: APPROVE" ]
+  run python3 - "$BATS_TEST_TMPDIR/repo/rel/gates.json" <<'PY'
+import json, sys
+data = json.load(open(sys.argv[1]))
+assert data["_degradation"]["invocations"], data
+assert data["_loops"]["Run.A_1"], data
+PY
+  [ "$status" -eq 0 ]
+}
+
 @test "attempt argument gives an operator retest a fresh, still bounded, meter" {
   make_codex 'VERDICT: APPROVE\n'
   review claude 1; [ "$status" -eq 0 ]

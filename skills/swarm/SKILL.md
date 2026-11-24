@@ -1,7 +1,7 @@
 ---
 name: swarm
 description: "Ad-hoc parallel task executor. Pass natural language tasks directly (or --tasks-file); independent tasks use concurrent host-native volume/execution/judgment roles and dependent tasks run serially. No spec directory required; use feature-implement for full-feature work."
-version: "2.2.7"
+version: "2.2.8"
 permissions:
   filesystem: write
   network: true
@@ -70,7 +70,9 @@ Otherwise skip it entirely and continue below exactly as before.
 4. **Without `--dry-run`.** Show the operator the groups, routes, providers,
    exposed secret names and budgets from the plan, then record grants:
    - Interactive session: ask ONE question covering the task list, the providers
-     and every exposed secret name. On a yes, record exactly those keys:
+     and every exposed secret name. On a yes, record exactly those keys, from the
+     repository you pass as `--root` in step 5 (`cd "$(git rev-parse --show-toplevel)"`
+     first: the dispatcher reads that repository's grant store, not the shell's directory):
      `python3 lib/gates.py grant <run> --action cloud-dispatch:<provider> --action push:origin/ffs/cloud/<run> [--action secret-use:<NAME> ...] --ttl-hours 24 --reason "interactive /swarm --cloud"`
    - Autonomous or headless run: never self-grant. Rely on grants that already
      exist; `start` refuses when one is missing.

@@ -935,6 +935,20 @@ def test_revise_still_rejects_and_keeps_the_model_line_out_of_the_text(world):
     assert "CLOUD-REVIEW-MODEL" not in res.detail and res.data["model"] == "gpt-6.2-sol"
 
 
+def test_review_script_runs_in_the_target_repository_not_the_callers_directory(world, tmp_path, monkeypatch):
+    """cloud-review.sh resolves the default evidence store from its working directory."""
+    data = candidate_for(world)
+    seen = tmp_path / "cwd.txt"
+    script = tmp_path / "probe-review.sh"
+    script.write_text("#!/usr/bin/env bash\npwd -P > '%s'\nprintf 'CLOUD-REVIEW: UNAVAILABLE\\n'\nexit 3\n" % seen)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    cc.review(repo=str(world.main), run=RUN, task=TASK, generation=GEN, producer="claude",
+              base_oid=world.base, candidate_oid=data["candidate_oid"], manifest=data["manifest"], script=str(script))
+    assert seen.read_text().strip() == os.path.realpath(str(world.main))
+
+
 def test_review_script_end_to_end_with_stub(world, tmp_path):
     """The real script, with a stub reviewer binary and a temp gates store."""
     data = candidate_for(world)

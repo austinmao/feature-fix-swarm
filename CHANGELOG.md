@@ -8,6 +8,18 @@ all skills.
 
 ## Unreleased
 
+### Fixed (2026-11-24, cloud delegation: round 8)
+
+- Grant checks read the grant store of the `--root` repository, not the caller's
+  working directory. Every `gates.py` call of the dispatcher (`plan --run`, `start`,
+  the orchestrator, `resolve --action accept-deps`, `cleanup --remote`) and the
+  `loop-round` of the review now run with `--root` as the working directory, so
+  a grant recorded in another checkout no longer authorizes `cleanup --remote` or
+  a push for this one. An absolute `GATES_STORE` works as before; a relative one
+  is relative to `--root`. `cloud-review.sh` pins the store it resolved before it
+  enters its scratch directory. Grant from the `--root` repository; `/swarm`
+  skill 2.2.8 says so.
+
 ### Changed (2026-11-21, review-gate keeps the reviewed branch out of its own runtime)
 
 - review-gate 1.20.0 reuses one base-ref runtime snapshot per commit, kept under
