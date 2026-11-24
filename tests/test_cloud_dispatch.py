@@ -1722,6 +1722,27 @@ def test_cleanup_remote_uses_the_target_roots_grant_not_the_working_directorys(
     assert rc == 0 and "remote-branches-deleted=2" in out
 
 
+def test_cleanup_remote_is_refused_when_only_the_working_directorys_checkout_holds_the_push_grant(
+        world: World, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The reported exploit: a push grant in checkout A must not authorize deleting task branches of checkout B."""
+    monkeypatch.delenv("GATES_STORE")
+    monkeypatch.chdir(world.root)
+    assert world.start()[0] == 0
+    world.drive()
+    push_key = "push:origin/ffs/cloud/r1"
+    store = world.root / ".feature-fix-swarm" / "evidence.json"
+    data = json.loads(store.read_text())
+    del data["_autonomy"]["r1"]["grants"][push_key]  # the target repository has no push grant any more
+    store.write_text(json.dumps(data))
+    other = _other_repo(world)
+    _grant_in(other, "r1", push_key)  # while the checkout the operator stands in does
+    monkeypatch.chdir(other)
+    before = run_git(world.origin, "for-each-ref", "refs/heads/ffs/cloud/r1/")
+    rc, out = world.cli("cleanup", "--run", "r1", "--remote", "--discard-unmerged", "--root", str(world.root))
+    assert rc == 3 and "CLOUD-REFUSED: GRANT_MISSING" in out, out
+    assert before and run_git(world.origin, "for-each-ref", "refs/heads/ffs/cloud/r1/") == before
+
+
 def test_the_orchestrators_grant_check_runs_in_its_own_root(world: World, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("GATES_STORE")
     other = _other_repo(world)
