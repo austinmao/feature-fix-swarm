@@ -61,7 +61,6 @@ def _git_ok_in(root: Path, *args: str) -> bool:
 
 
 MAIN_REF = "origin/main"
-STACKED_REF = "origin/chore/model-tiers-6-2"
 
 
 def _resolve_base(root: Path, ci: bool) -> str:
@@ -69,13 +68,13 @@ def _resolve_base(root: Path, ci: bool) -> str:
 
     The pre-cloud commit is the parent of the oldest commit in `merge-base..HEAD` that adds lib/cloud_dispatch.py, so
     unrelated commits beneath the cloud work (e.g. a model-tier refresh that edits skills) are not counted as cloud
-    differences. A later merge of the base branch into the cloud branch moves it: only a merge parent that is the
-    declared base (or one of its ancestors) and carries no cloud work is accepted. While the stacked ref exists the
-    parent must also descend from the pre-cloud commit, so an unrelated cloud-free topic merged in does not qualify
-    (its text was never the base). Once the stacked base has landed and its ref is gone, `pre` sits on the old line and
-    is no longer an ancestor of the squash commit on main, so that descent check is not applied. All
-    merges in range are considered, newest first (a synthetic PR merge puts the branch's own merges off the
-    first-parent chain); otherwise the pre-cloud commit stands."""
+    differences. A later merge of main into the cloud branch moves it: only a merge parent that carries no cloud work
+    and is an ancestor of origin/main is accepted, so an unrelated cloud-free topic merged in does not qualify (its text
+    was never on main). All merges in range are considered, newest first (a synthetic PR merge puts the branch's own
+    merges off the first-parent chain); otherwise the pre-cloud commit stands. Nothing here reads any other ref.
+
+    With no cloud-adding commit in range the cloud work is already on the base and the comparison is skipped; in CI that
+    must be true, not a misread history."""
     def git(*args: str) -> str:
         return _git_in(root, ci, *args)
 
@@ -88,21 +87,16 @@ def _resolve_base(root: Path, ci: bool) -> str:
         f"{merge_base}..HEAD", "--", "lib/cloud_dispatch.py",
     ).split()
     if not adders:
-        # The cloud work is already on the base (after landing, on main or on a
-        # branch cut from it): there is no pre-cloud text left to compare with.
-        # In CI that must be true, not a misread history.
         if ci and not git_ok("cat-file", "-e", f"{merge_base}:lib/cloud_dispatch.py"):
             pytest.fail(f"no commit adds lib/cloud_dispatch.py after {merge_base[:12]} and it is not on the base either")
         pytest.skip("cloud work is already on the base; no pre-cloud baseline")
     pre = git("rev-parse", f"{adders[0]}^").strip()
-    declared = STACKED_REF if git_ok("rev-parse", "--verify", "-q", STACKED_REF) else MAIN_REF
     merged = git("log", "--merges", "--format=%P", f"{adders[0]}..HEAD").split("\n")
     for line in merged:
         clean = [
             p for p in line.split()
             if not git_ok("cat-file", "-e", f"{p}:lib/cloud_dispatch.py")
-            and (declared != STACKED_REF or git_ok("merge-base", "--is-ancestor", pre, p))
-            and git_ok("merge-base", "--is-ancestor", p, declared)
+            and git_ok("merge-base", "--is-ancestor", p, MAIN_REF)
         ]
         if len(clean) == 1:
             return clean[0]
@@ -307,9 +301,9 @@ def _commit(repo: Path, files: Dict[str, str], message: str) -> str:
     return _g(repo, "rev-parse", "HEAD")
 
 
-def _history(tmp_path: Path, *, merge_stacked: bool, merge_unrelated: bool, cloud_on_main: bool = False,
+def _history(tmp_path: Path, *, merge_main: bool, merge_unrelated: bool, cloud_on_main: bool = False,
              publish_main: bool = True) -> Dict[str, str]:
-    """main -> {stacked, topic, cloud}; the stacked and topic branches edit different lines of the skill."""
+    """main (moves on after `pre`) with branches topic and cloud cut from `pre`; main and topic edit different lines."""
     repo = tmp_path / "repo"
     repo.mkdir()
     _g(repo, "init", "-q", "-b", "main")
@@ -318,19 +312,18 @@ def _history(tmp_path: Path, *, merge_stacked: bool, merge_unrelated: bool, clou
     if cloud_on_main:
         first["lib/cloud_dispatch.py"] = "# cloud\n"
     ids = {"pre": _commit(repo, first, "base")}
+    ids["main"] = _commit(repo, {"skills/swarm/SKILL.md": first["skills/swarm/SKILL.md"].replace("one", "tiered")},
+                          "main moves on")
     if publish_main:
-        _g(repo, "update-ref", "refs/remotes/origin/main", ids["pre"])
-    _g(repo, "checkout", "-q", "-b", "stacked")
-    ids["stacked"] = _commit(repo, {"skills/swarm/SKILL.md": skill.replace("one", "tiered")}, "stacked base edit")
-    _g(repo, "update-ref", "refs/remotes/origin/chore/model-tiers-6-2", ids["stacked"])
+        _g(repo, "update-ref", "refs/remotes/origin/main", ids["main"])
     _g(repo, "checkout", "-q", "-b", "topic", ids["pre"])
     ids["topic"] = _commit(repo, {"skills/swarm/SKILL.md": skill.replace("three", "changed behavior")}, "unrelated topic")
     _g(repo, "checkout", "-q", "-b", "cloud", ids["pre"])
     if not cloud_on_main:
         _commit(repo, {"lib/cloud_dispatch.py": "# cloud\n"}, "add the dispatcher")
         _commit(repo, {"docs/cloud.md": "cloud\n"}, "docs")
-    if merge_stacked:
-        _g(repo, "merge", "-q", "--no-ff", "-m", "merge the stacked base", "stacked")
+    if merge_main:
+        _g(repo, "merge", "-q", "--no-ff", "-m", "merge main", "main")
     if merge_unrelated:
         _g(repo, "merge", "-q", "--no-ff", "-m", "merge an unrelated topic", "topic")
     ids["repo"] = str(repo)
@@ -338,22 +331,22 @@ def _history(tmp_path: Path, *, merge_stacked: bool, merge_unrelated: bool, clou
 
 
 def test_an_unrelated_cloud_free_merge_is_not_the_baseline(tmp_path: Path) -> None:
-    ids = _history(tmp_path, merge_stacked=True, merge_unrelated=True)
-    assert _resolve_base(Path(ids["repo"]), ci=False) == ids["stacked"]  # not the newest merge, the topic
+    ids = _history(tmp_path, merge_main=True, merge_unrelated=True)
+    assert _resolve_base(Path(ids["repo"]), ci=False) == ids["main"]  # not the newest merge, the topic
 
 
 def test_an_unrelated_merge_alone_leaves_the_pre_cloud_commit_as_the_baseline(tmp_path: Path) -> None:
-    ids = _history(tmp_path, merge_stacked=False, merge_unrelated=True)
+    ids = _history(tmp_path, merge_main=False, merge_unrelated=True)
     assert _resolve_base(Path(ids["repo"]), ci=False) == ids["pre"]
 
 
-def test_a_merge_of_the_declared_stacked_base_moves_the_baseline(tmp_path: Path) -> None:
-    ids = _history(tmp_path, merge_stacked=True, merge_unrelated=False)
-    assert _resolve_base(Path(ids["repo"]), ci=False) == ids["stacked"]
+def test_a_merge_of_main_moves_the_baseline(tmp_path: Path) -> None:
+    ids = _history(tmp_path, merge_main=True, merge_unrelated=False)
+    assert _resolve_base(Path(ids["repo"]), ci=False) == ids["main"]
 
 
 def test_missing_history_skips_locally_and_fails_in_ci(tmp_path: Path) -> None:
-    ids = _history(tmp_path, merge_stacked=True, merge_unrelated=False, publish_main=False)
+    ids = _history(tmp_path, merge_main=True, merge_unrelated=False, publish_main=False)
     repo = Path(ids["repo"])
     with pytest.raises(pytest.skip.Exception):
         _resolve_base(repo, ci=False)
@@ -363,7 +356,7 @@ def test_missing_history_skips_locally_and_fails_in_ci(tmp_path: Path) -> None:
 
 
 def test_cloud_work_already_on_the_base_is_a_skip_even_in_ci(tmp_path: Path) -> None:
-    ids = _history(tmp_path, merge_stacked=False, merge_unrelated=False, cloud_on_main=True)
+    ids = _history(tmp_path, merge_main=False, merge_unrelated=False, cloud_on_main=True)
     repo = Path(ids["repo"])
     for ci in (False, True):
         with pytest.raises(pytest.skip.Exception) as skipped:
@@ -372,7 +365,7 @@ def test_cloud_work_already_on_the_base_is_a_skip_even_in_ci(tmp_path: Path) -> 
 
 
 def test_a_history_with_no_cloud_work_anywhere_fails_in_ci(tmp_path: Path) -> None:
-    ids = _history(tmp_path, merge_stacked=False, merge_unrelated=False)
+    ids = _history(tmp_path, merge_main=False, merge_unrelated=False)
     repo = Path(ids["repo"])
     _g(repo, "checkout", "-q", "main")  # HEAD is the base itself and the dispatcher exists nowhere
     with pytest.raises(pytest.skip.Exception):
@@ -381,16 +374,16 @@ def test_a_history_with_no_cloud_work_anywhere_fails_in_ci(tmp_path: Path) -> No
         _resolve_base(repo, ci=True)
 
 
-def test_a_synthetic_pr_merge_puts_the_stacked_tip_on_the_first_parent_and_still_resolves_to_it(tmp_path: Path) -> None:
-    ids = _history(tmp_path, merge_stacked=False, merge_unrelated=False)
+def test_a_synthetic_pr_merge_puts_the_main_tip_on_the_first_parent_and_still_resolves_to_it(tmp_path: Path) -> None:
+    ids = _history(tmp_path, merge_main=False, merge_unrelated=False)
     repo = Path(ids["repo"])
-    _g(repo, "checkout", "-q", "-b", "synthetic", ids["stacked"])
+    _g(repo, "checkout", "-q", "-b", "synthetic", ids["main"])
     _g(repo, "merge", "-q", "--no-ff", "-m", "synthetic PR merge", "cloud")
-    assert _resolve_base(repo, ci=False) == ids["stacked"]
-    assert _resolve_base(repo, ci=True) == ids["stacked"]
+    assert _resolve_base(repo, ci=False) == ids["main"]
+    assert _resolve_base(repo, ci=True) == ids["main"]
 
 
-def test_a_stacked_base_squash_merged_into_main_with_its_ref_gone_resolves_to_the_squash_commit(tmp_path: Path) -> None:
+def test_a_stacked_base_squash_merged_into_main_resolves_to_the_squash_commit_whether_or_not_its_ref_was_pruned(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
     _g(repo, "init", "-q", "-b", "main")
@@ -414,5 +407,9 @@ def test_a_stacked_base_squash_merged_into_main_with_its_ref_gone_resolves_to_th
     _g(repo, "checkout", "-q", "cloud")
     _g(repo, "merge", "-q", "--no-ff", "-m", "merge main", "main")
     assert not _git_ok_in(repo, "merge-base", "--is-ancestor", stacked, landed)  # the squash does not contain it
+    assert _resolve_base(repo, ci=False) == landed
+    assert _resolve_base(repo, ci=True) == landed
+    # a developer who never pruned the obsolete remote-tracking ref gets the same baseline
+    _g(repo, "update-ref", "refs/remotes/origin/chore/model-tiers-6-2", stacked)
     assert _resolve_base(repo, ci=False) == landed
     assert _resolve_base(repo, ci=True) == landed

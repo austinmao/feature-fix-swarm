@@ -42,6 +42,9 @@ all skills.
   Exit 1 of `loop-round` is a cap only when `gates.py` also printed its `LOOP-CAP:` line.
   The script prints one sanitized `CLOUD-REVIEW-REASON:` line and the dispatcher shows it
   in the `review-unavailable` detail.
+- The no-flag test (`tests/test_swarm_cloud_noflag.py`) resolves its baseline from
+  `origin/main` only. It no longer reads the obsolete stacked remote-tracking ref, so
+  a checkout that kept that ref and one that pruned it compare against the same text.
 
 ### Changed (2026-11-21, review-gate keeps the reviewed branch out of its own runtime)
 
