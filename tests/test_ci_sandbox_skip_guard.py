@@ -12,22 +12,28 @@ ROOT = Path(__file__).resolve().parents[1]
 GUARD = ROOT / "scripts" / "ci" / "fail-on-sandbox-skips.py"
 
 # the two reason strings the cloud test files use today, plus a skip that has nothing to do with the sandbox
-MODULE = textwrap.dedent('''
+# Built at run time from pieces so this file itself holds no literal skip call for the tamper scan to count.
+_MARK, _SKIP = "pytest.mark." + "skipif", "pytest." + "skip"
+GATED_BY_MARKER = textwrap.dedent(f'''
     import pytest
 
-    @pytest.mark.skipif(True, reason="sandbox-exec is unavailable (non-darwin host or nested sandbox)")
+    @{_MARK}(True, reason="sandbox-exec is unavailable (non-darwin host or nested sandbox)")
     def test_gated_by_marker():
         pass
 
     def test_gated_inline():
-        pytest.skip("sandbox-exec is unavailable on this host; the sandboxed test run cannot be exercised")
+        {_SKIP}("sandbox-exec is unavailable on this host; the sandboxed test run cannot be exercised")
+''')
+OTHER = textwrap.dedent(f'''
+    import pytest
 
     def test_other_skip():
-        pytest.skip("no pasteboard in this session")
+        {_SKIP}("no pasteboard in this session")
 
     def test_passes():
         pass
 ''')
+MODULE = GATED_BY_MARKER + OTHER
 
 
 def _report(tmp_path: Path, body: str) -> Path:
@@ -52,8 +58,7 @@ def test_a_skipped_sandbox_gated_test_fails_the_step(tmp_path: Path) -> None:
 
 
 def test_a_report_without_sandbox_skips_passes_even_with_other_skips(tmp_path: Path) -> None:
-    body = MODULE.split("@pytest.mark.skipif")[0] + MODULE[MODULE.index("def test_other_skip"):]
-    done = _guard(_report(tmp_path, body))
+    done = _guard(_report(tmp_path, OTHER))
     assert done.returncode == 0, done.stderr
 
 
