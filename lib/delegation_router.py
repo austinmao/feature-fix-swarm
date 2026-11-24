@@ -383,7 +383,7 @@ def _bracket_spans(line: str) -> List[Tuple[int, int, str]]:
 def _parse_est(value: str) -> int:
     match = _EST_RE.match(value)
     if not match or not (match.group(1) or match.group(2)):
-        raise RouteError(ANNOTATION_INVALID, "est must look like 45m, 2h, 1h30m or 90: %r" % value)
+        raise RouteError(ANNOTATION_INVALID, "est must look like 45m, 2h, 1h30m or 90 (value withheld)")
     hours = int(match.group(1) or 0)
     minutes = int(match.group(2) or 0)
     return hours * MINUTES_PER_HOUR + minutes
