@@ -2187,27 +2187,35 @@ def test_a_push_that_loses_the_race_to_another_clone_at_a_different_oid_moves_no
 
 
 def test_the_admit_push_lease_expects_the_ref_to_be_absent_with_real_git(tmp_path: Path) -> None:
-    """Real git: the argv the dispatcher builds creates a missing ref and refuses to move or even touch an existing one."""
-    origin, one = tmp_path / "origin.git", tmp_path / "one"
+    """Real git, two clones of one origin: the argv the dispatcher builds creates a missing ref and refuses to move an
+    existing one that is an ancestor of the other clone's base (a plain push would fast-forward it)."""
+    origin, one, two = tmp_path / "origin.git", tmp_path / "one", tmp_path / "two"
     run_git(tmp_path, "init", "-q", "--bare", "-b", "main", str(origin))
     run_git(tmp_path, "init", "-q", "-b", "main", str(one))
     run_git(one, "commit", "-q", "--allow-empty", "-m", "first")
     first = run_git(one, "rev-parse", "HEAD")
-    run_git(one, "commit", "-q", "--allow-empty", "-m", "second")
-    second = run_git(one, "rev-parse", "HEAD")
     url, ref = "file://" + str(origin), "refs/heads/ffs/cloud/r1/t1-g1"
+    run_git(one, "push", "-q", url, "main")
+    run_git(tmp_path, "clone", "-q", url, str(two))
+    run_git(two, "commit", "-q", "--allow-empty", "-m", "second")
+    second = run_git(two, "rev-parse", "HEAD")
+    assert first != second and run_git(two, "merge-base", "--is-ancestor", first, second) == ""
 
-    def push(oid: str) -> subprocess.CompletedProcess:
-        argv = cd.admit_push_argv(one, url, oid, ref)
+    def push(clone: Path, oid: str) -> subprocess.CompletedProcess:
+        argv = cd.admit_push_argv(clone, url, oid, ref)
         return subprocess.run(argv, capture_output=True, text=True, env=dict(os.environ, **GIT_ENV))
 
-    created = push(first)
+    created = push(one, first)
     assert created.returncode == 0 and cd.pushed_new_ref(created.stdout, ref), created
-    moved = push(second)  # `first` is an ancestor of `second`: a plain push would fast-forward
+    moved = push(two, second)  # `first` is an ancestor of `second`: a plain push would fast-forward
     assert moved.returncode != 0 and run_git(origin, "rev-parse", ref) == first
-    again = push(first)  # the same OID is "up to date": nothing moves and no new ref is reported
+    again = push(one, first)  # the same OID is "up to date": nothing moves and no new ref is reported
     assert again.returncode == 0 and not cd.pushed_new_ref(again.stdout, ref) and run_git(origin, "rev-parse", ref) == first
     assert not any(token.startswith("+") for token in cd.admit_push_argv(one, url, first, ref))
+    control = "refs/heads/ffs/cloud/r1/control-g1"  # the same situation under a plain push does move the ref
+    run_git(one, "push", "-q", url, first + ":" + control)
+    run_git(two, "push", "-q", url, second + ":" + control)
+    assert run_git(origin, "rev-parse", control) == second
 
 
 def test_pushed_new_ref_needs_the_new_ref_flag_for_that_destination() -> None:
