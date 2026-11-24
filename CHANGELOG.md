@@ -32,6 +32,11 @@ all skills.
   reached stderr through `plan` and `start`. The other validation messages
   (`est`, tier, task id) quote only short constrained fields; a flagged task id is
   refused before any message is built.
+- Admission never moves an existing remote task branch. The admit push is leased to
+  an absent ref (`--force-with-lease=<ref>:`), so when two clones reuse a run and task
+  id and one branch is an ancestor of the other's base, the second no longer
+  fast-forwards it. A remote branch at exactly the wanted OID is still accepted on
+  retry (no push, no creation credit); one at another OID is `branch-conflict`.
 
 ### Changed (2026-11-21, review-gate keeps the reviewed branch out of its own runtime)
 

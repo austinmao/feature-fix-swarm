@@ -482,6 +482,14 @@ def pushed_new_ref(porcelain: str, ref: str) -> bool:
     return False
 
 
+def admit_push_argv(root: Path, url: str, oid: str, ref: str) -> List[str]:
+    """The admit push.  ``--force-with-lease=<ref>:`` (an empty expectation) says the remote ref must be ABSENT, and
+    there is no ``+``: a task branch that already exists is never moved, not even by a fast-forward, whoever made it.
+    A ref that exists at the wanted OID is accepted by the caller before it gets here, not by pushing over it."""
+    return ["git", "-C", str(root), "push", "--porcelain", "--no-force", "--no-verify", "--no-follow-tags",
+            "--recurse-submodules=no", "--force-with-lease=%s:" % ref, url, "%s:%s" % (oid, ref)]
+
+
 def ls_remote(svc: Services, url: str, pattern: str) -> Tuple[bool, Dict[str, str]]:
     """``(ok, {ref: oid})`` for refs matching ``pattern`` on the pinned URL."""
     result = svc.run(["git", "ls-remote", url, pattern], timeout=GIT_TIMEOUT_S, env=remote_env())
@@ -3111,15 +3119,20 @@ class Orchestrator:
             return
         seen, seen_refs = ls_remote(self.svc, doc["origin_url"], ref)
         absent_before = seen and ref not in seen_refs
-        pushed = self.svc.run(["git", "-C", str(self.root), "push", "--porcelain", "--no-force", "--no-verify",
-                               "--no-follow-tags", "--recurse-submodules=no", doc["origin_url"],
-                               "%s:%s" % (base_oid, ref)], timeout=GIT_PUSH_TIMEOUT_S, env=remote_env())
-        if not pushed.ok:
-            self.push_failed(name, gen, ref, pushed.rc, seq)
-            return
-        # Ownership needs the push itself to report a NEW ref for this destination: another clone with the same origin,
-        # run, task and base may have created it between the pre-check and this push, which then says "up to date" (=).
-        created["remote"] = absent_before and pushed_new_ref(pushed.text(), ref)
+        if seen and not absent_before:
+            if seen_refs[ref] != base_oid:  # another clone's branch (or an earlier base): never moved, not even forward
+                self.to_operator(name, gen, ledger.B_BRANCH_CONFLICT, ["remote task branch %s exists at another OID" % ref], seq)
+                return
+            # already at the wanted OID (a retry, or another clone with this base): accepted as it is, no push and no
+            # creation credit, so cleanup keeps it
+        else:
+            pushed = self.svc.run(admit_push_argv(self.root, doc["origin_url"], base_oid, ref),
+                                  timeout=GIT_PUSH_TIMEOUT_S, env=remote_env())
+            if not pushed.ok:  # includes a lease refusal: the ref appeared since the check, and the retry classifies it
+                self.push_failed(name, gen, ref, pushed.rc, seq)
+                return
+            # Ownership needs the push itself to report a NEW ref for this destination.
+            created["remote"] = absent_before and pushed_new_ref(pushed.text(), ref)
         self.svc.fault("after-admit-push")
         ok, refs = ls_remote(self.svc, doc["origin_url"], ref)
         if not ok or refs.get(ref) != base_oid:

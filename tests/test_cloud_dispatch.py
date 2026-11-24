@@ -2117,6 +2117,78 @@ def test_cleanup_remote_keeps_a_task_branch_a_second_clone_created_between_the_c
     assert run_git(world.origin, "rev-parse", remote_ref) == world.base
 
 
+def _two_clones_with_a_remote_ancestor(world: World) -> Tuple[str, str]:
+    """``(ancestor, descendant)``: the ref exists on origin at ``ancestor``; the root's base is its descendant."""
+    ref = L.task_branch_ref("r1", "t1", 1)
+    ancestor = world.base
+    run_git(world.root, "push", "-q", "origin", ancestor + ":" + ref)  # the first clone's run reached admission
+    (world.root / "src" / "a" / "more.txt").write_text("more\n")
+    run_git(world.root, "add", "src/a/more.txt")
+    run_git(world.root, "commit", "-q", "-m", "second clone's base")
+    run_git(world.root, "push", "-q", "origin", "main")
+    return ancestor, run_git(world.root, "rev-parse", "HEAD")
+
+
+def test_admission_never_moves_a_remote_task_branch_that_exists_at_an_ancestor_of_its_base(world: World) -> None:
+    """Two clones reuse a run and task id.  The first clone's branch is an ancestor of the second clone's base, which
+    a plain push would fast-forward.  The push must leave it alone and the task must need an operator."""
+    ref = L.task_branch_ref("r1", "t1", 1)
+    ancestor, descendant = _two_clones_with_a_remote_ancestor(world)
+    assert world.start(tasks=[T1])[0] == 0
+    world.drive()
+    assert run_git(world.origin, "rev-parse", ref) == ancestor  # not moved to the descendant
+    entry = world.doc()["tasks"]["t1"]
+    assert (entry["state"], entry["blocker"]) == ("needs-operator", L.B_BRANCH_CONFLICT), entry
+    assert world.count("claude") == 0 and descendant != ancestor
+
+
+def test_a_push_that_loses_the_race_to_another_clone_at_a_different_oid_moves_nothing(world: World) -> None:
+    """The branch is absent at the pre-check and another clone creates it at an ancestor before the push."""
+    ref = L.task_branch_ref("r1", "t1", 1)
+    ancestor = world.base
+    (world.root / "src" / "a" / "more.txt").write_text("more\n")
+    run_git(world.root, "add", "src/a/more.txt")
+    run_git(world.root, "commit", "-q", "-m", "descendant base")
+    run_git(world.root, "push", "-q", "origin", "main")
+    real_run, raced = world.svc.run, []
+
+    def racing(argv: Any, **kwargs: Any) -> Any:
+        if "push" in argv and "--porcelain" in argv and not raced:
+            raced.append(True)
+            run_git(world.root, "push", "-q", "origin", ancestor + ":" + ref)
+        return real_run(argv, **kwargs)
+
+    world.svc.run = racing  # type: ignore[assignment]
+    rc, out = world.start(tasks=[T1])
+    assert rc == 0, out
+    world.drive()
+    assert raced and run_git(world.origin, "rev-parse", ref) == ancestor
+
+
+def test_the_admit_push_lease_expects_the_ref_to_be_absent_with_real_git(tmp_path: Path) -> None:
+    """Real git: the argv the dispatcher builds creates a missing ref and refuses to move or even touch an existing one."""
+    origin, one = tmp_path / "origin.git", tmp_path / "one"
+    run_git(tmp_path, "init", "-q", "--bare", "-b", "main", str(origin))
+    run_git(tmp_path, "init", "-q", "-b", "main", str(one))
+    run_git(one, "commit", "-q", "--allow-empty", "-m", "first")
+    first = run_git(one, "rev-parse", "HEAD")
+    run_git(one, "commit", "-q", "--allow-empty", "-m", "second")
+    second = run_git(one, "rev-parse", "HEAD")
+    url, ref = "file://" + str(origin), "refs/heads/ffs/cloud/r1/t1-g1"
+
+    def push(oid: str) -> subprocess.CompletedProcess:
+        argv = cd.admit_push_argv(one, url, oid, ref)
+        return subprocess.run(argv, capture_output=True, text=True, env=dict(os.environ, **GIT_ENV))
+
+    created = push(first)
+    assert created.returncode == 0 and cd.pushed_new_ref(created.stdout, ref), created
+    moved = push(second)  # `first` is an ancestor of `second`: a plain push would fast-forward
+    assert moved.returncode != 0 and run_git(origin, "rev-parse", ref) == first
+    again = push(first)  # the same OID is "up to date": nothing moves and no new ref is reported
+    assert again.returncode == 0 and not cd.pushed_new_ref(again.stdout, ref) and run_git(origin, "rev-parse", ref) == first
+    assert not any(token.startswith("+") for token in cd.admit_push_argv(one, url, first, ref))
+
+
 def test_pushed_new_ref_needs_the_new_ref_flag_for_that_destination() -> None:
     ref = "refs/heads/ffs/cloud/r1/t1-g1"
     assert cd.pushed_new_ref("*\tabc:%s\t[new branch]\nDone\n" % ref, ref)
