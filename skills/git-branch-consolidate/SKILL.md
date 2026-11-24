@@ -1,7 +1,7 @@
 ---
 name: git-branch-consolidate
 description: "Audit every git worktree and branch for spec/plan/test completeness, then plan the consolidation down to one origin/main. Use for 'audit all worktrees', 'what's unmerged', 'consolidate branches', 'get everything to main', 'branch estate'."
-version: "1.0.1"
+version: "1.1.0"
 user-invocable: true
 ---
 
@@ -25,23 +25,59 @@ Read-only toward every branch. Never checks out, fetches, merges, or deletes —
 it emits the commands and stops. Execution of the deletion set belongs to
 `/git-branch-cleanup`, which owns the approval flow.
 
+## Host, storage, and repository identity
+
+- Discover the executing host and checkout from the current directory. A MacBook
+  Pro client connected to a Mac mini executes on the mini; report both when known.
+  Never infer a hostname, username, drive label, or checkout from remembered paths.
+- Resolve `git rev-parse --show-toplevel` and
+  `git rev-parse --path-format=absolute --git-common-dir` through `realpath`.
+  Identify a local lineage by executing host plus physical common directory and
+  its device/inode. Deduplicate compatibility aliases against that identity.
+- Enumerate paths with `git worktree list --porcelain -z` and a NUL-aware parser;
+  never split human-readable output with whitespace, grep, or awk. Preserve lock
+  and prunable markers. Missing/unmounted storage, broken aliases, unreadable
+  metadata, or an ownership mismatch are **blocked**, never empty/clean estates.
+- Linked worktrees share one lineage; independent primary and preserved rolling
+  clones remain separate estates even when their origins or branch names match.
+  Discover additional roots only from explicit caller paths, trusted local
+  migration records, or registry pointers, then validate them. Audit each lineage
+  separately and include host/common-directory identity in every proposed action.
+- The current host is the default scope. A laptop request does not authorize SSH
+  to a desktop, or the reverse. Remote execution requires an explicitly targeted
+  host; otherwise report that host as uninspected. Never start automatic SSH.
+- Migration/recovery archives, session histories, protected recovery refs, and
+  stopped/resumable session work are retained. A stopped PID, old commit date,
+  absent remote ref, detached HEAD, or compatibility alias is not deletion proof.
+
 ## Step 1 — Collect (deterministic, ~30s)
 
+Resolve `scripts/collect-estate.py` beside this loaded skill's `SKILL.md`; do
+not assume a standalone `skills/` layout inside a vendored consumer. Pass each
+explicitly discovered root separately, quote every path, and store separate JSON
+outputs keyed by executing host and physical common-directory identity.
+
 ```bash
-python3 skills/git-branch-consolidate/scripts/collect-estate.py \
-  --repo "$(git rev-parse --show-toplevel)" --base main \
-  > "${TMPDIR:-/tmp}/estate-$(date -u +%Y%m%d-%H%M).json"
+python3 "<actual skill directory>/scripts/collect-estate.py" \
+  --repo "<validated physical checkout>" --base main --no-gh
 ```
+
+Omit `--no-gh` when authenticated GitHub inspection is available. A failed or
+truncated PR lookup is not evidence that no PR exists. No collector result itself
+authorizes cleanup (`cleanup_authorized=false`, `activity_verified=false`).
 
 Per branch: `landed` · `residual_files` / `residual_code` · `src_files` /
 `test_files` / `test_gap` · `spec` artifacts + `tasks.md` counts · `.planning`
 ROADMAP+STATE · worktree dirt · PR state · `disposition`.
 
-**`landed` is the load-bearing field.** `git merge-base --is-ancestor` alone
-reports every squash-merged branch as unmerged — on a repo with a squash-merge
-convention this yields dozens of false positives. `landed` is true when ancestry
-OR a merged PR OR zero residual code says the base branch already carries the
-content. Trust `landed`, not `ahead`.
+**`landed` describes committed content, not deletion authority.** It requires
+ancestry, zero residual files including specs/docs, or a merged PR pinned to the
+current local tip and selected base. Diff/query errors fail closed; old merged
+PRs for reused branch names do not cover later commits. `ahead` alone is not
+proof either. `delete-safe` is a provisional content/payload candidate: cleanup
+still requires fresh activity/session checks, exact identity, and approval.
+Unique docs/plans, ignored payload, locked/prunable worktrees, unknown status,
+and the primary/current checkouts are retained.
 
 `--no-gh` skips the PR lookup (offline / rate-limited). Dispositions then lose
 `merge-ready` and `stale-abandoned` — say so in the report.
@@ -66,11 +102,11 @@ open tasks trail** — it is expensive and most specs are already closed.
 
 Write `.planning/ESTATE-<UTC yyyymmdd-HHMM>.md`:
 
-- **Headline** — N branches, N landed, N owing work, N testing gaps.
+- **Headline** — executing host, physical common directory, inspected lineage/roots, unavailable hosts/storage, N branches, N landed, N owing work, N testing gaps.
 - **Merge set** — ordered, with the reason each is safe to land and its gate command.
 - **Testing gaps** — branch → the specific suite missing → the command that would prove it.
 - **Cleanup set** — `delete-safe` branches + their worktrees, with the exact
-  `git worktree remove` / `git branch -d` lines. Never `-D`.
+  `git worktree remove` / `git branch -d` lines after payload/session checks. Never force-remove; include retained candidates and their blocking evidence.
 - **Blocked / operator-reserved** — each with its one-command unblock.
 - **Next 3** — from the risk assessor.
 
@@ -85,8 +121,7 @@ Order matters: **land before cleanup**, or you delete the only copy.
 2. Re-run Step 1. `landed` must have grown by exactly the merged count.
 3. Hand the refreshed `delete-safe` set to `/git-branch-cleanup` — it owns the
    deletion approval flow. Remove worktrees before their branches.
-4. Detached-HEAD build worktrees whose `head` is an ancestor of the base branch
-   are pure scratch: `git worktree remove`, no branch to delete.
+4. Detached-HEAD ancestry is content evidence only. Inspect ignored/untracked payload, process/cwd holders, locks, and resumable session ownership before proposing any removal.
 
 ## Step 4-A — Autonomous consolidation (spec-006 Phase 3, REQ-301/302/305)
 
@@ -124,7 +159,11 @@ Environment contract: `CONSOLIDATE_RUN_ID` (queue run id owning the grant),
 queue id, default the run id), `CONSOLIDATE_QUEUE_STORE` (land-queue journal
 store, default `$(lib/gates.py store-dir)/land-queue`), `CONSOLIDATE_REPO`
 (default `.`) and `CONSOLIDATE_BASE` (default `main`).  Run from the
-repository root.
+repository root. For the existing autonomous block, invoke from the resolved FFS
+tools root and set `CONSOLIDATE_REPO` to the intended physical checkout. Before `--execute`,
+confirm fresh process/session ownership and ignored-payload checks for every
+worktree; stale/missing activity evidence refuses execution even with a grant.
+Never combine manifests or grants from independent primary/rolling lineages.
 
 <!-- PHASE3_CONSOLIDATE_BEGIN -->
 ```bash
@@ -247,6 +286,11 @@ for b, h, pr, m in tuples:
         refuse("fresh-estate target missing for " + b)
     if rec.get("landed") is not True:
         refuse("fresh-estate landed!=true for " + b)
+    # landed is content evidence only; the disposition folds in dirty,
+    # ignored, locked/prunable, ownership and session-hold payload checks.
+    if rec.get("disposition") != "delete-safe":
+        refuse("fresh-estate disposition!=delete-safe for " + b
+               + " (" + str(rec.get("disposition")) + ")")
 digest = hashlib.sha256(json.dumps(
     [repo_root, base, sorted([[b, h, p, m] for b, h, p, m in tuples])],
     separators=(",", ":")).encode()).hexdigest()
@@ -438,9 +482,7 @@ grep -q "consolidate:estate" "$REPO_ROOT/lib/gates.py"
 ## Constraints
 
 - READ-ONLY until Step 4, which requires explicit per-step approval.
-- Never `git add -A`; never `-D`; never delete an unmerged branch or one checked
-  out in a worktree; never delete a worktree with uncommitted changes without
-  showing the diff first.
+- Never `git add -A`, force-remove a worktree, or invoke an ad-hoc forced branch deletion. The sole grant-gated finalizer exception remains unchanged. Retain dirty/untracked/ignored user payload and session work; displaying a diff does not authorize destroying it.
 - A dirty worktree is a finding, not an obstacle — report the file count, and
   route stalled work to `/adopt-wip` rather than discarding it.
 - Secrets: filenames only, never content.
