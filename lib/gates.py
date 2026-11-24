@@ -89,6 +89,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import unicodedata
 from pathlib import Path
 
 
@@ -2906,45 +2907,79 @@ def _store_path() -> Path:
     live at audit time — so grants/evidence recorded in one worktree are
     invisible to another, which stalls runs or lets them re-grant. One
     store also makes _StoreLock actually serialize parallel sessions.
-    Non-git cwd (or any probe failure) keeps today's relative default."""
+    Non-git cwd keeps the relative default; a probe failure inside a checkout
+    refuses, because the store cannot be proven untracked there."""
     env = os.environ.get("GATES_STORE")
     if env:
         return Path(env)
+    store = Path(".feature-fix-swarm/evidence.json")
     try:
-        probe = subprocess.run(["git", "rev-parse", "--git-common-dir"],
-                               capture_output=True, text=True, timeout=5)
-        if probe.returncode == 0:
-            common = Path(probe.stdout.strip())
-            # main checkout returns ".git" (relative) — parent is "." so the
-            # result equals the historic default; a linked worktree returns
-            # the ABSOLUTE main .git dir, which is the fix. Bare/odd layouts
-            # (name != .git) fall through to the historic default.
-            if common.name == ".git":
-                store = common.parent / ".feature-fix-swarm" / "evidence.json"
-                _refuse_tracked_store(store)
-                return store
-    except (OSError, subprocess.SubprocessError):
-        pass
-    return Path(".feature-fix-swarm/evidence.json")
+        probe = _store_git(".", "rev-parse", "--git-common-dir")
+        failure = os.fsdecode(probe.stderr).strip() if probe.returncode else ""
+    except (OSError, subprocess.SubprocessError) as exc:
+        probe, failure = None, str(exc)
+    if probe is None or probe.returncode:
+        cwd = Path.cwd()
+        if (os.environ.get("GIT_DIR") or os.environ.get("GIT_WORK_TREE")
+                or any((parent / ".git").is_file() or os.path.lexists(parent / ".git" / "HEAD")
+                       for parent in (cwd, *cwd.parents))):
+            _refuse_unproven_store(store, failure)
+        return store
+    common = Path(os.fsdecode(probe.stdout).rstrip("\n"))
+    # main checkout returns ".git" (relative) — parent is "." so the
+    # result equals the historic default; a linked worktree returns
+    # the ABSOLUTE main .git dir, which is the fix. Bare/odd layouts
+    # (name != .git) keep the historic cwd-relative default.
+    if common.name == ".git":
+        store = common.parent / store
+    _refuse_tracked_store(store)
+    return store
+
+
+def _store_git(root: str | Path, *args: str) -> subprocess.CompletedProcess[bytes]:
+    """git for the store: the checkout at `root`, not one named by the environment
+    or a bare directory the branch committed, and no program from its config."""
+    env = {key: value for key, value in os.environ.items()
+           if key not in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR")}
+    return subprocess.run(["git", "-c", "safe.bareRepository=explicit", "-c", "core.fsmonitor=false",
+                           "-C", str(root), *args], capture_output=True, timeout=30, env=env)
+
+
+def _refuse_unproven_store(store: Path, reason: object) -> None:
+    raise SystemExit(f"evidence store {store}: cannot prove it is not tracked by git ({str(reason)!r}); "
+                     "repair the checkout or set GATES_STORE")
 
 
 def _refuse_tracked_store(store: Path) -> None:
     """A committed store would let a branch plant grants or resolved findings.
-    icase: macOS checkouts are case-insensitive; matching the directory also
-    catches a committed symlink in its place. A project-scope install commits
-    its manifest and vendor/ there; nothing else may be tracked."""
-    owned = f"{store.parent.name}/"
+    A tracked top-level name counts as the store directory when it folds to the
+    same text (git's icase is ASCII-only, APFS folds Unicode) or is the same
+    directory on disk; that also catches a committed symlink in its place. A
+    project-scope install commits its manifest and vendor/ there; nothing else
+    may be tracked."""
+    root, name = store.parent.parent, store.parent.name
     try:
-        tracked = subprocess.run(["git", "-C", str(store.parent.parent), "ls-files", "-z", "--",
-                                  f":(icase){store.parent.name}"],
-                                 capture_output=True, text=True, timeout=5)
+        tracked = _store_git(root, "ls-files", "-z")
     except (OSError, subprocess.SubprocessError) as exc:
-        raise SystemExit(f"evidence store {store}: cannot prove it is not tracked by git ({exc})") from exc
-    planted = [path for path in tracked.stdout.split("\0") if path
-               and path != f"{owned}install-manifest.json" and not path.startswith(f"{owned}vendor/")]
-    if tracked.returncode != 0 or planted:
-        raise SystemExit(f"evidence store {store} is tracked by git {planted[:3]}; remove it "
-                         "from the index (git rm --cached) or set GATES_STORE")
+        return _refuse_unproven_store(store, exc)
+    if tracked.returncode != 0:
+        _refuse_unproven_store(store, os.fsdecode(tracked.stderr).strip())
+    paths = [path for path in os.fsdecode(tracked.stdout).split("\0") if path]
+    aliases = {top for top in {path.split("/", 1)[0] for path in paths} if _is_store_dir(root, top, name)}
+    planted = [path for path in paths if path.split("/", 1)[0] in aliases
+               and path != f"{name}/install-manifest.json" and not path.startswith(f"{name}/vendor/")]
+    if planted:
+        raise SystemExit(f"evidence store {store} is tracked by git {planted[:3]}; a branch may have planted "
+                         "it: inspect it, then remove it with git rm, or set GATES_STORE")
+
+
+def _is_store_dir(root: Path, top: str, name: str) -> bool:
+    if unicodedata.normalize("NFKC", top).casefold() == name:
+        return True
+    try:
+        return os.path.samestat(os.lstat(root / top), os.lstat(root / name))
+    except OSError:
+        return False
 
 
 def _resolved_store_path() -> Path:
@@ -3964,10 +3999,9 @@ def _main_checkout_root() -> Path | None:
     gate. Non-git cwd or any probe failure returns None (fail closed for the
     implicit steps — absent, never a fabricated resolution)."""
     try:
-        probe = subprocess.run(["git", "rev-parse", "--git-common-dir"],
-                               capture_output=True, text=True, timeout=5)
+        probe = _store_git(".", "rev-parse", "--git-common-dir")
         if probe.returncode == 0:
-            common = Path(probe.stdout.strip())
+            common = Path(os.fsdecode(probe.stdout).rstrip("\n"))
             if common.name == ".git":
                 return common.parent
     except (OSError, subprocess.SubprocessError):

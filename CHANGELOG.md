@@ -30,6 +30,10 @@ all skills.
 - `gates.py` refuses a default evidence store that is tracked by git, including a
   committed symlink or a case variant of `.feature-fix-swarm`. The manifest and `vendor/`
   files a project-scope install commits there are allowed.
+- The tracked-store check also covers Unicode spellings of the directory, checkouts whose
+  git dir is not named `.git` (bare-repository worktree, submodule, `--separate-git-dir`)
+  and inherited `GIT_DIR`-style variables. It stops when git cannot answer inside a
+  checkout, and its message no longer suggests `git rm --cached`, which kept the file.
 - `clean_code_metrics.py` runs `crapper` and `dryer` only from absolute paths
   outside the reviewed checkout.
 
