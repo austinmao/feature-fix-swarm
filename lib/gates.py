@@ -2931,16 +2931,20 @@ def _store_path() -> Path:
 def _refuse_tracked_store(store: Path) -> None:
     """A committed store would let a branch plant grants or resolved findings.
     icase: macOS checkouts are case-insensitive; matching the directory also
-    catches a committed symlink in its place."""
+    catches a committed symlink in its place. A project-scope install commits
+    its manifest and vendor/ there; nothing else may be tracked."""
+    owned = f"{store.parent.name}/"
     try:
-        tracked = subprocess.run(["git", "-C", str(store.parent.parent), "ls-files", "--",
+        tracked = subprocess.run(["git", "-C", str(store.parent.parent), "ls-files", "-z", "--",
                                   f":(icase){store.parent.name}"],
                                  capture_output=True, text=True, timeout=5)
     except (OSError, subprocess.SubprocessError) as exc:
         raise SystemExit(f"evidence store {store}: cannot prove it is not tracked by git ({exc})") from exc
-    if tracked.returncode != 0 or tracked.stdout.strip():
-        raise SystemExit(f"evidence store {store} is tracked by git; remove it from the index "
-                         "(git rm --cached) or set GATES_STORE")
+    planted = [path for path in tracked.stdout.split("\0") if path
+               and path != f"{owned}install-manifest.json" and not path.startswith(f"{owned}vendor/")]
+    if tracked.returncode != 0 or planted:
+        raise SystemExit(f"evidence store {store} is tracked by git {planted[:3]}; remove it "
+                         "from the index (git rm --cached) or set GATES_STORE")
 
 
 def _resolved_store_path() -> Path:

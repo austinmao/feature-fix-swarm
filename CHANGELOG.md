@@ -28,7 +28,8 @@ all skills.
   the diff skips textconv and external diff drivers. `review-tier.sh` never picks the
   light tier when a changed file is binary.
 - `gates.py` refuses a default evidence store that is tracked by git, including a
-  committed symlink or a case variant of `.feature-fix-swarm`.
+  committed symlink or a case variant of `.feature-fix-swarm`. The manifest and `vendor/`
+  files a project-scope install commits there are allowed.
 - `clean_code_metrics.py` runs `crapper` and `dryer` only from absolute paths
   outside the reviewed checkout.
 
