@@ -386,6 +386,30 @@ def _assert_planted_store_refused(tmp_path, monkeypatch, plant) -> None:
         gates._store_path()
 
 
+def test_store_path_allows_tracked_project_install_files(tmp_path, monkeypatch) -> None:
+    """A project-scope install commits its manifest and vendored skills next to
+    the store; only other tracked entries there are refused."""
+    import pytest
+    import subprocess as sp
+    repo = tmp_path / "repo"
+    ffs = repo / ".feature-fix-swarm"
+    for rel in ("install-manifest.json", "vendor/skills/demo/SKILL.md", "vendor/hooks/h.sh"):
+        (ffs / rel).parent.mkdir(parents=True, exist_ok=True)
+        (ffs / rel).write_text("{}")
+    sp.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True)
+    sp.run(["git", "add", "-f", ".feature-fix-swarm"], cwd=repo, check=True)
+    monkeypatch.delenv("GATES_STORE", raising=False)
+    monkeypatch.chdir(repo)
+    assert gates._store_path().resolve() == (ffs / "evidence.json").resolve()
+    for planted in ("evidence.json", "residuals.md"):
+        (ffs / planted).write_text("{}")
+        sp.run(["git", "add", "-f", f".feature-fix-swarm/{planted}"], cwd=repo, check=True)
+        with pytest.raises(SystemExit, match="tracked by git"):
+            gates._store_path()
+        sp.run(["git", "rm", "-q", "--cached", f".feature-fix-swarm/{planted}"], cwd=repo, check=True)
+        assert gates._store_path().resolve() == (ffs / "evidence.json").resolve()
+
+
 def test_no_progress_when_same_failure_repeats() -> None:
     assert gates.no_progress(["FAILED test_a - AssertionError",
                               "FAILED test_a - AssertionError"]) is True
