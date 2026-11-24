@@ -187,8 +187,8 @@ tracked_store_repo() {
   REPO="$BATS_TEST_TMPDIR/tracked"
   mkdir -p "$REPO/.feature-fix-swarm"
   git -C "$REPO" init -q
-  : > "$REPO/.feature-fix-swarm/vendored.txt"
-  git -C "$REPO" add .feature-fix-swarm/vendored.txt
+  printf '{}\n' > "$REPO/.feature-fix-swarm/evidence.json"  # the store file itself is committed
+  git -C "$REPO" add .feature-fix-swarm/evidence.json
   git -C "$REPO" -c user.name=t -c user.email=t@example.invalid commit -q -m tracked
 }
 
