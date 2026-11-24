@@ -382,7 +382,7 @@ EOF
   # the python3 rung (fast stub completes normally, hung CLI would be reaped).
   NO_TIMEOUT_DIR="$BATS_TEST_TMPDIR/no-timeout-no-gtimeout-path"
   mkdir -p "$NO_TIMEOUT_DIR"
-  for bin in bash dirname grep cat wc head tail tr env python3; do
+  for bin in bash dirname grep cat wc head tail tr env python3 mktemp rm; do
     b="$(command -v "$bin" 2>/dev/null)"
     [ -n "$b" ] && ln -sf "$b" "$NO_TIMEOUT_DIR/$bin"
   done

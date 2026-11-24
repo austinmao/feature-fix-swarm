@@ -9,7 +9,7 @@
 setup() {
   ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
   SKILL="$ROOT/skills/review-gate/SKILL.md"
-  FIX="$BATS_TEST_TMPDIR/repo"
+  FIX="$(cd "$BATS_TEST_TMPDIR" && pwd -P)/repo"  # canonical, so path assertions bite on macOS
   CANARY="$BATS_TEST_TMPDIR/canary"
   export HOME="$BATS_TEST_TMPDIR/home"
   mkdir -p "$HOME"
@@ -105,7 +105,7 @@ $3"
   run_fence '### Findings queue: capability probe + resolved-sig consult' '' 'echo "gates=$GATES_PY"'
   [ "$status" -eq 0 ]
   [[ "$output" == *"gates="*"/lib/gates.py"* ]]
-  [[ "$output" != *"gates=$FIX/"* ]]
+  [[ "$output" != *"gates=$FIX/"* || "$output" == *"gates=$FIX/.git/ffs-trusted/"* ]]
   [ ! -e "$CANARY" ]
 }
 
@@ -114,7 +114,7 @@ $3"
   run_fence '### Findings queue: capability probe + resolved-sig consult' '' 'echo "gates=$GATES_PY"'
   [ "$status" -eq 0 ]
   [[ "$output" == *"gates="*"/lib/gates.py"* ]]
-  [[ "$output" != *"gates=$FIX/"* ]]
+  [[ "$output" != *"gates=$FIX/"* || "$output" == *"gates=$FIX/.git/ffs-trusted/"* ]]
   [ ! -e "$CANARY" ]
 }
 
@@ -137,7 +137,7 @@ $3"
   make_fixture .
   FENCE_CWD="$FIX/src" run_fence '### Findings queue: capability probe + resolved-sig consult' '' 'echo "gates=$GATES_PY"'
   [[ "$output" == *"gates="*"/lib/gates.py"* ]]
-  [[ "$output" != *"gates=$FIX/"* ]]
+  [[ "$output" != *"gates=$FIX/"* || "$output" == *"gates=$FIX/.git/ffs-trusted/"* ]]
   [[ "$output" != *"gates=$HOME/"* ]]
   [ ! -e "$CANARY" ]
 }
@@ -172,4 +172,78 @@ $3"
   ' "$SKILL"
   [ "$status" -eq 0 ]
   [ -z "$output" ]
+}
+
+# real_install — copy MANAGED_LIB_FILES to the user-scope layout, as setup.sh does.
+real_install() {
+  python3 -I - "$ROOT" "$HOME/.claude/lib/feature-fix-swarm" <<'PY'
+import shutil, sys
+from pathlib import Path
+root, dest = Path(sys.argv[1]), Path(sys.argv[2])
+sys.path.insert(0, str(root / "lib"))
+import ffs_installer
+for src, rel in ffs_installer.MANAGED_LIB_FILES:
+    (dest / rel).parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(root / src, dest / rel)
+PY
+}
+
+@test "user-scope install ships working review helpers" {
+  NO_RUNTIME=1 make_fixture .
+  real_install
+  FFS_HOST=claude run_fence '### Pre-check — choose the opposite CLI' '' \
+    'echo "kind=$REVIEW_KIND"; adversary_gates; adversary_model_request_helper; "$FFS_T/scripts/gsd/review-tier.sh" --staged'
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"kind=codex"* ]]
+  [[ "$output" == *"$HOME/.claude/lib/feature-fix-swarm/scripts/gsd/../../gates.py"* ]]
+  [[ "$output" == *"/model_requests.py"* ]]
+  [[ "$output" == *"light "* ]]
+}
+
+@test "fences reuse one base-ref snapshot kept outside the work tree" {
+  make_fixture .
+  heading='### Findings queue: capability probe + resolved-sig consult'
+  run_fence "$heading" '' 'echo "rt=$FFS_T"'
+  first="$(printf '%s\n' "$output" | sed -n 's/^rt=//p')"
+  run_fence "$heading" '' 'echo "rt=$FFS_T"'
+  second="$(printf '%s\n' "$output" | sed -n 's/^rt=//p')"
+  [ -n "$first" ] && [ "$first" = "$second" ]
+  [[ "$first" == "$(cd "$FIX" && pwd -P)/.git/ffs-trusted/"* ]]
+  [ ! -e "$CANARY" ]
+}
+
+@test "capture diff shows files a branch .gitattributes marks -diff" {
+  make_fixture .
+  printf '*.py -diff\n' > "$FIX/.gitattributes"
+  git -C "$FIX" add .gitattributes
+  run_fence '### Capture diff' '' 'printf "%s\n" "$DIFF"'
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"+x = 2"* ]]
+}
+
+@test "gate-path python never runs with the reviewed repo on sys.path" {
+  # python3 -c and python3 - put the cwd first on sys.path; -I drops it.
+  run grep -nE 'python3 +(-c|-)( |$)' "$SKILL" \
+    "$ROOT/scripts/gsd/adversary-host.sh" "$ROOT/scripts/gsd/run-bounded.sh" \
+    "$ROOT/scripts/gsd/socratic-slice.sh" "$ROOT/scripts/gsd/review-gate-command.sh"
+  [ -z "$output" ]
+}
+
+@test "capture diff names a real binary in one line, not its bytes" {
+  make_fixture .
+  head -c 300000 /dev/urandom > "$FIX/a.png"
+  git -C "$FIX" add a.png
+  run_fence '### Capture diff' '' 'printf "%s" "$DIFF" | wc -c'
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s\n' "$output" | tail -1)" -lt 10000 ]
+}
+
+@test "an unwritable git dir falls back to a temporary snapshot" {
+  make_fixture .
+  chmod a-w "$FIX/.git"
+  run_fence '### Findings queue: capability probe + resolved-sig consult' '' 'echo "gates=$GATES_PY"'
+  chmod u+w "$FIX/.git"
+  [[ "$output" == *"gates="*"/lib/gates.py"* ]]
+  [[ "$output" != *"gates=$HOME/"* ]]
+  [ ! -e "$CANARY" ]
 }

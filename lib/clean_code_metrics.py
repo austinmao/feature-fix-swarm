@@ -37,9 +37,13 @@ def production_files(files: dict[str, list[tuple[int, int]]], cap: int = MAX_FIL
 
 def find_tool(name: str) -> str | None:
     home = Path(os.environ.get("FFS_UB_TOOLS_DIR") or Path.home() / ".local/share/ub-mode")
+    repo = Path.cwd().resolve()  # the gate runs this from the reviewed checkout's root
     for cand in (shutil.which(name), str(home / name / name)):
-        if cand and Path(cand).is_file() and os.access(cand, os.X_OK):
-            return cand
+        if not cand or not Path(cand).is_absolute():
+            continue
+        real = Path(cand).resolve()
+        if real.is_file() and os.access(real, os.X_OK) and not real.is_relative_to(repo):
+            return str(real)
     return None
 
 

@@ -661,9 +661,10 @@ reviews. The same rule applies to the other scripts the dispatcher runs
 (`lifecycle.sh`, `reconcile.sh`, `reconcile-agent.sh`, `host-pressure.sh`).
 `cloud-review.sh` sources
 `adversary-host.sh` and `fence-data.sh` from its own directory.
-`adversary-host.sh` sources `run-bounded.sh` and loads `lib/gates.py` and
-`lib/model_requests.py` from two directories above the script. The installer
-ships all of these files to the managed lib. `doctor` fails with
+`adversary-host.sh` sources `run-bounded.sh` and loads `gates.py` and
+`model_requests.py` from two directories above the script: `lib/` in a
+consumer checkout, flat (`gates.py`, `model_requests.py`) in the managed lib.
+The installer ships all of these files to the managed lib, one copy each. `doctor` fails with
 `REVIEW_UNAVAILABLE` when `cloud-review.sh` or `adversary-host.sh` cannot be
 found. It does not check the other files, so a partial install shows up as
 `review-unavailable` on a result.
@@ -1117,10 +1118,13 @@ there.
 
 It also ships the closure that `cloud-review.sh` needs to the managed lib
 (`~/.claude/lib/feature-fix-swarm`): `scripts/gsd/adversary-host.sh`,
-`scripts/gsd/run-bounded.sh`, `scripts/gsd/fence-data.sh`, `lib/gates.py` and
-`lib/model_requests.py`. The managed lib keeps `gates.py` and
-`model_requests.py` flat for other tools, so they are shipped a second time
-under `lib/`.
+`scripts/gsd/run-bounded.sh`, `scripts/gsd/fence-data.sh`, and the flat
+`gates.py` and `model_requests.py` (the last place `adversary-host.sh` looks).
+There is one copy of each module: the managed lib has no `lib/` subdirectory.
+A managed lib left by an earlier build that did ship `lib/gates.py` keeps
+that file, because the installer does not delete files it no longer lists;
+`adversary-host.sh` looks in `lib/` first, so remove the stale
+`<managed lib>/lib/` directory by hand after upgrading.
 
 ## Cloud environment setup
 

@@ -137,15 +137,15 @@ touch_files() {
   [[ "$output" == full\ * ]]
 }
 
-@test "binary file in diff: counts toward file-count, 0 lines" {
+@test "binary file in diff: line count unknown, never light" {
   printf 'abc\000def' > bin.dat
   git add bin.dat
   git commit -q -m "add binary"
   printf 'xyz\000123456' > bin.dat
   run bash "$SCRIPT"
   [ "$status" -eq 0 ]
-  # 1 binary file changed, 0 lines contributed -> light
-  [[ "$output" == light\ * ]]
+  # numstat cannot count binary lines, so the tier is at least standard
+  [[ "$output" == standard\ * ]]
 }
 
 @test "REVIEW_TIER=light override -> light, reason contains override" {
@@ -272,4 +272,13 @@ EOF
   # shellcheck disable=SC1091
   . "$ROOT/scripts/gsd/security-surface.sh"
   [ "$KEYWORDS" = 'auth|rls|row[ _-]?level|payment|stripe|crypto|jwt|jwks|oauth|owasp|secret|credential|password' ]
+}
+
+@test "a .gitattributes binary mark cannot hide changed lines from the tier" {
+  printf '*.txt binary\n' > .gitattributes
+  git add .gitattributes && git commit -q -m attrs
+  modify_tracked f01.txt 300
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [[ "$output" != light* ]]
 }

@@ -2684,13 +2684,24 @@ def test_managed_lib_files_list_the_cloud_runtime() -> None:
 
 def test_cloud_review_closure_is_shipped_in_the_user_scope_layout() -> None:
     """I1: cloud-review.sh sources adversary-host.sh + fence-data.sh from its own dir, and
-    adversary-host.sh resolves <script dir>/../../lib/{gates,model_requests}.py."""
-    dests = {dest for _src, dest in ffs_installer.MANAGED_LIB_FILES}
+    adversary-host.sh finds gates.py / model_requests.py flat at the managed root (its last candidate)."""
+    mapping = dict(ffs_installer.MANAGED_LIB_FILES)
+    dests = set(mapping.values())
     for relative in ffs_installer.CLOUD_REVIEW_CLOSURE:
         assert relative in dests, relative
     for relative in ffs_installer.CLOUD_REVIEW_CLOSURE:
         source = next(src for src, dest in ffs_installer.MANAGED_LIB_FILES if dest == relative)
         assert (ROOT / source).is_file(), source
+    for module in ffs_installer.CLOUD_REVIEW_MODULES:
+        assert mapping[f"lib/{module}"] == module
+        assert f"lib/{module}" not in dests, "one copy only: no second lib/ copy of " + module
+
+
+def test_managed_lib_files_has_no_duplicate_entries() -> None:
+    files = ffs_installer.MANAGED_LIB_FILES
+    assert len(files) == len(set(files))
+    dests = [dest for _src, dest in files]
+    assert len(dests) == len(set(dests))
 
 
 def test_cloud_review_available_reports_missing_closure_members(tmp_path: Path) -> None:
@@ -2699,9 +2710,30 @@ def test_cloud_review_available_reports_missing_closure_members(tmp_path: Path) 
         target = tmp_path / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text("x")
-    assert ffs_installer.cloud_review_available(tmp_path) is True
-    (tmp_path / "lib/gates.py").unlink()
+    # scripts alone are not enough: the two modules are still missing
+    assert ffs_installer.cloud_review_available(tmp_path) is False
+    for module in ffs_installer.CLOUD_REVIEW_MODULES:
+        (tmp_path / module).write_text("x")
+    assert ffs_installer.cloud_review_available(tmp_path) is True  # managed flat layout
+    assert ffs_installer.cloud_review_available(str(tmp_path)) is True
+    (tmp_path / "gates.py").unlink()
     assert ffs_installer.cloud_review_available(str(tmp_path)) is False
+    (tmp_path / "scripts/gsd/fence-data.sh").unlink()
+    (tmp_path / "gates.py").write_text("x")
+    assert ffs_installer.cloud_review_available(tmp_path) is False
+
+
+def test_cloud_review_available_accepts_the_consumer_layout(tmp_path: Path) -> None:
+    for relative in ffs_installer.CLOUD_REVIEW_CLOSURE:
+        target = tmp_path / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("x")
+    (tmp_path / "lib").mkdir()
+    for module in ffs_installer.CLOUD_REVIEW_MODULES:
+        (tmp_path / "lib" / module).write_text("x")
+    assert ffs_installer.cloud_review_available(tmp_path) is True
+    (tmp_path / "lib/model_requests.py").unlink()
+    assert ffs_installer.cloud_review_available(tmp_path) is False
 
 
 def test_installed_cloud_review_finds_its_closure_from_the_staged_script(tmp_path: Path) -> None:
@@ -2709,9 +2741,10 @@ def test_installed_cloud_review_finds_its_closure_from_the_staged_script(tmp_pat
     root = tmp_path / "home/.claude/lib/feature-fix-swarm"
     assert ffs_installer.cloud_review_available(root)
     script_dir = root / "scripts/gsd"
-    # the same relative lookups adversary-host.sh performs
-    assert (script_dir / "../../lib/gates.py").resolve().is_file()
-    assert (script_dir / "../../lib/model_requests.py").resolve().is_file()
+    # adversary-host.sh's last lookup candidate in the managed layout; no second lib/ copy
+    assert (script_dir / "../../gates.py").resolve().is_file()
+    assert (script_dir / "../../model_requests.py").resolve().is_file()
+    assert not (root / "lib").exists()
     assert (script_dir / "run-bounded.sh").is_file() and (script_dir / "fence-data.sh").is_file()
 
 

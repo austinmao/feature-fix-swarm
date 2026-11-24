@@ -8,6 +8,30 @@ all skills.
 
 ## Unreleased
 
+### Changed (2026-11-21, review-gate keeps the reviewed branch out of its own runtime)
+
+- review-gate 1.20.0 reuses one base-ref runtime snapshot per commit, kept under
+  `<git-common-dir>/ffs-trusted/`, instead of extracting a new temporary copy in
+  every block. Snapshots unused for 7 days are removed; a read-only git dir falls
+  back to a temporary copy (#293).
+- The user-scope install now ships `adversary-host.sh`, `run-bounded.sh`,
+  `review-tier.sh` and `security-surface.sh`, and `adversary-host.sh` finds
+  `gates.py` and `model_requests.py` in that layout, so the fallback runtime works
+  when the base ref has no FFS runtime (#292). Existing unmanaged copies are
+  reported as collisions; rerun `setup.sh` with `--adopt-collisions` to replace them.
+- The Claude reviewer runs from an empty directory with `--setting-sources user`,
+  so the reviewed repository's `.claude/settings.json` and `CLAUDE.md` do not load.
+- Inline Python in the gate path runs with `python3 -I`, so modules in the
+  reviewed repository root are never imported.
+- The review diff and `review-tier.sh` ignore the reviewed branch's
+  `.gitattributes` (`GIT_ATTR_SOURCE` set to the empty tree, git 2.40 or later), and
+  the diff skips textconv and external diff drivers. `review-tier.sh` never picks the
+  light tier when a changed file is binary.
+- `gates.py` refuses a default evidence store that is tracked by git, including a
+  committed symlink or a case variant of `.feature-fix-swarm`.
+- `clean_code_metrics.py` runs `crapper` and `dryer` only from absolute paths
+  outside the reviewed checkout.
+
 ### Fixed (2026-11-21, cloud delegation: round 7)
 
 - `start` now always prints `CLOUD:local tasks=<ids>`, with an empty value when
