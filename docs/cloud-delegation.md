@@ -315,7 +315,7 @@ left in the title.
 | `[owns: a/**, b.py]` | Repo-relative globs the task may change, comma separated. Required for the cloud. `**` spans directories, `*` does not. A glob also covers everything below it. |
 | `[est: 45m]` | Estimate. Accepts `45m`, `2h`, `1h30m` or bare minutes (`90`). Drives the threshold. Missing means 0. |
 | `[verify: cmd]` | Test command run in the sandbox. May contain balanced brackets. Falls back to `config.verify.cmd`. |
-| `[needs-secret: NAME ...]` | Secret names the task uses, separated by commas or spaces. Use `UPPER_SNAKE` names. |
+| `[needs-secret: NAME ...]` | Secret names the task uses, separated by commas or spaces. Use `UPPER_SNAKE` names. An entry that is not a valid name is refused as `TASK_INVALID` with the task id and the entry position; the entry itself is never printed, because a pasted value can sit where a name belongs. |
 | `[local]` or `[local: reason]` | Never offload this task. |
 | `[after: t1 t2]` | Task ids this task depends on. |
 | `[id: x]` | Explicit task id, `^[a-z0-9][a-z0-9-]{0,23}$`. Default is `t1` to `tN` in input order. |

@@ -507,10 +507,13 @@ def _resolve_tier(fields: Mapping[str, Any]) -> Tuple[str, Dict[str, Any]]:
     return str(tier), dict(request)
 
 
-def _check_secret_names(names: List[str]) -> None:
-    for name in names:
+def _check_secret_names(task_id: str, names: List[str]) -> None:
+    """A ``needs-secret`` entry is free text, and a pasted value can sit where a name belongs: the error says where
+    (task id, entry position) and never what."""
+    for position, name in enumerate(names, 1):
         if not SECRET_NAME_RE.match(name):
-            raise RouteError(TASK_INVALID, "invalid secret name %r" % name)
+            raise RouteError(TASK_INVALID, "task %s needs-secret entry %d is not a valid secret name (value withheld)"
+                             % (task_id, position))
 
 
 def _owns_fields(fields: Mapping[str, Any]) -> Tuple[List[str], str]:
@@ -547,7 +550,7 @@ def _normalize_one(raw: object, position: int) -> Dict[str, Any]:
     tier, request = _resolve_tier(fields)
     owns, owns_source = _owns_fields(fields)
     needs = _string_list(fields.get("needs_secrets"), "needs_secrets")
-    _check_secret_names(needs)
+    _check_secret_names(task_id, needs)
     kind = fields.get("kind") or "build"
     if kind not in TASK_KINDS:
         raise RouteError(TASK_INVALID, "kind must be one of %s" % ", ".join(TASK_KINDS))

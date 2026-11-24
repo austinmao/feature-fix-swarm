@@ -2243,6 +2243,28 @@ def test_a_benign_duplicate_id_is_still_a_duplicate_refusal(world: World, capsys
     assert rc == 3 and "CLOUD-REFUSED: TASK_ID_DUPLICATE" in out, out
 
 
+PASSPHRASE = "Zq7! synthetic pass phrase"  # not a name and not scanner-shaped: it must still never be echoed
+
+
+def test_a_pasted_needs_secret_value_is_never_echoed_by_plan_or_start(world: World, capsys: pytest.CaptureFixture) -> None:
+    tasks = [task("t1", "src/a/**", needs_secrets=[PASSPHRASE])]
+    rc, out = plan_out(world, tasks, capsys)
+    assert rc != 0 and "TASK_INVALID" in out and "t1" in out and "entry 1" in out, out
+    assert PASSPHRASE not in out and "pass phrase" not in out, out
+    capsys.readouterr()
+    rc, out = world.cli("start", "--run", "r1", "--tasks", world.tasks_file(tasks), "--policy", "auto", "--root", str(world.root))
+    out += capsys.readouterr().err
+    assert rc != 0 and "TASK_INVALID" in out, out
+    assert PASSPHRASE not in out and "pass phrase" not in out, out
+    assert not L.run_ledger_path(world.root, "r1").exists()
+
+
+def test_the_doctor_line_for_an_undeclared_needs_secret_never_echoes_it(world: World) -> None:
+    checks = cd.doctor_checks(world.svc, world.root, tasks=[task("t1", "src/a/**", needs_secrets=["NOT_DECLARED_NAME"])])
+    text = " ".join(c.detail for c in checks)
+    assert "NOT_DECLARED_NAME" not in text
+
+
 def test_route_errors_for_clean_ids_are_unchanged(world: World, capsys: pytest.CaptureFixture) -> None:
     rc, out = plan_out(world, [task("t1", "src/a/**"), task("t1", "src/b/**")], capsys)
     assert rc != 0 and "duplicate task id 't1'" in out and "secret scanner" not in out, out

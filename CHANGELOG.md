@@ -26,6 +26,12 @@ all skills.
   duplicate id is still `TASK_ID_DUPLICATE`. `/swarm` skill 2.2.9: a refusal from
   `plan` falls back to local only when `status --run <run>` reports
   `LEDGER_MISSING`; otherwise the run may already be active and nothing runs.
+- A `needs-secret` entry that is not a valid name is refused as `TASK_INVALID` without
+  echoing it: the message gives the task id and the entry position only. It used to
+  quote the whole entry, and a pasted value that the scanner has no pattern for
+  reached stderr through `plan` and `start`. The other validation messages
+  (`est`, tier, task id) quote only short constrained fields; a flagged task id is
+  refused before any message is built.
 
 ### Changed (2026-11-21, review-gate keeps the reviewed branch out of its own runtime)
 

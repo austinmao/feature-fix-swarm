@@ -182,6 +182,26 @@ def test_normalize_rejects_invalid(raw):
         dr.normalize_tasks([raw], sequential=False)
     assert info.value.code == dr.TASK_INVALID
 
+PASSPHRASE = "Zq7! synthetic pass phrase"  # not a name, not scanner-shaped: it must still never be echoed
+
+
+@pytest.mark.parametrize("line", [
+    {"prompt": "p", "needs_secrets": [PASSPHRASE]},
+    "do it [needs-secret: %s]" % PASSPHRASE,
+])
+def test_an_invalid_needs_secret_entry_is_never_echoed(line):
+    with pytest.raises(RouteError) as info:
+        dr.normalize_tasks([{"id": "build-1", "prompt": "p"}, line], sequential=False)
+    assert info.value.code == dr.TASK_INVALID
+    assert PASSPHRASE not in str(info.value) and "pass phrase" not in str(info.value)
+    assert "t2" in str(info.value) and "entry 1" in str(info.value)
+
+
+def test_an_invalid_needs_secret_entry_names_the_task_id_when_it_has_one():
+    with pytest.raises(RouteError) as info:
+        dr.normalize_tasks([{"id": "build-1", "prompt": "p", "needs_secrets": ["OK_NAME", PASSPHRASE]}], sequential=False)
+    assert "build-1" in str(info.value) and "entry 2" in str(info.value) and PASSPHRASE not in str(info.value)
+
 
 # ── denylist and overlap ─────────────────────────────────────────────────────
 
