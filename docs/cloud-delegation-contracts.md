@@ -54,7 +54,7 @@ Tasks-file annotations: `[owns: a/**, b.py] [est: 45m] [needs-secret: NAME] [loc
 
 Router rules, in order:
 1. Per-task eligibility. Not eligible when: `local_only`; `kind` is review or verify; `model_request.kind == "exact"`; tier frontier; `owns_source == "missing"`; `owns` intersects the denylist (§7); no non-blank `verify_cmd` from the task or `config.verify.cmd` (both are stripped; whitespace-only is blank); a needed secret name is not declared for any provider, or lacks a `secret-use:<NAME>` grant (autonomous) or operator yes (interactive).
-2. Run-level refusals (everything stays local; `required` fails): dirty base; missing `cloud-dispatch:<provider>` or push grant; `doctor` not green; `FFS_MANAGED_INGRESS=1`; a run token budget is set; lifecycle disabled.
+2. Run-level refusals (everything stays local, but `/swarm` first runs `status --run R` and falls back only when it ends `CLOUD-ERROR: LEDGER_MISSING`, because a run with that id may already be active; `required` fails): dirty base; missing `cloud-dispatch:<provider>` or push grant; `doctor` not green; `FFS_MANAGED_INGRESS=1`; a run token budget is set; lifecycle disabled.
 3. Groups are connected components of the `depends_on` graph. A group is `cloud` only if every task is eligible **and** at least one task has `est_minutes ≥ threshold` (20; `prefer` 5; host pressure `high` 5). Otherwise the whole group is `local`.
 4. Within a cloud group, two tasks whose `owns` overlap get an implicit dependency edge in file order (they serialize).
 5. Provider: tasks with `needs_secrets` → the first provider (claude, then codex) declaring all names; judgment tier → claude; otherwise the provider with more free slots, alternating on ties. Codex only takes execution and volume tiers.
