@@ -1110,7 +1110,17 @@ def route(svc: Services, root: Path, tasks: List[Dict[str, Any]], *, policy: str
         raise route_error(exc)
 
 
+def _scan_raw_task_ids(raw: Sequence[Any]) -> None:
+    """Refuse a scanner-positive id as written, before normalization: its own errors (a duplicate or invalid id) quote
+    the id and would otherwise end as an ordinary refusal that /swarm answers by running every task locally."""
+    for value in delegation_router.raw_task_ids(raw):
+        found = scan_text(value, "task-id")
+        if found:  # name the class, never the id
+            raise Refused("SECRET_IN_PROMPT", "a task id matched the secret scanner: %s" % ", ".join(found))
+
+
 def normalize(raw: List[Any], sequential: bool) -> List[Dict[str, Any]]:
+    _scan_raw_task_ids(raw)
     try:
         return delegation_router.normalize_tasks(raw, sequential=sequential)
     except delegation_router.RouteError as exc:

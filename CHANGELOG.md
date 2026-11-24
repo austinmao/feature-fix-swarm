@@ -19,6 +19,13 @@ all skills.
   is relative to `--root`. `cloud-review.sh` pins the store it resolved before it
   enters its scratch directory. Grant from the `--root` repository; `/swarm`
   skill 2.2.8 says so.
+- A scanner-positive task id is `SECRET_IN_PROMPT` however it is reached. `plan` and
+  `start` scan the ids as written before normalization, so a flagged id that is also
+  a duplicate or an invalid id no longer ends as `TASK_ID_DUPLICATE` or
+  `TASK_ID_INVALID` (which `/swarm` answers by running every task locally). A benign
+  duplicate id is still `TASK_ID_DUPLICATE`. `/swarm` skill 2.2.9: a refusal from
+  `plan` falls back to local only when `status --run <run>` reports
+  `LEDGER_MISSING`; otherwise the run may already be active and nothing runs.
 
 ### Changed (2026-11-21, review-gate keeps the reviewed branch out of its own runtime)
 

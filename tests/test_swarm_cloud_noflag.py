@@ -252,6 +252,18 @@ def test_swarm_secret_in_prompt_from_plan_is_terminal_and_never_falls_back_to_lo
     assert refusals.index("continue with every task locally") < refusals.index("SECRET_IN_PROMPT")
 
 
+def test_swarm_plan_refusal_runs_locally_only_when_the_ledger_is_proven_missing():
+    """A refused plan of a retry must not send tasks to the local path while a run with the same id may be active."""
+    block = _cloud_block()
+    refusals = block[block.index("6. **Refusals.**"):block.index("7. **Hard limits.**")]
+    rule = " ".join(refusals[:refusals.index("**Exception: `CLOUD-REFUSED: SECRET_IN_PROMPT`**")].split())
+    assert "falls back to local only when the run does not exist" in rule
+    assert "status --run <run>" in rule and "CLOUD-ERROR: LEDGER_MISSING" in rule
+    assert "Any other result" in rule and "run nothing, cloud or local" in rule
+    # the status verb really answers a missing run with exactly that line
+    assert "LEDGER_MISSING" in (ROOT / "lib" / "cloud_ledger.py").read_text(encoding="utf-8")
+
+
 def test_swarm_exit_78_from_start_is_relayed_and_stops_everything():
     """INTEGRATION_REF_UNCONFIRMED exits 78 with CLOUD-ERROR on stderr: neither success nor an exit-3 refusal."""
     block = _cloud_block()

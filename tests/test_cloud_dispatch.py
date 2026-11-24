@@ -2204,10 +2204,11 @@ def plan_out(world: World, tasks: List[Dict[str, Any]], capsys: pytest.CaptureFi
 
 
 @pytest.mark.parametrize("tasks, code", [
-    ([task(LEAKY_ID, "src/a/**"), task(LEAKY_ID, "src/b/**")], "TASK_ID_DUPLICATE"),
+    ([task(LEAKY_ID, "src/a/**"), task(LEAKY_ID, "src/b/**")], "SECRET_IN_PROMPT"),  # not TASK_ID_DUPLICATE: see below
+    (["do a [id: %s]" % LEAKY_ID, "do b [id: %s]" % LEAKY_ID], "SECRET_IN_PROMPT"),
     ([task("t1", "src/a/**", depends_on=[LEAKY_ID])], "DEP_UNKNOWN"),
     ([task(LEAKY_ID, "src/a/**", depends_on=["nope"])], "SECRET_IN_PROMPT"),  # the id scan refuses before the router reads depends_on
-    ([task(CANARY_KEY, "src/a/**")], "TASK_ID_INVALID"),
+    ([task(CANARY_KEY, "src/a/**")], "SECRET_IN_PROMPT"),  # an invalid id the scanner flags is refused as one, not TASK_ID_INVALID
 ])
 def test_route_errors_never_echo_an_id_the_secret_scanner_flags(
         world: World, capsys: pytest.CaptureFixture, tasks: List[Dict[str, Any]], code: str) -> None:
@@ -2220,6 +2221,26 @@ def test_route_errors_never_echo_an_id_the_secret_scanner_flags(
     assert rc != 0 and "secret scanner" in out, out  # start's own id scan may refuse first (SECRET_IN_PROMPT)
     assert LEAKY_ID not in out and CANARY_KEY not in out, out
     assert not L.run_ledger_path(world.root, "r1").exists()
+
+
+def test_a_scanner_positive_duplicate_id_is_a_terminal_refusal_from_plan_and_start(
+        world: World, capsys: pytest.CaptureFixture) -> None:
+    """A retry that keeps a running task and adds two entries with one flagged id must end in SECRET_IN_PROMPT (which
+    /swarm treats as terminal), never in a duplicate-id refusal that sends every task to the local path."""
+    assert world.start(tasks=[T1])[0] == 0
+    tasks = [T1, task(LEAKY_ID, "src/a/**"), task(LEAKY_ID, "src/b/**")]
+    rc, out = plan_out(world, tasks, capsys)
+    assert rc == 3 and "CLOUD-REFUSED: SECRET_IN_PROMPT" in out and "TASK_ID_DUPLICATE" not in out, out
+    for run in ("r1", "r2"):  # an existing run says RUN_EXISTS (also never local); a new one is the secret refusal
+        rc, out = world.cli("start", "--run", run, "--tasks", world.tasks_file(tasks), "--policy", "auto", "--root", str(world.root))
+        expected = "RUN_EXISTS" if run == "r1" else "SECRET_IN_PROMPT"
+        assert rc == 3 and "CLOUD-REFUSED: " + expected in out and "TASK_ID_DUPLICATE" not in out, out
+        assert LEAKY_ID not in out
+
+
+def test_a_benign_duplicate_id_is_still_a_duplicate_refusal(world: World, capsys: pytest.CaptureFixture) -> None:
+    rc, out = plan_out(world, [task("t1", "src/a/**"), task("t1", "src/b/**")], capsys)
+    assert rc == 3 and "CLOUD-REFUSED: TASK_ID_DUPLICATE" in out, out
 
 
 def test_route_errors_for_clean_ids_are_unchanged(world: World, capsys: pytest.CaptureFixture) -> None:

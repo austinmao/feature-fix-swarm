@@ -570,6 +570,23 @@ def _normalize_one(raw: object, position: int) -> Dict[str, Any]:
     }
 
 
+def raw_task_ids(raw: Sequence[Any]) -> List[str]:
+    """The ids as the caller wrote them (``id`` field or ``[id: x]`` annotation), before any validation.
+
+    Normalization errors (``TASK_ID_INVALID``, ``TASK_ID_DUPLICATE``) quote an id, so a caller that must keep a
+    flagged id out of every error scans these first.  An item that cannot be read contributes nothing: normalization
+    reports it on its own."""
+    ids: List[str] = []
+    for item in raw:
+        try:
+            value = _raw_fields(item).get("id")
+        except RouteError:
+            continue
+        if isinstance(value, str) and value:
+            ids.append(value)
+    return ids
+
+
 def normalize_tasks(raw: Sequence[Any], *, sequential: bool) -> List[Dict[str, Any]]:
     """Produce §2.1 task objects from task lines or partial dicts, in input order.
 

@@ -1,7 +1,7 @@
 ---
 name: swarm
 description: "Ad-hoc parallel task executor. Pass natural language tasks directly (or --tasks-file); independent tasks use concurrent host-native volume/execution/judgment roles and dependent tasks run serially. No spec directory required; use feature-implement for full-feature work."
-version: "2.2.8"
+version: "2.2.9"
 permissions:
   filesystem: write
   network: true
@@ -94,7 +94,13 @@ Otherwise skip it entirely and continue below exactly as before.
    Step 6 does not apply: exit 78 is an error, not a refusal.
 6. **Refusals.** Exit code 3 means refused. Relay the `CLOUD-REFUSED:` line.
    Under `auto` or `prefer`, continue with every task locally; under
-   `required`, stop. **Exception: `CLOUD-REFUSED: SECRET_IN_PROMPT`** (from
+   `required`, stop. **A refusal from `plan` falls back to local only when the
+   run does not exist:** first run `bash scripts/gsd/cloud-dispatch.sh status --run <run>`;
+   only its stderr line `CLOUD-ERROR: LEDGER_MISSING` proves there is no run.
+   Any other result (a status document, or any other error) means a run with
+   this id may already be running tasks in the cloud: run nothing, cloud or
+   local, relay the refusal and the status, and ask the operator.
+   **Exception: `CLOUD-REFUSED: SECRET_IN_PROMPT`** (from
    `plan` or `start`) is terminal as in step 2: dispatch nothing, cloud or local.
    **Exception: `CLOUD-REFUSED: RUN_EXISTS`** is not a
    refusal to offload. The run was already started (a retry after a lost
