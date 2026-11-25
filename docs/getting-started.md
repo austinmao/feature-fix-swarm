@@ -139,7 +139,9 @@ real findings.** Usually the reviewer was unparseable or returned no
 line-anchored verdict, or both reviewers were unavailable. `/review-gate` also
 fails when `gates.py` refuses the evidence store or git cannot compute the diff;
 its output names which. At the ship seam a refused store shows up as `BLOCKED: no
-ship grant`, so run `python3 lib/gates.py store-path` to see the real reason. This fails closed on
+ship grant`, so run
+`python3 ~/.claude/lib/feature-fix-swarm/gates.py store-path` (in an FFS checkout or a
+reconciled consumer, `python3 lib/gates.py store-path`) to see the real reason. This fails closed on
 purpose — no mandatory review fails open. Re-run it; if it persists, check
 that the opposite-host CLI is logged in.
 
