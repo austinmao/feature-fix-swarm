@@ -16,11 +16,26 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DIFF="$(cat)"
 
 # Phases root honors GSD_PROJECT planning isolation, same rule as plan-wall.sh
-# --run: .planning/<project>/phases when it exists, else .planning/phases. A
-# repo running several projects must not splice another project's residuals.
+# --run: .planning/<project>/phases. A set GSD_PROJECT is fail-closed (as in
+# gsd-run.sh): a missing project dir or invalid value REVISEs before anything is
+# dispatched or any finding is touched, never falling back to .planning/phases
+# (a repo running several projects must not splice another project's residuals).
+# The value is never echoed (a non-ASCII byte that a locale-aware regex accepts
+# would make the JSON invalid UTF-8), so no note can carry it.
 PHASES_ROOT=".planning/phases"
-if [ -n "${GSD_PROJECT:-}" ] && [ -d ".planning/${GSD_PROJECT}/phases" ]; then
-  PHASES_ROOT=".planning/${GSD_PROJECT}/phases"
+_GP="${GSD_PROJECT:-}"
+_GP="${_GP#"${_GP%%[![:space:]]*}"}"
+_GP="${_GP%"${_GP##*[![:space:]]}"}"
+if [ -n "$_GP" ]; then
+  if ! [[ "$_GP" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || [[ "$_GP" == *..* ]]; then
+    echo '{"verdict":"REVISE","note":"BLOCKED: GSD_PROJECT must be one path segment ([A-Za-z0-9._-], no '"'..'"')"}'
+    exit 1
+  fi
+  PHASES_ROOT=".planning/${_GP}/phases"
+  if [ ! -d "$PHASES_ROOT" ]; then
+    echo '{"verdict":"REVISE","note":"BLOCKED: GSD_PROJECT is set but its .planning/<project>/phases directory is missing — refusing to fall back to .planning/phases"}'
+    exit 1
+  fi
 fi
 
 # Autonomy-grant check: ship is an operator-gated action. A missing grant REVISEs;

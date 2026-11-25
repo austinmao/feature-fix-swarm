@@ -142,7 +142,7 @@ references to either.
 |---|---|---|---|
 | `REVIEW_TIER` | auto-detect | `scripts/gsd/review-tier.sh:79` | Hard override of diff-risk tier (`light\|standard\|full`) |
 | `REVIEW_TIER_BASE` | `main` | `scripts/gsd/review-tier.sh:124` | Merge-base for `--all` diffs |
-| `GSD_REVIEW_TIMEOUT` | `600` | `scripts/gsd/review-gate-command.sh:184` | Budget for ship-time review, both hosts combined. gsd-core 1.15 stops the seam after 120 s whatever this is |
+| `GSD_REVIEW_TIMEOUT` | `600` | `scripts/gsd/review-gate-command.sh:199` | Budget for ship-time review, both hosts combined. gsd-core 1.15 stops the seam after 120 s whatever this is |
 | `GSD_REVIEW_MODEL_REQUEST` | `{"kind":"tier","name":"judgment"}` | `scripts/gsd/review-gate-command.sh` | Typed ship-review request; exact requests disable all fallback |
 | `PLAN_ADVERSARY` | on | `scripts/gsd/plan-adversary.sh:48` | `off` skips the cross-model plan review |
 | `PLAN_ADVERSARY_KEYWORDS` | `auth\|rls\|payment\|stripe\|crypto\|jwt\|...` | `scripts/gsd/plan-adversary.sh:58` | High-blast trigger set; a plan matching none skips the costly review |
@@ -233,7 +233,7 @@ content in an error — see the table row above.
 
 | Var | Default | Consumer | Effect |
 |---|---|---|---|
-| `GSD_RUN_ID` | derived from branch `spec-NNN` | `scripts/gsd/review-gate-command.sh:33` | Ledger key for the `ship:gsd` grant check. Underivable means fail-closed REVISE |
+| `GSD_RUN_ID` | derived from branch `spec-NNN` | `scripts/gsd/review-gate-command.sh:48` | Ledger key for the `ship:gsd` grant check. Underivable means fail-closed REVISE |
 | `TIMEOUT` | `900` | `scripts/gsd/gsd-run.sh:183` | Wall-clock bound on the whole drive |
 | `GSD_HOST_PROBE_TIMEOUT` | `45` | `scripts/gsd/gsd-run.sh:184` | Bound on the pre-launch host probe |
 | `GSD_RUN_STATE_DIR` | `<git-common-dir>/ffs/gsd-run` (shared by linked worktrees); `$REPO_ROOT/.planning/run-state` outside git | `scripts/gsd/gsd-run.sh:98-101,191` | Pidfile, status, heartbeat, reclaim mutex |

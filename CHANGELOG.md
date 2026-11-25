@@ -8,6 +8,13 @@ all skills.
 
 ## Unreleased
 
+### Changed (2026-11-25, a set GSD_PROJECT with no phases dir fails closed)
+
+- `plan-wall.sh --run` exits 2, and `review-gate-command.sh` returns REVISE, when
+  `GSD_PROJECT` is set but `.planning/<project>/phases` is missing or the value is not one
+  path segment. Before, both used `.planning/phases`, so a wrong name checked another
+  project. Unset or blank still means the root, and an explicit `--run` root still wins.
+
 ### Changed (2026-11-25, the default evidence store is checked against every enclosing checkout)
 
 - `gates.py` refuses the default store when any checkout around it tracks something in

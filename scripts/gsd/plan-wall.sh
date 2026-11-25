@@ -189,12 +189,25 @@ fi
 if [ "$PW_RUN_MODE" -eq 1 ]; then
   # Default root honors GSD_PROJECT planning isolation (consumers namespace
   # planning as .planning/<project>/phases). An explicit root arg always wins;
-  # with GSD_PROJECT unset, or its dir absent, this is the plain path.
+  # GSD_PROJECT unset/blank is the plain path. A set GSD_PROJECT is fail-closed
+  # (same rule as gsd-run.sh): never fall back to the root project, or the wall
+  # would check one project while gsd-core runs another.
   RUN_ROOT="${TARGET:-}"
   if [ -z "$RUN_ROOT" ]; then
     RUN_ROOT="$PLANNING_DIR/phases"
-    if [ -n "${GSD_PROJECT:-}" ] && [ -d "$PLANNING_DIR/${GSD_PROJECT}/phases" ]; then
-      RUN_ROOT="$PLANNING_DIR/${GSD_PROJECT}/phases"
+    _pw_proj="${GSD_PROJECT:-}"
+    _pw_proj="${_pw_proj#"${_pw_proj%%[![:space:]]*}"}"
+    _pw_proj="${_pw_proj%"${_pw_proj##*[![:space:]]}"}"
+    if [ -n "$_pw_proj" ]; then
+      if ! [[ "$_pw_proj" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || [[ "$_pw_proj" == *..* ]]; then
+        echo "plan-wall: --run: GSD_PROJECT must be one path segment ([A-Za-z0-9._-], no '..')" >&2
+        exit 2
+      fi
+      RUN_ROOT="$PLANNING_DIR/$_pw_proj/phases"
+      if [ ! -d "$RUN_ROOT" ]; then
+        echo "plan-wall: --run: GSD_PROJECT=$_pw_proj but .planning/$_pw_proj/phases is missing — refusing to fall back to .planning/phases" >&2
+        exit 2
+      fi
     fi
   fi
   if [ ! -d "$RUN_ROOT" ]; then
