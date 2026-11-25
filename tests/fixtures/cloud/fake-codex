@@ -1,0 +1,104 @@
+#!/bin/bash
+# Fake `codex` CLI for cloud_host tests. bash 3.2 safe.
+#
+# Supports: codex cloud exec|status|diff|list
+# Env:
+#   FAKE_CLOUD_STATE   dir for recorded argv/cwd/env (required)
+#   FAKE_CLOUD_MODE    ok | no-id | running | complete | failed | bad-diff | hang   (default ok)
+#   FAKE_CLOUD_FORMAT  text | json   (status output style, default text)
+#   FAKE_CODEX_DIFF    path to a diff file to serve for `diff` in complete mode
+set -u
+STATE="${FAKE_CLOUD_STATE:-}"
+if [ -z "$STATE" ] || [ ! -d "$STATE" ]; then
+  echo "fake-codex: FAKE_CLOUD_STATE must be an existing directory" >&2
+  exit 97
+fi
+MODE="${FAKE_CLOUD_MODE:-ok}"
+FORMAT="${FAKE_CLOUD_FORMAT:-text}"
+TASK_ID="task_e_fake0001"
+
+if [ "${1:-}" = "--help" ] || [ "${1:-}" = "--version" ]; then
+  echo "fake-codex 0.0.0"
+  exit 0
+fi
+if [ "${1:-}" != "cloud" ] || [ -z "${2:-}" ]; then
+  echo "fake-codex: expected 'cloud <sub>'" >&2
+  exit 2
+fi
+SUB="$2"
+printf '%s\0' "$@" > "$STATE/codex.$SUB.argv"
+pwd -P > "$STATE/codex.$SUB.cwd"
+env > "$STATE/codex.$SUB.env"
+
+emit_status() {
+  # $1 = word, $2 = bracket tag
+  if [ "$FORMAT" = "json" ]; then
+    printf '{"id":"%s","status":"%s"}\n' "$TASK_ID" "$1"
+  else
+    printf '[%s] fake task\nStatus: %s\n' "$2" "$1"
+  fi
+}
+
+case "$SUB" in
+  exec)
+    case "$MODE" in
+      hang) sleep 600; exit 0 ;;
+      no-id) echo "Task submitted." ;;
+      *)
+        echo "Task submitted: $TASK_ID"
+        echo "https://chatgpt.com/codex/tasks/$TASK_ID"
+        ;;
+    esac
+    ;;
+  status)
+    case "$MODE" in
+      complete|bad-diff) emit_status ready READY ;;
+      failed) emit_status failed ERROR ;;
+      running|ok|no-id) emit_status running PENDING ;;
+      hang) sleep 600 ;;
+    esac
+    ;;
+  diff)
+    case "$MODE" in
+      bad-diff)
+        cat <<'DIFF'
+diff --git a/does-not-exist.txt b/does-not-exist.txt
+index 1111111..2222222 100644
+--- a/does-not-exist.txt
++++ b/does-not-exist.txt
+@@ -1,2 +1,2 @@
+ context that is not in any file
+-old line
++new line
+DIFF
+        ;;
+      *)
+        if [ -n "${FAKE_CODEX_DIFF:-}" ] && [ -f "$FAKE_CODEX_DIFF" ]; then
+          cat "$FAKE_CODEX_DIFF"
+        else
+          cat <<'DIFF'
+diff --git a/codex-out.txt b/codex-out.txt
+new file mode 100644
+index 0000000..e69de29
+--- /dev/null
++++ b/codex-out.txt
+@@ -0,0 +1 @@
++hello from codex
+DIFF
+        fi
+        ;;
+    esac
+    ;;
+  list)
+    if [ "$FORMAT" = "json" ]; then
+      printf '[{"id":"%s","status":"running"}]\n' "$TASK_ID"
+    else
+      printf '[PENDING] fake task (%s)\n' "$TASK_ID"
+    fi
+    ;;
+  *)
+    echo "fake-codex: unknown subcommand $SUB" >&2
+    exit 2
+    ;;
+esac
+exit 0

@@ -28,6 +28,89 @@ all skills.
 - `review-tier.sh` checks a moved file under its old and its new name, reads file
   names unquoted and as bytes, and `--file` compares with HEAD, as the reviewed diff does.
 
+### Fixed (2026-11-25, cloud delegation: close-out round)
+
+- `/swarm` skill 2.2.12: every cloud command is complete in itself (no `ROOT` shell variable
+  carried between commands). `plan` (now with `--run`) and `start` take
+  `--root "$(git rev-parse --show-toplevel)"`, so a linked worktree is refused as
+  `NOT_MAIN_WORKTREE` again and no work is started on the main worktree's branch; every
+  `status` call takes the main worktree (`git worktree list --porcelain | sed -n '1s/^worktree //p'`, not the parent of the common
+  directory, which is another repository's top level when the git dir is separate),
+  so a first run from a linked worktree reads the right ledger, gets `LEDGER_MISSING` and
+  goes local under `auto` and `prefer`. The proof now covers refusals of `start` too, and
+  every answer other than `LEDGER_MISSING` (`NOT_A_REPO` and `BAD_ROOT` included) runs
+  nothing and tells the operator to rerun without `--cloud` when no run with this id is active; there is no local fallback for
+  `NOT_A_REPO` any more. The skill also says where the run id comes from (chosen and printed
+  in step 1 with a valid example, reused on a retry or resume, asked for when unknown) and
+  gives exits other than 0 and 3 of `plan`, and exit 2 of `start`, a rule: relay stderr, run
+  nothing, stop.
+- A no-flag test pins that the landed-base proof reads the merge base and never the branch: with
+  the proof read from `HEAD`, the four golden comparisons would have been silently skipped on
+  this PR (and still green with `CI=1`); now one test fails.
+- The no-flag comparison's tests of the fail-in-CI arm name the outcome (`fail`, `skip` or
+  `ok`) instead of `pytest.raises(pytest.fail.Exception)`, which let a skip escape and
+  report the test as skipped. Turning the arm into a skip now fails three tests.
+- The macOS sandbox step's skip guard fails on any skipped test, not only on a reason that
+  names the sandbox, except four allowlisted host conditions (no pasteboard, no node, no
+  terminal device, running as root), and it fails when no test ran at all (an empty or
+  foreign report, or one whose only tests are allowlisted skips). A test checks the allowlist
+  against the literal skip reasons in the three cloud test files; a skip written in another
+  form (a variable, `importorskip`) is not seen by that test, but the guard still fails on it
+  in CI.
+- `resolve_root` refuses an explicit empty `--root` (`BAD_ROOT`, exit 2) instead of reading it as the working
+  directory, so an empty `--root "$(git rev-parse --show-toplevel)"` outside a repository can no longer reach another
+  repository's run.
+- Cloud review no longer obeys the repository's rung breaker. Once `cloud-review.sh`
+  pins the repository store, 20 recorded failures of the requested rung in any other
+  review made it skip that rung and answer with another model, which a cloud review
+  never accepts (`review-model-downgraded`, one retest spent). The script now treats
+  no rung as tripped; the rows are still recorded and the breaker still serves local
+  reviews.
+
+### Fixed (2026-11-24, cloud delegation: round 8)
+
+- Grant checks read the grant store of the `--root` repository, not the caller's
+  working directory. Every `gates.py` call of the dispatcher (`plan --run`, `start`,
+  the orchestrator, `resolve --action accept-deps`, `cleanup --remote`) and the
+  `loop-round` of the review now run with `--root` as the working directory, so
+  a grant recorded in another checkout no longer authorizes `cleanup --remote` or
+  a push for this one. An absolute `GATES_STORE` works as before; a relative one
+  is relative to `--root`. `cloud-review.sh` pins the store it resolved before it
+  enters its scratch directory. Grant from the `--root` repository; `/swarm`
+  skill 2.2.8 says so.
+- A scanner-positive task id is `SECRET_IN_PROMPT` however it is reached. `plan` and
+  `start` scan the ids as written before normalization, so a flagged id that is also
+  a duplicate or an invalid id no longer ends as `TASK_ID_DUPLICATE` or
+  `TASK_ID_INVALID` (exit 2, which the skill had no rule for, so a retry that added an invalid id left the decision to the model; `TASK_ID_DUPLICATE` is an exit-3 refusal that `/swarm` answered by running every task locally). A benign
+  duplicate id is still `TASK_ID_DUPLICATE`. `/swarm` skill 2.2.9: a refusal from
+  `plan` falls back to local only when `status --run <run>` reports
+  `LEDGER_MISSING`; otherwise the run may already be active and nothing runs.
+- A `needs-secret` entry that is not a valid name is refused as `TASK_INVALID` without
+  echoing it: the message gives the task id and the entry position only. It used to
+  quote the whole entry, and a pasted value that the scanner has no pattern for
+  reached stderr through `plan` and `start`. The `est` annotation error no longer
+  quotes its value either, and neither do the two `tier` errors (a free-text `tier`
+  next to a valid `model_request` used to be quoted in the conflict message). The
+  remaining messages are fixed text, except `TASK_ID_INVALID` and `DEP_UNKNOWN`, which quote an unflagged task id or
+  dependency name because they must name the task (a flagged id is refused before any message is built). A `tier` or a
+  `model_request` name that is not a string is a `TASK_INVALID` error instead of an uncaught `TypeError`.
+- Admission never moves an existing remote task branch. The admit push is leased to
+  an absent ref (`--force-with-lease=<ref>:`), so when two clones reuse a run and task
+  id and one branch is an ancestor of the other's base, the second no longer
+  fast-forwards it. A remote branch at exactly the wanted OID is still accepted on
+  retry (no push, no creation credit); one at another OID is `branch-conflict`.
+- `cloud-review.sh` reports `UNAVAILABLE` (exit 3), not `cap`, when the round accounting
+  fails for a store reason, such as a default evidence store that became tracked by git.
+  Exit 1 of `loop-round` is a cap only when `gates.py` also printed its `LOOP-CAP:` line.
+  The script prints one sanitized `CLOUD-REVIEW-REASON:` line and the dispatcher shows it
+  in the `review-unavailable` detail.
+- The no-flag test (`tests/test_swarm_cloud_noflag.py`) resolves its baseline from
+  `origin/main` only. It no longer reads the obsolete stacked remote-tracking ref, so
+  a checkout that kept that ref and one that pruned it compare against the same text.
+  When the cloud work is already on the base the comparison items retire only if the
+  base tree itself carries the dispatcher and the skill's cloud block; a CI run
+  without that proof fails instead of skipping.
+
 ### Changed (2026-11-25, review-gate diffs and finds helpers by exact name)
 
 - review-gate 1.20.3 `--all` diffs, and picks its tier, against `origin/main` (else
@@ -90,6 +173,281 @@ all skills.
   checkout, and its message no longer suggests `git rm --cached`, which kept the file.
 - `clean_code_metrics.py` runs `crapper` and `dryer` only from absolute paths
   outside the reviewed checkout.
+
+### Fixed (2026-11-21, cloud delegation: round 7)
+
+- `start` now always prints `CLOUD:local tasks=<ids>`, with an empty value when
+  no task is local. `/swarm` skill 2.2.6 runs locally only the ids that line
+  names, never the groups of the earlier plan: `start` routes again, and under
+  `auto` host pressure can move a task between the two calls, which would run it
+  both locally and in the cloud. With no line, or one it cannot parse, it runs
+  no local task and reports. Without `--cloud` nothing changes.
+- `cleanup` deletes a task branch (local or `--remote`) or the integration ref only
+  when the ledger proves the run created it: the admit journal records `created`
+  once the push of a branch it saw absent is confirmed, and the initialization
+  record carries `integration_ref_created`. The admit intent (recorded before
+  the scan and the push) no longer counts. Any other ref, such as a branch that
+  existed before the run or one left by an abandoned, scan-refused task, is kept
+  and printed `CLOUD:cleanup-kept ref=... (creation not confirmed)`; cleanup does
+  not fail. `start` no longer adopts an existing integration ref: it refuses with
+  `INTEGRATION_REF`, or `INTEGRATION_REF_UNCONFIRMED` (exit 78) when an identical
+  retry of a crashed start finds one. Runs started by an earlier build have no
+  proof, so `cleanup` keeps their refs.
+- The admit journal now records that the run created the local task branch right
+  after the update-ref and before the push, and a retry after a failed push keeps
+  that proof, so `cleanup` removes the branch instead of printing `creation not
+  confirmed`. The remote proof still needs a push that reports a new ref
+  (`git push --porcelain`, flag `*`): another clone that created the branch first
+  makes the push "up to date" and leaves the ref to its owner. A remote branch
+  whose creation acknowledgement was lost is still kept. `/swarm` skill 2.2.7.
+- The `INTEGRATION_REF_UNCONFIRMED` (exit 78) message no longer suggests
+  `git update-ref -d <ref>`, which follows a symbolic ref and deletes its target.
+  For a symbolic ref it says to inspect the target and remove only the symbolic
+  ref (`git symbolic-ref --delete <ref>`); for a plain ref it prints
+  `git update-ref --no-deref -d <ref> <inspected-oid>`.
+- An identical retry of `start` whose orchestrator restart fails (the spawn raises
+  `OSError`) adds `orchestrator=restart-failed` to the `RUN_EXISTS` refusal
+  instead of silently dropping the error; the ledger and the local claims are
+  unchanged and the same retry tries again. The token now carries the errno name
+  (`orchestrator=restart-failed cause=ENOENT`, or `OSERROR` when the exception has
+  no errno; never the message, which can hold a path). `/swarm` skill 2.2.7 reports it and ends there: no
+  `reconcile.sh` (the run has no lifecycle record to restart), no task, and the
+  identical `start` may be repeated once the cause is fixed.
+- `/swarm` skill 2.2.7: `CLOUD-REFUSED: SECRET_IN_PROMPT` from `plan` (or `start`)
+  ends the invocation. The skill relays the redacted refusal and dispatches
+  nothing, cloud or local, under `auto`, `prefer` and `required` and under
+  `--dry-run`; the local fallback of the other refusals no longer applies. A
+  retry of an already started run with an edited batch is refused by `plan`
+  before `start` can say `RUN_EXISTS`, and its unchanged tasks may be running in
+  the cloud.
+- `/swarm` skill 2.2.7 handles `start` exiting 78 (`CLOUD-ERROR` on stderr, for
+  example `INTEGRATION_REF_UNCONFIRMED`): it relays stderr, runs no task, cloud or
+  local, and stops for the operator to inspect before another `start`.
+- `plan` scans every task id right after normalization, as `start` does: a
+  scanner-positive id is `SECRET_IN_PROMPT` (exit 3) and is never printed, so
+  the required plan step no longer exposes one.
+
+### Fixed (2026-11-20, cloud delegation: round 6)
+
+- A retried `start` for an existing run id ends `RUN_EXISTS ... batch=same`,
+  `batch=other` or `batch=unknown`, and no longer offers `local=<ids>`: the
+  local tasks the first attempt claimed are reported as `local-claimed=<ids>`,
+  because that caller may already have started them. `/swarm` skill 2.2.6 must
+  not start a claimed local task again without the operator's confirmation, and
+  runs none of the local groups that contain one until the operator says which.
+- The batch digest covers the ordered input, `depends_on` included. A changed
+  order, a changed dependency or `--sequential` is `batch=other`.
+- An identical retry that finds an active run with no orchestrator starts one
+  and adds `orchestrator=restarted` to the refusal. `/swarm` runs `reconcile.sh`
+  only when that token is absent and the orchestrator is dead.
+- `start` holds the orchestrator lock while it reserves the run, creates the
+  integration ref and commits an initialization record. A start that loses a
+  race gets `RUN_EXISTS`. `orchestrate` on a run with no initialization record
+  (also one made by an earlier build) refuses with `RUN_NOT_INITIALIZED`; an
+  identical retry of `start` finishes a run this build left uninitialized.
+- `start` scans every task id, local ones included, before it stores or prints
+  one. A match is `SECRET_IN_PROMPT` and names the scanner class, never the id.
+  Route errors that quote a flagged task id or dependency name also print the
+  class instead.
+- `cleanup` deletes only refs the run ledger accounts for, each at its recorded
+  OID (a compare-and-delete). A ref with no recorded OID is kept and printed as
+  `CLOUD:cleanup-kept ref=... (reason)`. A ref that moved gives
+  `CLEANUP_INCOMPLETE` and keeps the ledger. `--remote` deletes task branches
+  with a lease on the recorded OID and never deletes a remote `integration`
+  branch. A ref name the scanner flags prints as `[withheld sha256:<12 hex>]`.
+- The fixed launch clone is built in a private staging directory
+  (`.ffs-cloud-new-*`) and published by a no-replace rename. It is retired by a
+  rename into `.ffs-cloud-old-*` and a device and inode check before it is
+  deleted. The marker is written atomically and exclusively. A launch killed
+  part-way is recovered without operator action: only empty own staging
+  directories, an empty own marker and own marker temporary files are removed.
+  A non-empty `.ffs-cloud-new-*` directory left by a killed clone is kept and
+  needs manual removal. New refusal reasons: `MARKER_UNRECOGNIZED`,
+  `MARKER_EXISTS`, `MOVED_AWAY`. A libc without `renameat2` falls back to a
+  check followed by a plain rename.
+- Replay parks the task (`merge-conflict`) when an older process already moved
+  the integration ref and the approval has no reviewer-model evidence, instead
+  of recording the move. Reset the ref to the ledger tip, then
+  `resolve --action retest`.
+- The candidate import fetches objects only (no destination ref), then installs
+  the ref with `update-ref --no-deref` as a compare-and-swap. A symbolic ref or
+  a moved ref ends `candidate-ref-conflict` and is never written through.
+
+### Fixed (2026-11-20, cloud delegation: round 5b review)
+
+- A failed stale re-review (even a transient reviewer outage) no longer ends
+  `resolve --action retest` when both operator retests were already spent
+  before it. The first `review-stale` records the retests used so far
+  (`review_stale_base`) and the limit of two counts from there, still on the
+  bounded stale meters (attempt 3 to 5). Older ledgers default the base to 0.
+- The rollback of a failed `start` (no integration ref, or a failed `tasks.json`
+  write) frees the run id last. Under the run lock it removes only what that
+  invocation created, `tasks.json` first and the ledger last, and it keeps the
+  lock file, so a concurrent start of the same run id can no longer lose its
+  `tasks.json` or lock.
+- A retried `start` for an existing run id reports `batch=same` only when the
+  whole batch matches the first attempt: `start` now stores the first attempt's
+  full task id set (cloud and local) and a content digest in the run ledger
+  (`batch`). A superset, subset or edited batch is `batch=other`, so extra
+  cloud-eligible tasks can no longer be sent to run locally (even under
+  `--policy required`). A ledger written before this field gives
+  `batch=unknown`. `/swarm` skill 2.2.6 describes the exact-match rule.
+- A `git clone` killed at its transfer timeout no longer wedges every later
+  fixed-clone launch with `CLONE_PATH_INVALID`. The dispatcher now creates the
+  clone directory itself (a plain exclusive `mkdir`; the round 6 entry above
+  replaces it with a staged claim) and writes an ownership marker beside it, `<parent>/ffs-cloud-launch-claude.ffs-owned`, naming the directory's
+  device and inode, before it clones. Stale-clone cleanup and the exit-path
+  delete accept a directory only with that proof; an unmarked directory still
+  ends `CLONE_PATH_INVALID` and is never deleted. **Operator action:** the
+  marker moved out of `.git/`, so an existing clone at that path (hand-made, or
+  from an earlier release) must be removed once with
+  `rm -rf <parent>/ffs-cloud-launch-claude`.
+
+### Fixed (2026-11-20, cloud delegation: external review findings)
+
+- `start` removes the run ledger it reserved when it cannot create the
+  integration ref (for example a symbolic ref sits there), so a retry is a fresh
+  start and no longer reports a run that never got an orchestrator as started.
+- `review-stale` (an old approval without reviewer-model evidence goes back
+  through review) no longer spends one of the operator's two review retests. It
+  counts in its own `review_stale` field and runs on its own bounded review
+  meters (attempt 3 to 5).
+- The candidate import refuses (`candidate-ref-conflict`) when the candidate ref in
+  your repository is a symbolic ref, so `fetch` can no longer create the branch
+  a dangling symref points at.
+- A secret-scanner failure while listing `claude/*` refs no longer flags every
+  ref name as secret-shaped. The launch ends `SNAPSHOT_FAILED` and starts
+  nothing (so a hash-only snapshot cannot turn old refs into candidates later);
+  a poll returns `unknown` (`REF_SCAN_REFUSED`) and retries without parking the
+  task.
+- The fixed launch clone is deleted on exit only with the ownership proof
+  described below; a directory that appears at the path before `git clone`
+  runs is left alone.
+- The fixed launch clone (`FFS_CLOUD_CLONE_PARENT`) can no longer delete the
+  operator's checkout. The resolved child `<parent>/ffs-cloud-launch-claude`
+  is compared, real path and case-folded, against the repository root and every
+  `git worktree list` entry in both directions; an overlap, an unknown root or
+  an unreadable worktree list ends `CLONE_PATH_INVALID`. An existing child is
+  deleted only when the ownership marker beside it names it (see the
+  killed-clone entry below); any other existing directory also ends
+  `CLONE_PATH_INVALID`.
+  The `INSIDE_REPO` parent check is case-folded as well. **Operator action:**
+  an existing unmarked clone at that path (made by hand for the trust dialog,
+  or by an earlier release) must be removed once by the operator.
+- The launch clone is made with `--no-checkout`. The pinned branch OID is
+  verified first (`BRANCH_OID_MISMATCH` leaves nothing checked out), then that
+  commit is checked out with `core.hooksPath` disabled and with user and system
+  git config disabled, so no hook or filter driver runs.
+- `SCANNER_VERSION` is now 4 (the `SECRET KEY` armor rule landed without a
+  bump): history verdicts cached as clean by version 3 are rescanned, so an
+  ancestor cached before `PGP SECRET KEY BLOCK` was recognised can no longer
+  reach the launch clone.
+- The ancestry scan refuses a shallow repository (`shallow-repository`) before
+  it accepts or writes any cache verdict: it could not see history that the
+  fresh clone from origin contains.
+- Incoming `claude/*` ref names go through the secret scanner before the launch
+  snapshot, a bind or any ledger write. A matching name is dropped from the
+  candidate pool and stored in the snapshot as a hash only; a new matching
+  result ref parks the task as `needs-operator` / `ambiguous-candidates` with a
+  fixed reason that never carries the name.
+- Dispatcher-owned refs are never written through a symbolic ref. Creating the
+  integration ref or a task branch uses `update-ref --no-deref` against an
+  absent ref (an existing symbolic ref makes `start` fail); moving the
+  integration ref refuses a symbolic ref (`git-error`) and uses `--no-deref`;
+  cleanup deletes refs with `--no-deref`, so a symbolic ref can no longer move
+  or delete another branch such as `main`.
+- Dependency-file detection (`_dep_kind`) folds case on file names and
+  patterns: `Package.json`, `PACKAGE.JSON` or `Requirements-Dev.TXT` in a new
+  directory is a dependency file (a case-insensitive checkout opens it as the
+  real manifest, install scripts included) and stops at `dependency-change`.
+- `fence-data.sh` propagates read, transform and write failures: `fence_neutralize`
+  returns 1 and `fence_data` returns non-zero without the closing delimiter.
+  `cloud-review.sh` treats any prompt-assembly failure as `UNAVAILABLE` (exit 3)
+  and never calls the reviewer, so a review can no longer approve a diff the
+  reviewer did not receive.
+- `start` on an existing run id ends `RUN_EXISTS ... batch=same [local=<ids>]`,
+  `batch=other` or `batch=unknown`. (Superseded: the round 5b entry above makes
+  the match cover the whole first batch, so a superset is `batch=other`, and the
+  round 6 entry above replaces `local=` with `local-claimed=`.)
+  `/swarm --cloud` (skill 2.2.2) reconciles a `batch=same` run and, on any other
+  answer, stops and never starts those cloud tasks again under a new run id.
+- `/swarm --cloud` (skill 2.2.1) no longer treats `CLOUD-REFUSED: RUN_EXISTS` as
+  "run every task locally". A retried `start` whose first acknowledgement was
+  lost now reads `status --run <run>`, reports the existing run, runs
+  `reconcile.sh` once if the orchestrator is dead, and runs no task of that run
+  locally; a run id that belongs to other work stops and asks the operator.
+- Resume no longer trusts an approval recorded before the reviewer-model check.
+  A task found in `reviewed` or `verified` whose `review` record lacks matching
+  `model` and `requested_model` goes back to `collected` (new ledger event
+  `review-stale`, a fresh round meter, `review` and `verify` cleared) and is
+  reviewed and verified again; an unfinished `integrate` journal entry for such
+  a task is re-planned instead of applying the ref move. An integration that
+  already moved the ref is only recorded, never undone.
+- The merged-tree retest result (`test_rc`, `test_log_sha`) is persisted in the
+  `integrate` journal entry. Crash recovery records it in the integration
+  history instead of the candidate's own verify log (older journal entries
+  without it keep the old fallback).
+
+### Fixed (2026-11-20, cloud delegation: four verified gaps)
+
+- `/feature-implement` and `/task-swarm` now refuse `--cloud` (any form:
+  `--cloud`, `--cloud=auto|prefer|required`) and `FFS_CLOUD`. A marked
+  `ffs:cloud-deferred` block ahead of the init gate prints one line saying cloud
+  delegation for that skill arrives in a later release and that `/swarm --cloud`
+  is available now, then stops. Nothing else in either skill changes
+  (versions 2.23.3 and 3.3.2; 2.23.3 is the merge bump over main's 2.23.2, which carries main's own change; originally 2.22.3). The no-flag test now compares both files with the
+  base outside that block and the version line.
+- The cloud review no longer passes a downgraded reviewer silently.
+  `adversary-host.sh` records which model answered
+  (`ADVERSARY_LAST_REQUESTED_MODEL`, `ADVERSARY_LAST_ANSWERED_MODEL`);
+  `cloud-review.sh` prints it on a `CLOUD-REVIEW-MODEL:` line and the ledger
+  `review` record carries `model` and `requested_model` (older records without
+  them stay valid). An `APPROVE` from a model other than the requested
+  judgment-tier model ends in `needs-operator` with `review-model-downgraded`;
+  an unreported model ends with `review-model-unknown`. Both clear with
+  `resolve --action retest` or `reject`. The opposite-vendor rule and
+  `FFS_CROSS_VENDOR_FALLBACK=off` are unchanged.
+- A blank (empty or whitespace-only) verify command can no longer reach
+  `verified`. The router refuses the task (`VERIFY_CMD_MISSING`: a typed refusal
+  under `required`, stays local under `auto` and `prefer`) unless a non-blank
+  `config.verify.cmd` exists, and `cloud_collect.verify` refuses a blank command
+  with `needs-operator` / `verify-cmd-missing` instead of running `bash -c ''`.
+- A candidate on the task's own result branch
+  (`claude/ffs-<run>-<task>-<nonce8>`, or a manifest carrying the task's nonce)
+  whose manifest is present but invalid now ends in `needs-operator` with
+  `manifest-invalid` and the validator's error code in the detail, instead of
+  being polled until the 12 hour deadline. Only `abandon` clears it. A foreign
+  `claude/*` ref that merely is new, and a branch with no manifest, still go back
+  to polling.
+
+### Changed (2026-11-20, cloud delegation: first live runs of the Claude backend)
+
+- Live runs with Claude Code 2.1.329, one trivial docs task, Claude backend only.
+  A result passed every gate and reached `ffs/cloud/<run>/integration` in under
+  3 minutes. `docs/cloud-delegation.md` has a "Live verification" section with
+  what was and was not checked.
+- `claude --cloud` refuses to run without an interactive terminal, so the Claude
+  backend starts it on a pseudo-terminal. This is undocumented provider
+  behaviour and can break on a client update.
+- The client shows its folder trust dialog for the launch clone. FFS never
+  answers it; a launch that meets it ends `failed` (`CLI_EXIT BLOCKED_DIALOG`).
+  Set `FFS_CLOUD_CLONE_PARENT`, clone the repository to
+  `<parent>/ffs-cloud-launch-claude` and accept trust once in a real terminal.
+  `cloud-dispatch.sh probe-claude --dir <path>` shows the first screen without
+  creating a session. The quick start now lists these steps in order.
+- The worker contract states the `tests_run` item shape,
+  `{"cmd": ..., "rc": ...}`. A live worker wrote strings and failed the
+  manifest check.
+- A candidate branch with the right name and nonce but an invalid manifest was
+  logged and polled again until the deadline. That gap is closed above.
+- Not verified live: the Codex backend, whether `--model` and `--effort` take
+  effect under `--cloud`, more than one task, dependencies between tasks, the
+  installed `/swarm --cloud` skill path, secrets modes, restart driven by
+  `reconcile`, and a client stuck on a screen other than the trust dialog.
+- `cleanup --remote` does not delete the provider-created `claude/ffs-*` branch;
+  delete it by hand. A run whose task never binds stays `active` and `cleanup`
+  refuses it until the task is abandoned. The review output is not kept in the
+  run directory; only the verdict record is in the ledger.
 
 ### Fixed (2026-11-21, model-fallback legacy 5-1 pins)
 
@@ -165,6 +523,70 @@ all skills.
   `GSD_FRESH_START_REASON=role-pin-compat-sync`.
 - Skills whose "GPT-5.6 tiers" phrase became "GPT-6 tiers" each got a patch
   version bump.
+
+### Added (2026-11-19, opt-in cloud delegation for /swarm)
+
+- `/swarm --cloud[=auto|prefer|required]` offloads eligible, well-scoped tasks to
+  Claude Code on the web or Codex cloud sessions. Routing is per connected task
+  group, by `[owns]`, `[est]`, `[verify]` and `[needs-secret]` annotations. Review,
+  verify, exact-model, frontier-tier and `[local]` tasks always stay local. See
+  `docs/cloud-delegation.md`.
+- `scripts/gsd/cloud-dispatch.sh` (`lib/cloud_dispatch.py`): a deterministic,
+  LLM-free orchestrator with verbs `plan`, `start`, `orchestrate`, `status`,
+  `doctor`, `env init`, `env-spec`, `cleanup`, `adopt`, `abandon` and `resolve`.
+  It registers with the lifecycle layer, parks when only you can unblock a run,
+  and resumes after a restart.
+- Gates on every cloud result before it reaches the local integration branch
+  `ffs/cloud/<run>/integration`: quarantine fetch and secret scan, structure and
+  manifest checks, `owns` and denylist paths, a dependency-change gate, review by
+  the opposite model family (`scripts/gsd/cloud-review.sh`), and tests under
+  macOS `sandbox-exec` with no network. FFS never merges into your branch.
+- `templates/cloud/*` (`config.json`, `setup.sh`, `env-check.sh`,
+  `session-start.sh`) and `cloud-dispatch.sh env init [--register-hook]`, which
+  writes them to `.ffs/cloud/` and can register an optional `SessionStart` hook
+  that acts only in cloud sessions on `ffs/cloud/*` branches.
+- Secrets providers `none` (default), `provider-env`, `doppler` and `command`.
+  FFS handles names only, and the whole provider environment counts as exposed.
+- New grant keys: `cloud-dispatch:<provider>`, `push:origin/ffs/cloud/<run>`,
+  `secret-use:<NAME>`, `install:<pkg>` and `install:unattributed:<digest12>`
+  (for dependency changes that cannot be attributed to named packages).
+- `scripts/hooks/operator-only-guard.sh` also blocks agent calls to
+  `claude --cloud`, `codex cloud exec|apply|diff` and
+  `cloud-dispatch.sh adopt|abandon|resolve`. Anti-accident only.
+- The installer ships the cloud modules, scripts and templates (as
+  `cloud-templates/*`) to the managed and consumer lib directories.
+- Without the flag, `/swarm` behaves as before. The exceptions are the new guard
+  deny patterns, the files the installer ships, and the `network: true`
+  permission on the swarm skill. The `/spec-status` facts output gains a
+  read-only `== CLOUD ==` section only when a cloud run ledger exists, so a
+  repository that never used `--cloud` sees no change there.
+- Gate details. A changed path with a Unicode format or control character is
+  refused as `denylist`. Case-colliding paths are `denylist` at collect and
+  `merge-conflict` at integration. Binary changes always stop at
+  `binary-change`; there is no allowlist. The dependency gate treats a changed
+  repeated declaration, a removal-only change and more manifest types (for
+  example `pom.xml`, `build.gradle`, `Package.swift`, `mix.exs`) as
+  unattributed, and a change that touches no dependency declaration (for
+  example only `version`) passes. A secret leak found at review ends as
+  `rejected` with `secret-leak`. Review scripts and lifecycle scripts come only
+  from the dispatcher's own install location, never from the target repository.
+- Sandbox and recovery details. The process sweep kills only the launched
+  process, its observed descendants and their group or session, and re-checks
+  pid and start time before each signal. `/dev/tty*` is not readable. Integrate
+  replay accepts only the open intent's OID or an OID the ledger recorded as
+  published (else `integration-ref-foreign`). A task left in `submitting`
+  becomes `uncertain` on the next tick. A recovered live task always holds a
+  slot. `cleanup` holds the run ledger lock for its whole duration. A scan cache
+  entry carries the allowlist signature.
+- Known limits. A double-fork child not observed while its parent chain was alive
+  is not swept. One Mach service (`com.apple.system.opendirectoryd.libinfo`)
+  stays allowed, and whether it can carry DNS lookups is not tested. A JWT
+  directly after `-` is not matched by the scanner. A lone parked run keeps an
+  expired slot until an orchestrator resumes or `cleanup` runs. `cleanup` during
+  a concurrent `start` of the same run id can delete that run.
+- Experimental. Tested with mock CLIs. The Claude backend also had live runs on
+  2026-11-20; see the entry above and `docs/cloud-delegation.md`, "Live
+  verification". The Codex backend has not run live.
 
 ### Added (2026-11-17, operator-only guard hook, #253)
 

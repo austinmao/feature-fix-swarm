@@ -290,6 +290,8 @@ adversary_invoke() {
     }
     local -a schema_args=()
     [ -n "$schema_file" ] && schema_args=(--output-schema "$schema_file")
+    # Expanded below as ${schema_args[@]+"${schema_args[@]}"}: bash 3.2 (macOS
+    # /bin/bash) treats a bare "${empty[@]}" as unbound under the caller's set -u.
     # Codex has no Claude-style `--tools ''` flag. Disable every built-in
     # agentic tool family supported by the pinned CLI, run from a disposable
     # empty directory, and retain the read-only sandbox as defense in depth.
@@ -308,7 +310,7 @@ adversary_invoke() {
       --disable image_generation \
       -C "$data_dir" --skip-git-repo-check \
       --color never --output-last-message "$last_message" \
-      "${schema_args[@]}" \
+      ${schema_args[@]+"${schema_args[@]}"} \
       - >"$transcript" 2>&1
     rc="${PIPESTATUS[1]}"
     if [ "$rc" -eq 0 ] && [ -s "$last_message" ]; then
@@ -621,6 +623,13 @@ adversary_invoke_with_fallback() {
   # 1 left by an EARLIER call would otherwise survive a clean one.
   # shellcheck disable=SC2034  # read by sourcing callers, not here
   ADVERSARY_LAST_TIER_DESCENT=0
+  # Out-of-band answer provenance for in-process callers: the model asked for
+  # and the model that actually answered (taken from the rung file, never from
+  # the reviewer's stream). Empty answered = no successful answer / unknown.
+  # shellcheck disable=SC2034  # read by sourcing callers, not here
+  ADVERSARY_LAST_REQUESTED_MODEL="$preferred_model"
+  # shellcheck disable=SC2034
+  ADVERSARY_LAST_ANSWERED_MODEL=""
   rung_file="$(_adversary_rung_file_new)" || return 78
 
   output="$(ADVERSARY_RUNG_FILE="$rung_file" adversary_invoke_model_ladder \
@@ -635,6 +644,8 @@ adversary_invoke_with_fallback() {
     # as a clean judgment-tier review.
     _ah_answered_model="$(IFS='|' read -r _ m _ < "$rung_file" 2>/dev/null && printf '%s' "$m")"
     _adversary_rung_file_rm "$rung_file"
+    # shellcheck disable=SC2034  # read by sourcing callers, not here
+    ADVERSARY_LAST_ANSWERED_MODEL="$_ah_answered_model"
     if [ "$_ah_answered_model" = "$preferred_model" ]; then
       adversary_record_invocation false || return $?
     else
@@ -668,6 +679,8 @@ adversary_invoke_with_fallback() {
     # This leg is already degraded (cross-vendor), but a descent WITHIN it is
     # separate information the flag must still carry for in-process callers.
     _ah_answered_model="$(IFS='|' read -r _ m _ < "$rung_file" 2>/dev/null && printf '%s' "$m")"
+    # shellcheck disable=SC2034  # read by sourcing callers, not here
+    ADVERSARY_LAST_ANSWERED_MODEL="$_ah_answered_model"
     if [ "$_ah_answered_model" != "$fallback_model" ]; then
       # shellcheck disable=SC2034  # read by sourcing callers, not here
       ADVERSARY_LAST_TIER_DESCENT=1

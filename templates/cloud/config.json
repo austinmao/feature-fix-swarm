@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "limits": {"claude": 3, "codex": 3, "total": 6, "max_local_verifiers": 1},
+  "verify": {"cmd": "", "timeout_s": 900, "deps": ["node_modules", ".venv"]},
+  "secrets": {
+    "provider": "none",
+    "wrapper": "",
+    "install": "",
+    "exposure": {"claude": [], "codex": []},
+    "network_secret_hosts": []
+  },
+  "scan": {"allow": []},
+  "codex": {"env_id_var": "FFS_CODEX_CLOUD_ENV"},
+  "deadline_hours": 12
+}

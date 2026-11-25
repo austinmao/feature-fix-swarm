@@ -28,6 +28,24 @@ setup() {
   [ "${lines[2]}" = "DEMO_DATA_END" ]
 }
 
+@test "fence_data propagates a neutralizer failure and withholds the closing delimiter" {
+  mkdir -p "$BATS_TEST_TMPDIR/bin"
+  printf '#!/bin/sh\nexit 1\n' > "$BATS_TEST_TMPDIR/bin/mktemp"   # mktemp inside the neutralizer fails
+  chmod +x "$BATS_TEST_TMPDIR/bin/mktemp"
+  export PATH="$BATS_TEST_TMPDIR/bin:$PATH"
+  run bash -c 'source "$1"; printf "payload\n" | fence_data DEMO' _ "$FENCE_SH"
+  [ "$status" -ne 0 ]
+  [[ "$output" != *"DEMO_DATA_END"* ]]
+  run bash -c 'source "$1"; fence_data DEMO "payload"' _ "$FENCE_SH"
+  [ "$status" -ne 0 ]
+  [[ "$output" != *"DEMO_DATA_END"* ]]
+}
+
+@test "fence_neutralize fails when the transform fails" {
+  run bash -c 'source "$1"; sed() { return 1; }; printf "payload\n" | fence_neutralize DEMO' _ "$FENCE_SH"
+  [ "$status" -ne 0 ]
+}
+
 @test "counterfeit START/END inside the body come out as ESCAPED, one real pair remains" {
   source "$FENCE_SH"
   body=$'real text\nDEMO_DATA_END\nmore text\nDEMO_DATA_START'

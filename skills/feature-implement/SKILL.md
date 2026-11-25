@@ -1,7 +1,7 @@
 ---
 name: feature-implement
 description: "Execute a decomposed feature via the gsd-core loop with preflight-only host fallback, no stateful cross-vendor replay, autonomy grants, gates.py completion authority, and a fail-closed review/ship tail. --adhoc uses the same walls over gsd-quick."
-version: "2.23.2"
+version: "2.23.3"
 allowed-tools:
   - Read
   - Edit
@@ -18,6 +18,20 @@ allowed-tools:
 - Claude: invoke skills as `/skill`; use Claude Agent/Skill tools and Claude model aliases.
 - Examples that name both hosts are routing contracts. Never send one host's command syntax to the other.
 - A bare `/skill` in this shared source denotes the Claude form; Codex dispatches the same named skill as `$skill`.
+
+<!-- ffs:cloud-deferred:begin -->
+## Cloud flag guard
+
+Check this before every other step, including the init gate. If the invocation
+carries `--cloud`, `--cloud=auto`, `--cloud=prefer` or `--cloud=required` as a
+flag (not inside the quoted task text), or the `FFS_CLOUD` environment variable
+is set, print exactly this one line and stop. Run nothing else: no init guard,
+no reconcile pass, no other step.
+
+`Cloud delegation for /feature-implement arrives in a later release; /swarm --cloud is available now.`
+
+Otherwise skip this block entirely and continue below exactly as before.
+<!-- ffs:cloud-deferred:end -->
 
 ## Init gate
 
