@@ -95,16 +95,19 @@ If you'd rather be asked, add `--gated`.
 
 ## Step 5: read the review
 
-The interesting output is `/review-gate`. It runs three passes, and it
-deliberately runs on a **different model than the one that wrote the code** —
-Codex reviewing Claude's work, or the reverse.
+The interesting output is `/review-gate`. It runs up to three passes (a small
+diff runs only the first), and it deliberately runs on a **different model than
+the one that wrote the code** — Codex reviewing Claude's work, or the reverse.
 
 Findings come back severity-tagged. HIGH and CRITICAL block the ship;
-anything that survives a refute-or-promote pass is real. If it returns
-`REVISE`, the run stops and tells you why.
+anything that survives a refute-or-promote pass is real. If it prints
+`GATE: FAIL`, the run stops and tells you why. At the gsd ship seam the same
+stop appears as a `REVISE` verdict, which is advisory there: gsd runs that seam
+after the PR exists and continues whatever it returns, and `/feature-implement`
+checks the `ship:gsd` grant itself.
 
 If you only have one host CLI installed, you'll see `DEGRADED` — review ran,
-but within-vendor. Still a different model, weaker guarantee. Installing the
+but within-vendor. A weaker guarantee than true cross-vendor review. Installing the
 other CLI upgrades this permanently.
 
 ## What you built
@@ -131,8 +134,14 @@ missing, fix it, re-run. Do not bypass it before an unattended run.
 wasn't in the grant ledger. Grant it explicitly and resume, or re-run with
 `--gated` so you approve as you go.
 
-**`/review-gate` returns `REVISE` with no findings.** Usually the reviewer
-was unparseable or returned no line-anchored verdict. This fails closed on
+**`/review-gate` fails (`GATE: FAIL`, or `REVISE` at the ship seam) with no
+real findings.** Usually the reviewer was unparseable or returned no
+line-anchored verdict, or both reviewers were unavailable. `/review-gate` also
+fails when `gates.py` refuses the evidence store or git cannot compute the diff;
+its output names which. At the ship seam a refused store shows up as `BLOCKED: no
+ship grant`, so run
+`python3 ~/.claude/lib/feature-fix-swarm/gates.py store-path` (in an FFS checkout or a
+reconciled consumer, `python3 lib/gates.py store-path`) to see the real reason. This fails closed on
 purpose — no mandatory review fails open. Re-run it; if it persists, check
 that the opposite-host CLI is logged in.
 

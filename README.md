@@ -193,10 +193,10 @@ FFS requests workload intent rather than scattering vendor IDs through skills:
 
 | Tier | Claude default | Codex default | Effort | Typical work |
 | --- | --- | --- | ---: | --- |
-| `frontier` | Claude Fable | GPT-6.2 Astra | xhigh | Planning — the low-volume, highest-leverage seat |
-| `judgment` | Claude Opus | GPT-6.2 Sol | xhigh | Checking, debugging, verification, code/security review |
-| `execution` | Claude Sonnet | GPT-6.1 Terra | medium | Implementation, research, integration, orchestration |
-| `volume` | Claude Haiku | GPT-6 Luna | low | Mapping, synthesis, status collection (bounded-context inputs only) |
+| `frontier` | Claude Fable | GPT-6.2 Astra | xhigh | Plan checking and explicit escalation — the single low-volume, highest-leverage seat |
+| `judgment` | Claude Opus | GPT-6.2 Sol | xhigh | Planning, debugging, verification, code/security review |
+| `execution` | Claude Sonnet | GPT-6.1 Terra | medium | Thin orchestration, implementation, research and research synthesis, integration, Nyquist work |
+| `volume` | Claude Haiku | GPT-6 Luna | low | Status collection and other mechanical passes — bounded-context inputs only |
 
 The producer and reviewer must resolve to different models — enforced end to
 end, including a per-phase plan wall that reviews every plan before its phase
@@ -220,30 +220,63 @@ skill hash, or Codex CLI version drift is an actionable failure.
 
 ## Documentation
 
-| Guide | What it answers |
-| --- | --- |
-| [Getting started](docs/getting-started.md) | How do I reach a first dry run? |
-| [Initialization](docs/initialization.md) | What does /ffs-init set up, and what if I skip it? |
-| [Choosing a command](docs/choosing-a-command.md) | Which workflow fits this job? |
-| [Dependencies and integrations](docs/dependencies.md) | What is installed, who owns it, and why? |
-| [Pipeline](docs/pipeline.md) | How do the stages connect? |
-| [Commands](docs/commands.md) | What commands and gates are available? |
-| [Configuration](docs/configuration.md) | What can I tune, including the opt-in managed run-state path? |
-| [Installer, migration, and rollback](docs/installer.md) | How is FFS installed, migrated, and undone? |
-| [Environment registry](docs/environment-registry.md) | What environments exist, and how does `/ffs-init` declare them? |
-| [CI templates and test tiers](docs/ci-templates-and-tiers.md) | Which workflows does FFS propose, and where do CI test commands come from? |
-| [Coordination](docs/coordination.md) | How do sessions avoid colliding on the same spec? |
-| [Cross-session messaging](docs/cross-session-messaging.md) | How does one session hand work to another? |
-| [Healing](docs/healing.md) | How do waiting runs wake, recover, and remain bounded? |
-| [Retro loop](docs/retro.md) | What may the consent-gated diagnostic loop file, and how is it triaged? |
-| [Model tiers](docs/model-tiers.md) | Which model runs what, and how is provenance enforced? |
-| [Codex compatibility](docs/codex-gpt56-modernization.md) | Which Codex CLI and GSD versions are supported, and how does a Codex run stay isolated? |
-| [Socratic](docs/socratic.md) | What is the pinned question bank, and where does it reach a reviewer? |
-| [Browser proof](docs/browser-proof.md) | What counts as browser-QA evidence? |
-| [Digest](docs/digest.md) | How do I see what happened without watching a run? |
-| [Promotion protocol](docs/promotion-protocol.md) | How does staging evidence authorize production? |
-| [Security audit](docs/security-audit-2026-08-01.md) | What was checked before public promotion? |
-| [Public launch checklist](docs/public-launch-checklist.md) | What remains before announcing broadly? |
+Every guide in `docs/`, grouped by what you need.
+
+Opt-in cloud delegation is experimental. The Claude backend has run live once,
+on one trivial task; the Codex backend, multi-task runs and the secrets modes
+have not run live. `/swarm --cloud` offloads long, well-scoped tasks to Claude
+Code on the web or Codex cloud. It is available on `/swarm` only:
+`/feature-implement` and `/task-swarm` print a "later release" message and stop
+when given `--cloud`. For Claude you set `FFS_CLOUD_CLONE_PARENT` and accept the
+client's folder trust dialog once yourself; FFS never answers it. Cloud results
+are treated as untrusted: each must pass local review and sandboxed tests
+before it lands on a local integration branch, and FFS does not merge it.
+Start with [Cloud delegation](docs/cloud-delegation.md) and
+[How to run your first cloud delegation](docs/howto-cloud-first-run.md).
+
+### Start here
+
+- [Getting started](docs/getting-started.md): How do I reach a first dry run?
+- [Initialization](docs/initialization.md): What does /ffs-init set up, and what if I skip it?
+- [Choosing a command](docs/choosing-a-command.md): Which workflow fits this job?
+
+### Reference
+
+- [Commands](docs/commands.md): What commands and gates are available?
+- [Configuration](docs/configuration.md): What can I tune, including the opt-in managed run-state path?
+- [Dependencies and integrations](docs/dependencies.md): What is installed, who owns it, and why?
+- [Installer, migration, and rollback](docs/installer.md): How is FFS installed, migrated, and undone?
+- [Model tiers](docs/model-tiers.md): Which model runs what, and how is provenance enforced?
+- [Codex compatibility](docs/codex-gpt56-modernization.md): Which Codex CLI and GSD versions are supported, and how does a Codex run stay isolated?
+- [Environment registry](docs/environment-registry.md): What environments exist, and how does `/ffs-init` declare them?
+- [CI templates and test tiers](docs/ci-templates-and-tiers.md): Which workflows does FFS propose, and where do CI test commands come from?
+- [Cloud delegation](docs/cloud-delegation.md): How does opt-in cloud offload work, and what are its limits?
+- [Cloud delegation contracts](docs/cloud-delegation-contracts.md): What is the frozen interface between the cloud components?
+- [Autonomy posture](docs/autonomy-posture.md): How much promotion privilege does an unattended run keep?
+- [Browser proof](docs/browser-proof.md): What counts as browser-QA evidence?
+- [Digest](docs/digest.md): How do I see what happened without watching a run?
+- [Promotion protocol](docs/promotion-protocol.md): How does staging evidence authorize production?
+- [gbrain (optional)](docs/gbrain-optional.md): How does FFS use the optional gbrain memory backend, and what happens without it?
+
+### How-to
+
+- [How to run your first cloud delegation](docs/howto-cloud-first-run.md): How do I get from zero to a first `/swarm --cloud` run?
+- [How to give cloud sessions secrets with Doppler](docs/howto-cloud-secrets-doppler.md): How do I use the optional `doppler` secrets mode?
+- [How to give cloud sessions secrets without Doppler](docs/howto-cloud-secrets-other.md): How do the `none`, `provider-env` and `command` modes work?
+
+### Explanation
+
+- [Pipeline](docs/pipeline.md): How do the stages connect?
+- [Coordination](docs/coordination.md): How do sessions avoid colliding on the same spec?
+- [Cross-session messaging](docs/cross-session-messaging.md): How does one session hand work to another?
+- [Healing](docs/healing.md): How do waiting runs wake, recover, and remain bounded?
+- [Retro loop](docs/retro.md): What may the consent-gated diagnostic loop file, and how is it triaged?
+- [QA Ralph loop](docs/qa-ralph-loop.md): What per-phase QA gates run, and in what order?
+- [TDD and BDD guide](docs/tdd-bdd-guide.md): What does the research say about test-first work?
+- [Socratic](docs/socratic.md): What is the pinned question bank, and where does it reach a reviewer?
+- [Fable and pilotfish alignment](docs/fable-pilotfish-alignment.md): What did the Fable 5 and pilotfish audit change?
+- [Security audit](docs/security-audit-2026-08-01.md): What was checked before public promotion?
+- [Public launch checklist](docs/public-launch-checklist.md): What remains before announcing broadly?
 
 ## Contributing and support
 

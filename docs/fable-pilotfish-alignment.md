@@ -23,7 +23,7 @@ deltas shipped in v4.1.0, and what was deliberately deferred.
 | No "echo/explain your reasoning" phrasing (`reasoning_extraction` refusal trap) | Zero occurrences package-wide; return contracts enforce the opposite ("Conclusion FIRST, no exploratory narration", `lib/dispatch.py`). |
 | Graceful degradation / fallback chain | `scripts/gsd/model-fallback.sh` — fable→opus when unavailable, 24h probe cache, invoked at seed + run wall. |
 | Role↔model one-line rebinding | gsd `.planning/config.json` `model_overrides` + `dynamic_routing.tier_models` — the single binding site; skills reference, never pin. |
-| Tight sub-agent return contracts | scout≤15 / build≤20 / deep≤40 lines (`lib/dispatch.py`, `.claude/rules` mirrors). |
+| Tight sub-agent return contracts | scout≤15 / build≤20 / deep≤40 lines (`lib/dispatch.py`). |
 | Memory / lessons ("one lesson per file") | gsd `learnings.jsonl` + `/gsd-extract-learnings`. |
 
 ## Shipped deltas (v4.1.0)
@@ -169,6 +169,7 @@ Anthropic's guidance for the new lineup ("Most workloads start with Claude Opus
 The tier table moved to the GPT-6 family releases: frontier `gpt-6.2-astra` and
 Claude `claude-fable-5-2`, judgment `gpt-6.2-sol`, execution `gpt-6.1-terra`,
 volume `gpt-6-luna`; `docs/model-tiers.md` stays the canonical table. Earlier
-native Codex ids and `claude-fable-5-1` remain valid and are served as pinned,
-never rewritten. Frontier and judgment still resolve to distinct models on
+native Codex ids and `claude-fable-5-1` remain valid and are served as pinned
+when requested exactly; only the two legacy config levers in
+`docs/model-tiers.md` can still demote a `claude-fable-5-1` config pin. Frontier and judgment still resolve to distinct models on
 both vendors, so the producer/reviewer rule above is unchanged.
