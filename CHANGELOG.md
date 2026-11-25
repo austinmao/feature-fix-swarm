@@ -10,17 +10,19 @@ all skills.
 
 ### Fixed (2026-11-25, cloud delegation: close-out round)
 
-- `/swarm` skill 2.2.10 passes `--root` to `plan`, `start` and the new `status` check as
-  the main worktree (`dirname "$(git rev-parse --path-format=absolute --git-common-dir)"`).
-  From a linked worktree `git rev-parse --show-toplevel` is refused as
-  `NOT_MAIN_WORKTREE`, and the `status` proof added in 2.2.9 hit the same refusal, so a
-  first run from a linked worktree ran nothing. A `NOT_A_REPO` refusal needs no `status`
-  (no ledger can exist) and falls back to local under `auto` and `prefer`, never under
-  `required`.
-- `/swarm` skill 2.2.11 says where the run id comes from (chosen and printed in step 1,
-  reused on a retry or resume, asked for when unknown, because a new id has no ledger and
-  `LEDGER_MISSING` would prove nothing) and gives `plan` exits 2 and 78 a rule: relay
-  stderr, run nothing, stop.
+- `/swarm` skill 2.2.12: every cloud command is complete in itself (no `ROOT` shell variable
+  carried between commands). `plan` (now with `--run`) and `start` take
+  `--root "$(git rev-parse --show-toplevel)"`, so a linked worktree is refused as
+  `NOT_MAIN_WORKTREE` again and no work is started on the main worktree's branch; every
+  `status` call takes the main worktree (`dirname "$(git rev-parse --path-format=absolute --git-common-dir)"`),
+  so a first run from a linked worktree reads the right ledger, gets `LEDGER_MISSING` and
+  goes local under `auto` and `prefer`. The proof now covers refusals of `start` too, and
+  every answer other than `LEDGER_MISSING` (`NOT_A_REPO` and `BAD_ROOT` included) runs
+  nothing and tells the operator to rerun without `--cloud`; there is no local fallback for
+  `NOT_A_REPO` any more. The skill also says where the run id comes from (chosen and printed
+  in step 1 with a valid example, reused on a retry or resume, asked for when unknown) and
+  gives exits other than 0 and 3 of `plan`, and exit 2 of `start`, a rule: relay stderr, run
+  nothing, stop.
 - The no-flag comparison's tests of the fail-in-CI arm name the outcome (`fail`, `skip` or
   `ok`) instead of `pytest.raises(pytest.fail.Exception)`, which let a skip escape and
   report the test as skipped. Turning the arm into a skip now fails three tests.

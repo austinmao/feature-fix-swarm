@@ -2987,3 +2987,40 @@ def test_an_explicit_empty_root_is_refused_never_read_as_the_working_directory(
         rc, _ = world.cli(*argv)
         assert rc == 2 and "BAD_ROOT" in capsys.readouterr().err, argv
     assert not L.run_ledger_path(world.root, "r1").exists()
+
+
+def test_plan_and_start_from_a_linked_worktree_are_refused_and_create_nothing(
+        world: World, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture) -> None:
+    """The main worktree sits on another pushed branch; the operator works in a linked worktree.  The dispatcher must
+    never take the main worktree's HEAD as the base of work the operator started elsewhere."""
+    run_git(world.root, "checkout", "-q", "-b", "parked")
+    (world.root / "parked.txt").write_text("parked\n")
+    run_git(world.root, "add", "parked.txt")
+    run_git(world.root, "commit", "-q", "-m", "parked")
+    run_git(world.root, "push", "-q", "origin", "parked")
+    parked = run_git(world.root, "rev-parse", "HEAD")
+    linked = world.tmp / "linked"
+    run_git(world.root, "worktree", "add", "-q", "-b", "feature", str(linked), world.base)
+    linked_top = Path(os.path.realpath(str(linked)))  # what `git rev-parse --show-toplevel` prints there
+    monkeypatch.chdir(linked)
+    heads_before = run_git(world.root, "for-each-ref", "refs/heads", "refs/remotes")
+    origin_before = run_git(world.root, "ls-remote", "file://" + str(world.origin))
+    objects_before = run_git(world.root, "rev-list", "--all", "--count")
+    world.grant("r1", "cloud-dispatch:claude", "cloud-dispatch:codex", "push:origin/ffs/cloud/r1")
+    tasks = world.tasks_file([T1, T2])
+    for argv in (["plan", "--run", "r1", "--tasks", tasks, "--policy", "auto", "--root", str(linked_top)],
+                 ["start", "--run", "r1", "--tasks", tasks, "--policy", "auto", "--root", str(linked_top)]):
+        capsys.readouterr()
+        rc, out = world.cli(*argv)
+        assert rc == 3 and "CLOUD-REFUSED: NOT_MAIN_WORKTREE" in out, (argv, rc, out)
+    assert not L.run_ledger_path(world.root, "r1").exists() and not L.run_ledger_path(linked_top, "r1").exists()
+    assert world.spawned == []
+    assert run_git(world.root, "for-each-ref", "refs/heads", "refs/remotes") == heads_before  # no ref, no base commit
+    assert run_git(world.root, "ls-remote", "file://" + str(world.origin)) == origin_before
+    assert run_git(world.root, "rev-list", "--all", "--count") == objects_before
+    assert run_git(world.root, "rev-parse", "parked") == parked
+    # what the skill then does: the status of the main worktree proves there is no run, so `auto` goes local
+    capsys.readouterr()
+    rc, _ = world.cli("status", "--run", "r1", "--root", str(world.root))
+    assert rc == 78 and capsys.readouterr().err.startswith("CLOUD-ERROR: LEDGER_MISSING ")
+
