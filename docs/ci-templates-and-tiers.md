@@ -126,8 +126,9 @@ only; it decides nothing about the honest-verifier pass.
 scripts/gsd/review-tier.sh [--staged | --all | --file <path>]
 ```
 
-`--staged` is the default (falling back to `git diff HEAD` when the index is
-empty); `--all` diffs `<base>...HEAD` with `REVIEW_TIER_BASE` (default `main`);
+`--staged` is the default (falling back to `git diff HEAD` when nothing but
+top-level `.planning/` or `spike-results/` is staged); those two directories are
+never counted, except with `--file`. `--all` diffs `<base>...HEAD` with `REVIEW_TIER_BASE` (default `main`);
 `REVIEW_TIER` overrides detection outright. stdout is exactly one line,
 `<tier> <reason>`.
 

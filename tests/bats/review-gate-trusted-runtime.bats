@@ -540,3 +540,137 @@ PY
   FENCE_CWD="$FIX/src" run_fence '### Capture diff' 'export GIT_LITERAL_PATHSPECS=1 ARGUMENTS=--all' 'printf "%s\n" "$DIFF"'
   [[ "$output" == *"+++ "* ]] || false
 }
+
+@test "the snapshot path ignores CDPATH, a cd function and a chpwd hook" {
+  local sh src id top evil="$BATS_TEST_TMPDIR/evil" wt="$BATS_TEST_TMPDIR/wt"
+  make_fixture .
+  git -C "$FIX" worktree add -q --detach "$wt" main
+  mkdir -p "$evil/.git" "$FIX/a"
+  id="$(git -C "$FIX" rev-parse main)"
+  for sh in bash zsh; do
+    command -v "$sh" >/dev/null || continue
+    for src in 'CDPATH="$2"; export CDPATH' 'chpwd() { echo noise; }' 'cd() { builtin cd "$@" && echo noise; }'; do
+      for top in "$FIX/a" "$FIX" "$wt"; do
+        rm -rf "$FIX/.git/ffs-trusted"
+        run "$sh" -c "builtin cd \"\$1\"; $src; . \"\$3/scripts/gsd/trusted-runtime.sh\"; ffs_trusted_runtime refs/heads/main && echo \"T=\$FFS_T\"" \
+          _ "$top" "$evil" "$ROOT"
+        [ "$status" -eq 0 ] || { echo "$sh $src $top: $output"; false; }
+        [ "$output" = "T=$FIX/.git/ffs-trusted/$id" ] || { echo "$sh $src $top: $output"; false; }
+        [ -f "$FIX/.git/ffs-trusted/$id/.complete" ]
+      done
+    done
+  done
+  [ ! -e "$evil/.git/ffs-trusted" ]
+  [ -z "$(git -C "$FIX" status --porcelain --untracked-files=all | grep '^??')" ]
+}
+
+@test "the snapshot of a submodule sits in that submodule's git dir" {
+  make_fixture .
+  git init -q -b main "$BATS_TEST_TMPDIR/super"
+  git -C "$BATS_TEST_TMPDIR/super" -c protocol.file.allow=always submodule --quiet add -b main "$FIX" sub
+  local super="${FIX%/repo}/super"
+  run bash -c 'cd "$1/sub/src" && . "$2/scripts/gsd/trusted-runtime.sh" && ffs_trusted_runtime refs/remotes/origin/main && cd "${FFS_T%/*}" && pwd -P' _ "$super" "$ROOT"
+  [ "$status" -eq 0 ]
+  [ "$output" = "$super/.git/modules/sub/ffs-trusted" ]
+}
+
+@test "--file takes the rest of the arguments as one path" {
+  local sh args
+  make_fixture .
+  echo one > "$FIX/notes v2.sql" && echo one > "$FIX/notes"
+  git -C "$FIX" add -A && git -C "$FIX" -c user.name=t -c user.email=t@t commit -qm notes
+  echo two-spaced > "$FIX/notes v2.sql" && echo two-plain > "$FIX/notes"
+  for sh in bash zsh; do
+    command -v "$sh" >/dev/null || continue
+    for args in '--file notes v2.sql' '--file=notes v2.sql' '--dry-run --file notes v2.sql' '--filename --file notes v2.sql'; do
+      FENCE_SHELL="$sh" run_fence '### Capture diff' "ARGUMENTS='$args'" 'printf "dry=%s\n%s\n" "$DRY_RUN" "$DIFF"'
+      [ "$status" -eq 0 ]
+      [[ "$output" == *"+two-spaced"* ]] || { echo "$sh $args: $output"; false; }
+      [[ "$output" != *"+two-plain"* ]] || { echo "$sh $args: $output"; false; }
+      [[ "$args" != --dry-run* || "$output" == *"dry=1"* ]] || false
+    done
+    FENCE_SHELL="$sh" run_fence '### Capture diff' "ARGUMENTS='--file notes --file notes v2.sql'" 'echo reached'
+    [ "$status" -eq 1 ] || { echo "$sh: $output"; false; }
+    FENCE_SHELL="$sh" run_fence '### Capture diff' "ARGUMENTS='--file notes'" 'printf "%s\n" "$DIFF"'
+    [[ "$output" == *"+two-plain"* ]] || false
+    [[ "$output" != *"+two-spaced"* ]] || false
+  done
+}
+
+@test "--file that selects nothing in git fails the gate" {
+  local sh args
+  make_fixture .
+  echo new > "$FIX/untracked.sql"
+  for sh in bash zsh; do
+    command -v "$sh" >/dev/null || continue
+    for args in '--file' '--file ' '--file=' '--file missing.sql' '--file untracked.sql' '--file src/app.py --all' '--file "src/app.py"'; do
+      FENCE_SHELL="$sh" run_fence '### Capture diff' "ARGUMENTS='$args'" 'echo reached'
+      [ "$status" -eq 1 ] || { echo "$sh $args: $output"; false; }
+      [[ "$output" == *"GATE: FAIL"* ]] || { echo "$sh $args: $output"; false; }
+      [[ "$output" != *reached* ]] || false
+    done
+  done
+}
+
+@test "--file reviews a new, a deleted and an unchanged tracked file" {
+  make_fixture .
+  echo new-line > "$FIX/src/new.py" && git -C "$FIX" add src/new.py
+  FENCE_CWD="$FIX/lib" run_fence '### Capture diff' 'ARGUMENTS="--file ../src/new.py"' 'printf "%s\n" "$DIFF"'
+  [[ "$output" == *"+new-line"* ]] || { echo "$output"; false; }
+  git -C "$FIX" rm -qf lib/gates.py
+  run_fence '### Capture diff' 'ARGUMENTS="--file lib/gates.py"' 'printf "%s\n" "$DIFF"'
+  [[ "$output" == *"deleted file"* ]] || { echo "$output"; false; }
+  run_fence '### Capture diff' 'ARGUMENTS="--file lib/clean_code_metrics.py"' 'echo reached'
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"no diff found"* ]] || false
+}
+
+@test "--file names one exact path, not a pattern" {
+  local sh name
+  make_fixture .
+  for name in '[test].sql' t.sql ':!t.sql' ':x.sql' '*.sql'; do echo one > "$FIX/$name"; done
+  git -C "$FIX" add -A && git -C "$FIX" -c user.name=t -c user.email=t@t commit -qm names
+  for name in '[test].sql' t.sql ':!t.sql' ':x.sql' '*.sql'; do echo "changed $name." > "$FIX/$name"; done
+  for sh in bash zsh; do
+    command -v "$sh" >/dev/null || continue
+    for name in '[test].sql' ':!t.sql' ':x.sql' '*.sql'; do
+      for var in '' 'export GIT_LITERAL_PATHSPECS=1;' 'export GIT_ICASE_PATHSPECS=1;' 'export GIT_GLOB_PATHSPECS=1;' 'export GIT_NOGLOB_PATHSPECS=1;'; do
+        FENCE_SHELL="$sh" run_fence '### Capture diff' "$var ARGUMENTS='--file $name'" 'printf "%s\n" "$DIFF"'
+        [ "$(grep -c '^+changed' <<<"$output")" -eq 1 ] || { echo "$sh $var $name: $output"; false; }
+        [[ "$output" == *"+changed $name."* ]] || { echo "$sh $var $name: $output"; false; }
+      done
+    done
+  done
+  for var in nullglob failglob; do
+    for name in '--file [test].sql' '--file=[test].sql' '--dry-run --file [test].sql'; do
+      FENCE_SHELL=bash run_fence '### Capture diff' "shopt -s $var; ARGUMENTS='$name'" 'printf "%s\n" "$DIFF"'
+      [ "$(grep '^+changed' <<<"$output")" = '+changed [test].sql.' ] || { echo "$var $name: $output"; false; }
+    done
+  done
+  FENCE_SHELL=bash run_fence '### Capture diff' "export GIT_ICASE_PATHSPECS=1; ARGUMENTS='--file T.SQL'" 'echo reached'
+  [ "$status" -eq 1 ] || { echo "$output"; false; }
+  git -C "$FIX" rm -qf --cached '*].sql' && git -C "$FIX" -c user.name=t -c user.email=t@t commit -qm drop
+  run_fence '### Capture diff' "ARGUMENTS='--file [test].sql'" 'echo reached'
+  [ "$status" -eq 1 ]
+}
+
+@test "the --file tier sizes the one path the diff reviews" {
+  local sh wt="$BATS_TEST_TMPDIR/main-wt" name="" var
+  FIX="${FIX%/repo}/a=b/repo"  # env(1) would read a helper path with "=" as an assignment
+  make_fixture .
+  git -C "$FIX" worktree add -q "$wt" main
+  cp "$ROOT/scripts/gsd/review-tier.sh" "$ROOT/scripts/gsd/security-surface.sh" "$wt/scripts/gsd/"
+  git -C "$wt" add -A && git -C "$wt" -c user.name=t -c user.email=t@t commit -qm tip
+  for name in '[test].txt' ':x.sql' '*.txt'; do echo one > "$FIX/$name"; done
+  seq 1 300 > "$FIX/t.txt"
+  git -C "$FIX" add -A
+  for sh in bash zsh; do
+    command -v "$sh" >/dev/null || continue
+    for var in '' 'export GIT_LITERAL_PATHSPECS=1;' 'export GIT_ICASE_PATHSPECS=1;' 'export GIT_GLOB_PATHSPECS=1;' 'export GIT_NOGLOB_PATHSPECS=1;'; do
+      for name in '[test].txt=light' '*.txt=light' ':x.sql=full' 't.txt=standard'; do
+        FENCE_SHELL="$sh" run_fence '### Tier selection (v1.4.0)' "$var DIFF_TARGET=file; FILE_PATH='${name%=*}'" 'echo "tier=$TIER reason=$TIER_REASON"'
+        [[ "$output" == *"tier=${name##*=} reason="* && "$output" != *fail-safe* ]] || { echo "$sh $var $name: $output"; false; }
+      done
+    done
+  done
+}

@@ -6,10 +6,12 @@
 # pass.
 #
 # Usage: review-tier.sh [--staged | --all | --file <path>]
-#   --staged (default)  git diff --staged; if empty, git diff HEAD instead
+#   --staged (default)  git diff --staged; if empty (top-level .planning/ and
+#                       spike-results/ do not count), git diff HEAD instead
 #   --all               git diff <base>...HEAD (three-dot = merge-base);
 #                       base = $REVIEW_TIER_BASE (default: main)
-#   --file <path>       git diff HEAD -- <path>
+#   --file <path>       git diff HEAD -- <path>; a git pathspec, or exactly that
+#                       path when the caller sets GIT_LITERAL_PATHSPECS=1
 #
 # Env:
 #   REVIEW_TIER={light|standard|full}  overrides auto-detection (reason:
@@ -22,7 +24,8 @@
 #         2 on usage error.
 #
 # Fail-safe: any git-metadata failure (unresolvable base, no merge-base
-# with base i.e. orphan history, or a failed --name-only/--numstat call)
+# with base i.e. orphan history, or a failed --name-only/--numstat call),
+# a --file that selects no change, or a missing security-surface.sh
 # -> "standard" + stderr warning, NEVER "light" (under-review beats
 # over-trust). A hostile REVIEW_TIER_BASE (e.g. "--output=/tmp/x") is
 # rejected by `git rev-parse --verify --end-of-options` before it can ever
@@ -30,9 +33,9 @@
 set -uo pipefail
 export LC_ALL=C  # file names are raw bytes
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# no cd here: an exported cd function can print into the path
 # shellcheck disable=SC1091 # dynamic path, resolved at runtime via BASH_SOURCE
-. "$SCRIPT_DIR/security-surface.sh"
+. "$(dirname "${BASH_SOURCE[0]}")/security-surface.sh" || KEYWORDS=""
 
 usage() {
   echo "Usage: review-tier.sh [--staged | --all | --file <path>]" >&2
@@ -64,7 +67,7 @@ while [ $# -gt 0 ]; do
       ;;
     --file)
       shift
-      [ $# -gt 0 ] || usage
+      [ -n "${1:-}" ] || usage
       MODE="file"
       FILE_PATH="$1"
       shift
@@ -82,6 +85,8 @@ case "${REVIEW_TIER:-}" in
     exit 0
     ;;
 esac
+
+[ -n "${KEYWORDS:-}" ] || fail_safe "security-surface.sh not loaded"
 
 # security-surface path check: boundary-aware (path components/tokens, not
 # raw substring) so "docs/authoring.md" does not match "auth" (finding 11).
@@ -104,6 +109,9 @@ is_migration_path() {
 # The same scope options as review-gate's diff. Names come unquoted (-z; a newline
 # in a name becomes a tab), and a rename gives its old and its new name.
 DIFF_OPTS=(--no-relative --ignore-submodules=untracked)
+DIFF_SCOPE=(":(top)" ":(top,exclude).planning/" ":(top,exclude)spike-results/")
+# --file keeps the caller's setting: only the caller knows if its path is literal
+[ "$MODE" = file ] || unset GIT_LITERAL_PATHSPECS GIT_ICASE_PATHSPECS
 diff_names() {
   git diff --name-only -z --no-renames "${DIFF_OPTS[@]}" "$@" 2>/dev/null | tr '\n\0' '\t\n'
 }
@@ -111,13 +119,13 @@ diff_names() {
 DIFF_TARGET=()
 case "$MODE" in
   staged)
-    STAGED_NAMES="$(diff_names --staged)"
+    STAGED_NAMES="$(diff_names --staged -- "${DIFF_SCOPE[@]}")"
     rc=$?
     [ $rc -ne 0 ] && fail_safe "git diff --staged --name-only failed"
     if [ -n "$STAGED_NAMES" ]; then
-      DIFF_TARGET=(--staged)
+      DIFF_TARGET=(--staged -- "${DIFF_SCOPE[@]}")
     else
-      DIFF_TARGET=(HEAD)
+      DIFF_TARGET=(HEAD -- "${DIFF_SCOPE[@]}")
     fi
     ;;
   all)
@@ -130,7 +138,7 @@ case "$MODE" in
     git merge-base "$BASE_OID" HEAD >/dev/null 2>&1
     rc=$?
     [ $rc -ne 0 ] && fail_safe "no merge-base between $BASE and HEAD (orphan history)"
-    DIFF_TARGET=("${BASE_OID}...HEAD")
+    DIFF_TARGET=("${BASE_OID}...HEAD" -- "${DIFF_SCOPE[@]}")
     ;;
   file)
     DIFF_TARGET=(HEAD -- "$FILE_PATH")
@@ -140,6 +148,7 @@ esac
 NAME_ONLY_OUT="$(diff_names "${DIFF_TARGET[@]}")"
 rc=$?
 [ $rc -ne 0 ] && fail_safe "git diff --name-only failed"
+[ "$MODE" = file ] && [ -z "$NAME_ONLY_OUT" ] && fail_safe "no change in $FILE_PATH"
 
 NUMSTAT_OUT="$(GIT_ATTR_SOURCE=4b825dc642cb6eb9a060e54bf8d69288fbee4904 git diff --numstat "${DIFF_OPTS[@]}" "${DIFF_TARGET[@]}" 2>/dev/null)"
 rc=$?
