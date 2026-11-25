@@ -529,7 +529,7 @@ def resolve_root(svc: Services, root_arg: Optional[str]) -> Path:
 
 
 def origin_has_credentials(url: str) -> bool:
-    """True when the URL embeds a secret: any ``https://user[:pass]@`` userinfo, or ``user:pass@`` anywhere.
+    """True when the URL embeds a secret: any userinfo in an ``https`` URL, or a user and password pair anywhere.
 
     ``git@github.com:o/r`` and ``ssh://git@github.com/o/r`` (a user name, no secret) are fine.  Uses
     ``cloud_scan.url_has_userinfo`` when the scanner provides it, ORed with the local test so a scanner
