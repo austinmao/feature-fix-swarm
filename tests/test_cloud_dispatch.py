@@ -1658,7 +1658,98 @@ def test_lifecycle_record_registers_the_resume_argv(world: World) -> None:
 def test_unreadable_grants_store_refuses_rather_than_assuming(world: World) -> None:
     (world.tmp / "gates.json").write_text("{not json")
     with pytest.raises(cd.Refused):
-        cd.gates_check(world.svc, "r1", "cloud-dispatch:claude")
+        cd.gates_check(world.svc, "r1", "cloud-dispatch:claude", world.root)
+
+
+def _other_repo(world: World) -> Path:
+    """A second, unrelated checkout: the working directory an operator might run the dispatcher from."""
+    other = world.tmp / "other"
+    run_git(world.tmp, "init", "-q", "-b", "main", str(other))
+    return other
+
+
+def _grant_in(cwd: Path, run: str, *actions: str) -> None:
+    cmd = [sys.executable, str(LIB / "gates.py"), "grant", run, "--ttl-hours", "24", "--reason", "test"]
+    for action in actions:
+        cmd += ["--action", action]
+    assert subprocess.run(cmd, capture_output=True, cwd=str(cwd), env=dict(os.environ)).returncode == 0
+
+
+def test_gates_check_reads_the_grant_store_of_the_target_root_not_the_working_directory(
+        world: World, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("GATES_STORE")
+    other = _other_repo(world)
+    key = "cloud-dispatch:claude"
+    _grant_in(other, "r1", key)  # a grant recorded in the wrong repository
+    monkeypatch.chdir(other)
+    assert cd.gates_check(world.svc, "r1", key, world.root) is False
+    _grant_in(world.root, "r1", key)
+    assert cd.gates_check(world.svc, "r1", key, world.root) is True  # still running from the other checkout
+
+
+def test_a_relative_gates_store_is_the_target_roots_not_the_working_directorys(
+        world: World, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("GATES_STORE", "rel/gates.json")
+    other = _other_repo(world)
+    _grant_in(world.root, "r1", "cloud-dispatch:claude")
+    assert (world.root / "rel" / "gates.json").exists()
+    monkeypatch.chdir(other)
+    assert cd.gates_check(world.svc, "r1", "cloud-dispatch:claude", world.root) is True
+
+
+def test_start_is_refused_when_the_grant_exists_only_in_another_checkout(
+        world: World, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("GATES_STORE")
+    other = _other_repo(world)
+    _grant_in(other, "r1", "cloud-dispatch:claude", "cloud-dispatch:codex", "push:origin/ffs/cloud/r1")
+    monkeypatch.chdir(other)
+    rc, out = world.start(grant=False)
+    assert rc == 3 and "CLOUD-REFUSED: GRANT_MISSING" in out
+    assert not L.run_ledger_path(world.root, "r1").exists()
+    _grant_in(world.root, "r1", "cloud-dispatch:claude", "cloud-dispatch:codex", "push:origin/ffs/cloud/r1")
+    assert world.start(grant=False)[0] == 0
+
+
+def test_cleanup_remote_uses_the_target_roots_grant_not_the_working_directorys(
+        world: World, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("GATES_STORE")
+    monkeypatch.chdir(world.root)
+    assert world.start()[0] == 0
+    world.drive()
+    other = _other_repo(world)
+    monkeypatch.chdir(other)
+    rc, out = world.cli("cleanup", "--run", "r1", "--remote", "--discard-unmerged", "--root", str(world.root))
+    assert rc == 0 and "remote-branches-deleted=2" in out
+
+
+def test_cleanup_remote_is_refused_when_only_the_working_directorys_checkout_holds_the_push_grant(
+        world: World, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The reported exploit: a push grant in checkout A must not authorize deleting task branches of checkout B."""
+    monkeypatch.delenv("GATES_STORE")
+    monkeypatch.chdir(world.root)
+    assert world.start()[0] == 0
+    world.drive()
+    push_key = "push:origin/ffs/cloud/r1"
+    store = world.root / ".feature-fix-swarm" / "evidence.json"
+    data = json.loads(store.read_text())
+    del data["_autonomy"]["r1"]["grants"][push_key]  # the target repository has no push grant any more
+    store.write_text(json.dumps(data))
+    other = _other_repo(world)
+    _grant_in(other, "r1", push_key)  # while the checkout the operator stands in does
+    monkeypatch.chdir(other)
+    before = run_git(world.origin, "for-each-ref", "refs/heads/ffs/cloud/r1/")
+    rc, out = world.cli("cleanup", "--run", "r1", "--remote", "--discard-unmerged", "--root", str(world.root))
+    assert rc == 3 and "CLOUD-REFUSED: GRANT_MISSING" in out, out
+    assert before and run_git(world.origin, "for-each-ref", "refs/heads/ffs/cloud/r1/") == before
+
+
+def test_the_orchestrators_grant_check_runs_in_its_own_root(world: World, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("GATES_STORE")
+    other = _other_repo(world)
+    _grant_in(world.root, "r1", "push:origin/ffs/cloud/r1")
+    monkeypatch.chdir(other)
+    assert world.orchestrator().grant_ok("push:origin/ffs/cloud/r1") is True
+    assert world.orchestrator().grant_ok("cloud-dispatch:claude") is False
 
 
 def test_host_pressure_high_is_reported(world: World) -> None:
@@ -2047,6 +2138,86 @@ def test_cleanup_remote_keeps_a_task_branch_a_second_clone_created_between_the_c
     assert run_git(world.origin, "rev-parse", remote_ref) == world.base
 
 
+def _two_clones_with_a_remote_ancestor(world: World) -> Tuple[str, str]:
+    """``(ancestor, descendant)``: the ref exists on origin at ``ancestor``; the root's base is its descendant."""
+    ref = L.task_branch_ref("r1", "t1", 1)
+    ancestor = world.base
+    run_git(world.root, "push", "-q", "origin", ancestor + ":" + ref)  # the first clone's run reached admission
+    (world.root / "src" / "a" / "more.txt").write_text("more\n")
+    run_git(world.root, "add", "src/a/more.txt")
+    run_git(world.root, "commit", "-q", "-m", "second clone's base")
+    run_git(world.root, "push", "-q", "origin", "main")
+    return ancestor, run_git(world.root, "rev-parse", "HEAD")
+
+
+def test_admission_never_moves_a_remote_task_branch_that_exists_at_an_ancestor_of_its_base(world: World) -> None:
+    """Two clones reuse a run and task id.  The first clone's branch is an ancestor of the second clone's base, which
+    a plain push would fast-forward.  The push must leave it alone and the task must need an operator."""
+    ref = L.task_branch_ref("r1", "t1", 1)
+    ancestor, descendant = _two_clones_with_a_remote_ancestor(world)
+    assert world.start(tasks=[T1])[0] == 0
+    world.drive()
+    assert run_git(world.origin, "rev-parse", ref) == ancestor  # not moved to the descendant
+    entry = world.doc()["tasks"]["t1"]
+    assert (entry["state"], entry["blocker"]) == ("needs-operator", L.B_BRANCH_CONFLICT), entry
+    assert world.count("claude") == 0 and descendant != ancestor
+
+
+def test_a_push_that_loses_the_race_to_another_clone_at_a_different_oid_moves_nothing(world: World) -> None:
+    """The branch is absent at the pre-check and another clone creates it at an ancestor before the push."""
+    ref = L.task_branch_ref("r1", "t1", 1)
+    ancestor = world.base
+    (world.root / "src" / "a" / "more.txt").write_text("more\n")
+    run_git(world.root, "add", "src/a/more.txt")
+    run_git(world.root, "commit", "-q", "-m", "descendant base")
+    run_git(world.root, "push", "-q", "origin", "main")
+    real_run, raced = world.svc.run, []
+
+    def racing(argv: Any, **kwargs: Any) -> Any:
+        if "push" in argv and "--porcelain" in argv and not raced:
+            raced.append(True)
+            run_git(world.root, "push", "-q", "origin", ancestor + ":" + ref)
+        return real_run(argv, **kwargs)
+
+    world.svc.run = racing  # type: ignore[assignment]
+    rc, out = world.start(tasks=[T1])
+    assert rc == 0, out
+    world.drive()
+    assert raced and run_git(world.origin, "rev-parse", ref) == ancestor
+
+
+def test_the_admit_push_lease_expects_the_ref_to_be_absent_with_real_git(tmp_path: Path) -> None:
+    """Real git, two clones of one origin: the argv the dispatcher builds creates a missing ref and refuses to move an
+    existing one that is an ancestor of the other clone's base (a plain push would fast-forward it)."""
+    origin, one, two = tmp_path / "origin.git", tmp_path / "one", tmp_path / "two"
+    run_git(tmp_path, "init", "-q", "--bare", "-b", "main", str(origin))
+    run_git(tmp_path, "init", "-q", "-b", "main", str(one))
+    run_git(one, "commit", "-q", "--allow-empty", "-m", "first")
+    first = run_git(one, "rev-parse", "HEAD")
+    url, ref = "file://" + str(origin), "refs/heads/ffs/cloud/r1/t1-g1"
+    run_git(one, "push", "-q", url, "main")
+    run_git(tmp_path, "clone", "-q", url, str(two))
+    run_git(two, "commit", "-q", "--allow-empty", "-m", "second")
+    second = run_git(two, "rev-parse", "HEAD")
+    assert first != second and run_git(two, "merge-base", "--is-ancestor", first, second) == ""
+
+    def push(clone: Path, oid: str) -> subprocess.CompletedProcess:
+        argv = cd.admit_push_argv(clone, url, oid, ref)
+        return subprocess.run(argv, capture_output=True, text=True, env=dict(os.environ, **GIT_ENV))
+
+    created = push(one, first)
+    assert created.returncode == 0 and cd.pushed_new_ref(created.stdout, ref), created
+    moved = push(two, second)  # `first` is an ancestor of `second`: a plain push would fast-forward
+    assert moved.returncode != 0 and run_git(origin, "rev-parse", ref) == first
+    again = push(one, first)  # the same OID is "up to date": nothing moves and no new ref is reported
+    assert again.returncode == 0 and not cd.pushed_new_ref(again.stdout, ref) and run_git(origin, "rev-parse", ref) == first
+    assert not any(token.startswith("+") for token in cd.admit_push_argv(one, url, first, ref))
+    control = "refs/heads/ffs/cloud/r1/control-g1"  # the same situation under a plain push does move the ref
+    run_git(one, "push", "-q", url, first + ":" + control)
+    run_git(two, "push", "-q", url, second + ":" + control)
+    assert run_git(origin, "rev-parse", control) == second
+
+
 def test_pushed_new_ref_needs_the_new_ref_flag_for_that_destination() -> None:
     ref = "refs/heads/ffs/cloud/r1/t1-g1"
     assert cd.pushed_new_ref("*\tabc:%s\t[new branch]\nDone\n" % ref, ref)
@@ -2134,10 +2305,11 @@ def plan_out(world: World, tasks: List[Dict[str, Any]], capsys: pytest.CaptureFi
 
 
 @pytest.mark.parametrize("tasks, code", [
-    ([task(LEAKY_ID, "src/a/**"), task(LEAKY_ID, "src/b/**")], "TASK_ID_DUPLICATE"),
+    ([task(LEAKY_ID, "src/a/**"), task(LEAKY_ID, "src/b/**")], "SECRET_IN_PROMPT"),  # not TASK_ID_DUPLICATE: see below
+    (["do a [id: %s]" % LEAKY_ID, "do b [id: %s]" % LEAKY_ID], "SECRET_IN_PROMPT"),
     ([task("t1", "src/a/**", depends_on=[LEAKY_ID])], "DEP_UNKNOWN"),
     ([task(LEAKY_ID, "src/a/**", depends_on=["nope"])], "SECRET_IN_PROMPT"),  # the id scan refuses before the router reads depends_on
-    ([task(CANARY_KEY, "src/a/**")], "TASK_ID_INVALID"),
+    ([task(CANARY_KEY, "src/a/**")], "SECRET_IN_PROMPT"),  # an invalid id the scanner flags is refused as one, not TASK_ID_INVALID
 ])
 def test_route_errors_never_echo_an_id_the_secret_scanner_flags(
         world: World, capsys: pytest.CaptureFixture, tasks: List[Dict[str, Any]], code: str) -> None:
@@ -2150,6 +2322,48 @@ def test_route_errors_never_echo_an_id_the_secret_scanner_flags(
     assert rc != 0 and "secret scanner" in out, out  # start's own id scan may refuse first (SECRET_IN_PROMPT)
     assert LEAKY_ID not in out and CANARY_KEY not in out, out
     assert not L.run_ledger_path(world.root, "r1").exists()
+
+
+def test_a_scanner_positive_duplicate_id_is_a_terminal_refusal_from_plan_and_start(
+        world: World, capsys: pytest.CaptureFixture) -> None:
+    """A retry that keeps a running task and adds two entries with one flagged id must end in SECRET_IN_PROMPT (which
+    /swarm treats as terminal), never in a duplicate-id refusal that sends every task to the local path."""
+    assert world.start(tasks=[T1])[0] == 0
+    tasks = [T1, task(LEAKY_ID, "src/a/**"), task(LEAKY_ID, "src/b/**")]
+    rc, out = plan_out(world, tasks, capsys)
+    assert rc == 3 and "CLOUD-REFUSED: SECRET_IN_PROMPT" in out and "TASK_ID_DUPLICATE" not in out, out
+    for run in ("r1", "r2"):  # an existing run says RUN_EXISTS (also never local); a new one is the secret refusal
+        rc, out = world.cli("start", "--run", run, "--tasks", world.tasks_file(tasks), "--policy", "auto", "--root", str(world.root))
+        expected = "RUN_EXISTS" if run == "r1" else "SECRET_IN_PROMPT"
+        assert rc == 3 and "CLOUD-REFUSED: " + expected in out and "TASK_ID_DUPLICATE" not in out, out
+        assert LEAKY_ID not in out
+
+
+def test_a_benign_duplicate_id_is_still_a_duplicate_refusal(world: World, capsys: pytest.CaptureFixture) -> None:
+    rc, out = plan_out(world, [task("t1", "src/a/**"), task("t1", "src/b/**")], capsys)
+    assert rc == 3 and "CLOUD-REFUSED: TASK_ID_DUPLICATE" in out, out
+
+
+PASSPHRASE = "Zq7! synthetic pass phrase"  # not a name and not scanner-shaped: it must still never be echoed
+
+
+def test_a_pasted_needs_secret_value_is_never_echoed_by_plan_or_start(world: World, capsys: pytest.CaptureFixture) -> None:
+    tasks = [task("t1", "src/a/**", needs_secrets=[PASSPHRASE])]
+    rc, out = plan_out(world, tasks, capsys)
+    assert rc != 0 and "TASK_INVALID" in out and "t1" in out and "entry 1" in out, out
+    assert PASSPHRASE not in out and "pass phrase" not in out, out
+    capsys.readouterr()
+    rc, out = world.cli("start", "--run", "r1", "--tasks", world.tasks_file(tasks), "--policy", "auto", "--root", str(world.root))
+    out += capsys.readouterr().err
+    assert rc != 0 and "TASK_INVALID" in out, out
+    assert PASSPHRASE not in out and "pass phrase" not in out, out
+    assert not L.run_ledger_path(world.root, "r1").exists()
+
+
+def test_the_doctor_line_for_an_undeclared_needs_secret_never_echoes_it(world: World) -> None:
+    checks = cd.doctor_checks(world.svc, world.root, tasks=[task("t1", "src/a/**", needs_secrets=["NOT_DECLARED_NAME"])])
+    text = " ".join(c.detail for c in checks)
+    assert "NOT_DECLARED_NAME" not in text
 
 
 def test_route_errors_for_clean_ids_are_unchanged(world: World, capsys: pytest.CaptureFixture) -> None:
@@ -2758,3 +2972,55 @@ def test_undeclared_secret_entries_are_located_never_echoed() -> None:
     assert check.level == cd.FAIL and pasted not in check.detail and "OTHER" not in check.detail, check.detail
     assert "2 needs-secret entries" in check.detail and "task 2 entry 2" in check.detail and "task 2 entry 3" in check.detail
     assert cd._secret_declared_check(config, tasks[:1]).level == cd.OK
+
+
+def test_an_explicit_empty_root_is_refused_never_read_as_the_working_directory(
+        world: World, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture) -> None:
+    """`--root "$(git rev-parse --show-toplevel)"` is empty outside a repository; that must not become the cwd."""
+    monkeypatch.chdir(world.root)
+    tasks = world.tasks_file([T1])
+    world.grant("r1", "cloud-dispatch:claude", "push:origin/ffs/cloud/r1")
+    for argv in (["plan", "--tasks", tasks, "--policy", "auto", "--root", ""],
+                 ["start", "--run", "r1", "--tasks", tasks, "--policy", "auto", "--root", ""],
+                 ["status", "--run", "r1", "--root", ""]):
+        capsys.readouterr()
+        rc, _ = world.cli(*argv)
+        assert rc == 2 and "BAD_ROOT" in capsys.readouterr().err, argv
+    assert not L.run_ledger_path(world.root, "r1").exists()
+
+
+def test_plan_and_start_from_a_linked_worktree_are_refused_and_create_nothing(
+        world: World, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture) -> None:
+    """The main worktree sits on another pushed branch; the operator works in a linked worktree.  The dispatcher must
+    never take the main worktree's HEAD as the base of work the operator started elsewhere."""
+    run_git(world.root, "checkout", "-q", "-b", "parked")
+    (world.root / "parked.txt").write_text("parked\n")
+    run_git(world.root, "add", "parked.txt")
+    run_git(world.root, "commit", "-q", "-m", "parked")
+    run_git(world.root, "push", "-q", "origin", "parked")
+    parked = run_git(world.root, "rev-parse", "HEAD")
+    linked = world.tmp / "linked"
+    run_git(world.root, "worktree", "add", "-q", "-b", "feature", str(linked), world.base)
+    linked_top = Path(os.path.realpath(str(linked)))  # what `git rev-parse --show-toplevel` prints there
+    monkeypatch.chdir(linked)
+    heads_before = run_git(world.root, "for-each-ref", "refs/heads", "refs/remotes")
+    origin_before = run_git(world.root, "ls-remote", "file://" + str(world.origin))
+    objects_before = run_git(world.root, "rev-list", "--all", "--count")
+    world.grant("r1", "cloud-dispatch:claude", "cloud-dispatch:codex", "push:origin/ffs/cloud/r1")
+    tasks = world.tasks_file([T1, T2])
+    for argv in (["plan", "--run", "r1", "--tasks", tasks, "--policy", "auto", "--root", str(linked_top)],
+                 ["start", "--run", "r1", "--tasks", tasks, "--policy", "auto", "--root", str(linked_top)]):
+        capsys.readouterr()
+        rc, out = world.cli(*argv)
+        assert rc == 3 and "CLOUD-REFUSED: NOT_MAIN_WORKTREE" in out, (argv, rc, out)
+    assert not L.run_ledger_path(world.root, "r1").exists() and not L.run_ledger_path(linked_top, "r1").exists()
+    assert world.spawned == []
+    assert run_git(world.root, "for-each-ref", "refs/heads", "refs/remotes") == heads_before  # no ref, no base commit
+    assert run_git(world.root, "ls-remote", "file://" + str(world.origin)) == origin_before
+    assert run_git(world.root, "rev-list", "--all", "--count") == objects_before
+    assert run_git(world.root, "rev-parse", "parked") == parked
+    # what the skill then does: the status of the main worktree proves there is no run, so `auto` goes local
+    capsys.readouterr()
+    rc, _ = world.cli("status", "--run", "r1", "--root", str(world.root))
+    assert rc == 78 and capsys.readouterr().err.startswith("CLOUD-ERROR: LEDGER_MISSING ")
+

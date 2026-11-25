@@ -482,6 +482,14 @@ def pushed_new_ref(porcelain: str, ref: str) -> bool:
     return False
 
 
+def admit_push_argv(root: Path, url: str, oid: str, ref: str) -> List[str]:
+    """The admit push.  ``--force-with-lease=<ref>:`` (an empty expectation) says the remote ref must be ABSENT, and
+    there is no ``+``: a task branch that already exists is never moved, not even by a fast-forward, whoever made it.
+    A ref that exists at the wanted OID is accepted by the caller before it gets here, not by pushing over it."""
+    return ["git", "-C", str(root), "push", "--porcelain", "--no-force", "--no-verify", "--no-follow-tags",
+            "--recurse-submodules=no", "--force-with-lease=%s:" % ref, url, "%s:%s" % (oid, ref)]
+
+
 def ls_remote(svc: Services, url: str, pattern: str) -> Tuple[bool, Dict[str, str]]:
     """``(ok, {ref: oid})`` for refs matching ``pattern`` on the pinned URL."""
     result = svc.run(["git", "ls-remote", url, pattern], timeout=GIT_TIMEOUT_S, env=remote_env())
@@ -496,8 +504,9 @@ def ls_remote(svc: Services, url: str, pattern: str) -> Tuple[bool, Dict[str, st
 
 
 def resolve_root(svc: Services, root_arg: Optional[str]) -> Path:
-    """The main worktree: ``--root`` (absolute) or the one containing the cwd."""
-    if root_arg:
+    """The main worktree: ``--root`` (absolute) or, when it is not given at all, the one containing the cwd.  An
+    explicit empty ``--root`` (an empty command substitution) is refused, never read as the cwd."""
+    if root_arg is not None:
         candidate = Path(root_arg)
         if not candidate.is_absolute():
             raise UsageError("BAD_ROOT", "--root must be an absolute path")
@@ -619,10 +628,14 @@ def codex_env_id(config: Dict[str, Any]) -> Optional[str]:
     return value or None
 
 
-def gates_check(svc: Services, run: str, action: str) -> bool:
-    """``gates.py check-grant``: exit 0 granted, 1 not, anything else is a store error (refuse)."""
+def gates_check(svc: Services, run: str, action: str, root: Path) -> bool:
+    """``gates.py check-grant``: exit 0 granted, 1 not, anything else is a store error (refuse).
+
+    It runs in ``root`` (the repository the run belongs to), so the default evidence store and a relative
+    ``GATES_STORE`` are that repository's, never the caller's working directory's.  An absolute ``GATES_STORE``
+    is unaffected."""
     result = svc.run([sys.executable or "python3", str(LIB_DIR / "gates.py"), "check-grant", run, "--action", action],
-                     timeout=GATES_TIMEOUT_S)
+                     cwd=root, timeout=GATES_TIMEOUT_S)
     if result.rc == 0:
         return True
     if result.rc == 1:
@@ -630,8 +643,8 @@ def gates_check(svc: Services, run: str, action: str) -> bool:
     raise Refused("GRANT_STORE_ERROR", "gates.py check-grant exited %d" % result.rc)
 
 
-def granted_set(svc: Services, run: str, keys: Iterable[str]) -> List[str]:
-    return sorted(key for key in set(keys) if gates_check(svc, run, key))
+def granted_set(svc: Services, run: str, keys: Iterable[str], root: Path) -> List[str]:
+    return sorted(key for key in set(keys) if gates_check(svc, run, key, root))
 
 
 def push_ref_valid(run: str, ref: str) -> bool:
@@ -1106,7 +1119,17 @@ def route(svc: Services, root: Path, tasks: List[Dict[str, Any]], *, policy: str
         raise route_error(exc)
 
 
+def _scan_raw_task_ids(raw: Sequence[Any]) -> None:
+    """Refuse a scanner-positive id as written, before normalization: its own errors (a duplicate or invalid id) quote
+    the id and would otherwise end as an ordinary refusal that /swarm answers by running every task locally."""
+    for value in delegation_router.raw_task_ids(raw):
+        found = scan_text(value, "task-id")
+        if found:  # name the class, never the id
+            raise Refused("SECRET_IN_PROMPT", "a task id matched the secret scanner: %s" % ", ".join(found))
+
+
 def normalize(raw: List[Any], sequential: bool) -> List[Dict[str, Any]]:
+    _scan_raw_task_ids(raw)
     try:
         return delegation_router.normalize_tasks(raw, sequential=sequential)
     except delegation_router.RouteError as exc:
@@ -1133,7 +1156,7 @@ def cmd_plan(svc: Services, args: argparse.Namespace) -> int:
     if args.run is not None:
         required = plan["preconditions"]["grants_missing"]
         try:
-            granted: List[str] = granted_set(svc, args.run, required)
+            granted: List[str] = granted_set(svc, args.run, required, root)
         except Refused:  # an unreadable grants store counts as "nothing granted" for a read-only plan
             granted = []
         plan = route(svc, root, tasks, policy=args.policy, run=args.run, config=config, doctor=doctor,
@@ -1204,11 +1227,11 @@ def scan_text(text: str, label: str) -> List[str]:
         return ["scan-refused:%s" % exc.reason]
 
 
-def check_start_grants(svc: Services, run: str, plan: Dict[str, Any]) -> List[str]:
+def check_start_grants(svc: Services, run: str, plan: Dict[str, Any], root: Path) -> List[str]:
     missing = list(plan["preconditions"]["grants_missing"])
     if not missing:
         return []
-    return [key for key in missing if key not in set(granted_set(svc, run, missing))]
+    return [key for key in missing if key not in set(granted_set(svc, run, missing, root))]
 
 
 def refuse_start_grants(missing: List[str]) -> None:
@@ -1276,7 +1299,7 @@ def cmd_start(svc: Services, args: argparse.Namespace) -> int:
         raise Refused("DOCTOR_NOT_GREEN", failing(checks))
     plan = route(svc, root, tasks, policy=args.policy, run=run, config=config, doctor="green",
                  refusals=[], grants=None)
-    missing = check_start_grants(svc, run, plan)
+    missing = check_start_grants(svc, run, plan, root)
     if missing:
         refuse_start_grants(missing)
     records = cloud_records(plan, tasks)
@@ -1893,7 +1916,7 @@ def cmd_resolve(svc: Services, args: argparse.Namespace) -> int:
             raise Refused("DEPENDENCY_REPORT_INVALID", "the report names no package and is not marked unattributed")
         if report["digest"] != entry.get("deps_digest"):
             raise Refused("STALE_APPROVAL", "the stored dependency report is not the one recorded for this result")
-        missing = [key for key in required if not gates_check(svc, run, key)]
+        missing = [key for key in required if not gates_check(svc, run, key, root)]
         if missing:
             raise Refused("GRANT_MISSING", "missing grants: %s" % ", ".join(missing))
         snapshot = (entry["generation"], entry.get("bound_oid"), report["digest"])
@@ -2017,7 +2040,7 @@ def _delete_remote_branches(svc: Services, root: Path, run: str, url: str,
     delete is leased to that OID, so a branch that moved is kept and reported.  A branch with no recorded OID is
     kept too.  The integration ref is published locally, never to the remote, so a remote one is somebody else's."""
     owned = owned or {}
-    if not gates_check(svc, run, "push:origin/ffs/cloud/%s" % run):
+    if not gates_check(svc, run, "push:origin/ffs/cloud/%s" % run, root):
         raise Refused("GRANT_MISSING", "missing grants: push:origin/ffs/cloud/%s" % run)
     ok, refs = ls_remote(svc, url, "refs/heads/ffs/cloud/%s/*" % run)
     if not ok:
@@ -3097,15 +3120,20 @@ class Orchestrator:
             return
         seen, seen_refs = ls_remote(self.svc, doc["origin_url"], ref)
         absent_before = seen and ref not in seen_refs
-        pushed = self.svc.run(["git", "-C", str(self.root), "push", "--porcelain", "--no-force", "--no-verify",
-                               "--no-follow-tags", "--recurse-submodules=no", doc["origin_url"],
-                               "%s:%s" % (base_oid, ref)], timeout=GIT_PUSH_TIMEOUT_S, env=remote_env())
-        if not pushed.ok:
-            self.push_failed(name, gen, ref, pushed.rc, seq)
-            return
-        # Ownership needs the push itself to report a NEW ref for this destination: another clone with the same origin,
-        # run, task and base may have created it between the pre-check and this push, which then says "up to date" (=).
-        created["remote"] = absent_before and pushed_new_ref(pushed.text(), ref)
+        if seen and not absent_before:
+            if seen_refs[ref] != base_oid:  # another clone's branch (or an earlier base): never moved, not even forward
+                self.to_operator(name, gen, ledger.B_BRANCH_CONFLICT, ["remote task branch %s exists at another OID" % ref], seq)
+                return
+            # already at the wanted OID (a retry, or another clone with this base): accepted as it is, no push and no
+            # creation credit, so cleanup keeps it
+        else:
+            pushed = self.svc.run(admit_push_argv(self.root, doc["origin_url"], base_oid, ref),
+                                  timeout=GIT_PUSH_TIMEOUT_S, env=remote_env())
+            if not pushed.ok:  # includes a lease refusal: the ref appeared since the check, and the retry classifies it
+                self.push_failed(name, gen, ref, pushed.rc, seq)
+                return
+            # Ownership needs the push itself to report a NEW ref for this destination.
+            created["remote"] = absent_before and pushed_new_ref(pushed.text(), ref)
         self.svc.fault("after-admit-push")
         ok, refs = ls_remote(self.svc, doc["origin_url"], ref)
         if not ok or refs.get(ref) != base_oid:
@@ -3148,7 +3176,7 @@ class Orchestrator:
 
     def grant_ok(self, key: str) -> bool:
         try:
-            return gates_check(self.svc, self.run_id, key)
+            return gates_check(self.svc, self.run_id, key, self.root)
         except Refused as exc:
             self.log("grant check %s: %s" % (key, exc.code))
             return False

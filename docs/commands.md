@@ -193,7 +193,7 @@ Completion authority is gates.py, never gsd self-report: `workflow.test_command`
 `scripts/gsd/gates-test-command.sh` (run-gate + strict verify-done + plan-wall
 completion backstop — a phase can start unwalled but cannot COMPLETE without a
 passing wall record),
-`workflow.code_review_command` = `scripts/gsd/review-gate-command.sh` (grant wall + codex),
+`workflow.code_review_command` = `scripts/gsd/review-gate-command.sh` (grant check + cross-model review; advisory, gsd runs it after the PR exists),
 and the `gsd-phase-evidence-gate.sh` PreToolUse hook blocks ROADMAP/STATE phase flips
 without evidence.
 

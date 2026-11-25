@@ -95,15 +95,26 @@ CLOUD_REVIEW_CLOSURE: tuple[str, ...] = (
     "scripts/gsd/adversary-host.sh",
     "scripts/gsd/run-bounded.sh",
     "scripts/gsd/fence-data.sh",
-    "lib/gates.py",
-    "lib/model_requests.py",
 )
+# adversary-host.sh also loads these two modules from two directories above itself. Which
+# directory holds them depends on the layout: ``lib/`` in a consumer checkout, the lib root
+# itself (flat) in the managed user-scope install. One copy of each is enough.
+CLOUD_REVIEW_MODULES: tuple[str, ...] = ("gates.py", "model_requests.py")
+CLOUD_REVIEW_MODULE_DIRS: tuple[str, ...] = ("lib", "")
 
 
 def cloud_review_available(lib_root: Path | str) -> bool:
-    """True when every file of ``CLOUD_REVIEW_CLOSURE`` is a regular file under ``lib_root``."""
+    """True when ``lib_root`` holds the whole closure of cloud-review.sh.
+
+    Every file of ``CLOUD_REVIEW_CLOSURE`` must be a regular file, and each of
+    ``CLOUD_REVIEW_MODULES`` must be a regular file in the consumer layout (``lib/``) or the
+    managed flat layout (the root), the two places adversary-host.sh looks.
+    """
     root = Path(lib_root)
-    return all((root / relative).is_file() for relative in CLOUD_REVIEW_CLOSURE)
+    return all((root / relative).is_file() for relative in CLOUD_REVIEW_CLOSURE) and all(
+        any((root / directory / module).is_file() for directory in CLOUD_REVIEW_MODULE_DIRS)
+        for module in CLOUD_REVIEW_MODULES
+    )
 
 
 MANAGED_LIB_FILES: tuple[tuple[str, str], ...] = (
@@ -180,6 +191,12 @@ MANAGED_LIB_FILES: tuple[tuple[str, str], ...] = (
     # socratic-slice.sh hard-sources this sibling at startup; without it the
     # staged copy is dead on arrival
     ("scripts/gsd/fence-data.sh", "scripts/gsd/fence-data.sh"),
+    # review-gate's fallback runtime when the base ref has no FFS runtime;
+    # adversary-host.sh sources run-bounded.sh, review-tier.sh sources security-surface.sh.
+    ("scripts/gsd/adversary-host.sh", "scripts/gsd/adversary-host.sh"),
+    ("scripts/gsd/run-bounded.sh", "scripts/gsd/run-bounded.sh"),
+    ("scripts/gsd/review-tier.sh", "scripts/gsd/review-tier.sh"),
+    ("scripts/gsd/security-surface.sh", "scripts/gsd/security-surface.sh"),
     # PreToolUse Bash guard registered in ~/.claude/settings.json (headless Claude
     # stages lib/feature-fix-swarm wholesale, so the staged hook finds its copy).
     ("scripts/hooks/operator-only-guard.sh", "operator-only-guard.sh"),
@@ -197,15 +214,11 @@ MANAGED_LIB_FILES: tuple[tuple[str, str], ...] = (
     ("lib/handoff_packet.py", "handoff_packet.py"),
     ("scripts/gsd/cloud-dispatch.sh", "scripts/gsd/cloud-dispatch.sh"),
     ("scripts/gsd/cloud-review.sh", "scripts/gsd/cloud-review.sh"),
-    # Closure of cloud-review.sh in the user-scope layout (CLOUD_REVIEW_CLOSURE):
-    # it sources adversary-host.sh (which sources run-bounded.sh) and fence-data.sh from
-    # its own directory, and adversary-host.sh resolves <script dir>/../../lib/gates.py and
-    # <script dir>/../../lib/model_requests.py, i.e. <managed root>/lib/*. The managed root
-    # keeps those two modules flat for everything else, so they ship a second time under lib/.
-    ("scripts/gsd/adversary-host.sh", "scripts/gsd/adversary-host.sh"),
-    ("scripts/gsd/run-bounded.sh", "scripts/gsd/run-bounded.sh"),
-    ("lib/gates.py", "lib/gates.py"),
-    ("lib/model_requests.py", "lib/model_requests.py"),
+    # Closure of cloud-review.sh in the user-scope layout (CLOUD_REVIEW_CLOSURE): it sources
+    # adversary-host.sh (which sources run-bounded.sh) and fence-data.sh from its own directory.
+    # Those three scripts and the flat gates.py / model_requests.py (adversary-host.sh's last
+    # lookup candidate, <script dir>/../../gates.py) are already listed above; there is
+    # deliberately no second copy under lib/.
     # `env init` copies these from <cloud_dispatch.py dir>/cloud-templates/.
     *CLOUD_TEMPLATE_FILES,
 )

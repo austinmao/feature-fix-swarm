@@ -383,7 +383,7 @@ def _bracket_spans(line: str) -> List[Tuple[int, int, str]]:
 def _parse_est(value: str) -> int:
     match = _EST_RE.match(value)
     if not match or not (match.group(1) or match.group(2)):
-        raise RouteError(ANNOTATION_INVALID, "est must look like 45m, 2h, 1h30m or 90: %r" % value)
+        raise RouteError(ANNOTATION_INVALID, "est must look like 45m, 2h, 1h30m or 90 (value withheld)")
     hours = int(match.group(1) or 0)
     minutes = int(match.group(2) or 0)
     return hours * MINUTES_PER_HOUR + minutes
@@ -491,6 +491,10 @@ def _raw_fields(raw: object) -> Dict[str, Any]:
 def _resolve_tier(fields: Mapping[str, Any]) -> Tuple[str, Dict[str, Any]]:
     request = fields.get("model_request")
     tier = fields.get("tier")
+    if tier is not None and not isinstance(tier, str):
+        raise RouteError(TASK_INVALID, "tier must be a string")
+    if isinstance(request, Mapping) and request.get("kind") == "tier" and not isinstance(request.get("name"), str):
+        raise RouteError(TASK_INVALID, "model_request name must be a string")
     if request is None:
         tier = tier or DEFAULT_TIER
         request = {"kind": "tier", "name": tier}
@@ -500,17 +504,20 @@ def _resolve_tier(fields: Mapping[str, Any]) -> Tuple[str, Dict[str, Any]]:
         raise RouteError(TASK_INVALID, "model_request: %s" % exc) from exc
     requested = request["name"] if request.get("kind") == "tier" else None
     if requested and tier and tier != requested:
-        raise RouteError(TASK_INVALID, "tier %r conflicts with model_request %r" % (tier, requested))
+        raise RouteError(TASK_INVALID, "tier conflicts with model_request (values withheld)")
     tier = tier or requested or DEFAULT_TIER
     if tier not in model_requests.TIERS:
-        raise RouteError(TASK_INVALID, "unknown tier %r" % (tier,))
+        raise RouteError(TASK_INVALID, "unknown tier (value withheld)")
     return str(tier), dict(request)
 
 
-def _check_secret_names(names: List[str]) -> None:
-    for name in names:
+def _check_secret_names(task_id: str, names: List[str]) -> None:
+    """A ``needs-secret`` entry is free text, and a pasted value can sit where a name belongs: the error says where
+    (task id, entry position) and never what."""
+    for position, name in enumerate(names, 1):
         if not SECRET_NAME_RE.match(name):
-            raise RouteError(TASK_INVALID, "invalid secret name %r" % name)
+            raise RouteError(TASK_INVALID, "task %s needs-secret entry %d is not a valid secret name (value withheld)"
+                             % (task_id, position))
 
 
 def _owns_fields(fields: Mapping[str, Any]) -> Tuple[List[str], str]:
@@ -547,7 +554,7 @@ def _normalize_one(raw: object, position: int) -> Dict[str, Any]:
     tier, request = _resolve_tier(fields)
     owns, owns_source = _owns_fields(fields)
     needs = _string_list(fields.get("needs_secrets"), "needs_secrets")
-    _check_secret_names(needs)
+    _check_secret_names(task_id, needs)
     kind = fields.get("kind") or "build"
     if kind not in TASK_KINDS:
         raise RouteError(TASK_INVALID, "kind must be one of %s" % ", ".join(TASK_KINDS))
@@ -568,6 +575,23 @@ def _normalize_one(raw: object, position: int) -> Dict[str, Any]:
         # Whitespace-only is blank, never a command: it must not satisfy the verify requirement.
         "verify_cmd": _text_field(fields, "verify_cmd").strip(),
     }
+
+
+def raw_task_ids(raw: Sequence[Any]) -> List[str]:
+    """The ids as the caller wrote them (``id`` field or ``[id: x]`` annotation), before any validation.
+
+    Normalization errors (``TASK_ID_INVALID``, ``TASK_ID_DUPLICATE``) quote an id, so a caller that must keep a
+    flagged id out of every error scans these first.  An item that cannot be read contributes nothing: normalization
+    reports it on its own."""
+    ids: List[str] = []
+    for item in raw:
+        try:
+            value = _raw_fields(item).get("id")
+        except RouteError:
+            continue
+        if isinstance(value, str) and value:
+            ids.append(value)
+    return ids
 
 
 def normalize_tasks(raw: Sequence[Any], *, sequential: bool) -> List[Dict[str, Any]]:

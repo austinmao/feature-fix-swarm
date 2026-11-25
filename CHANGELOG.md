@@ -8,6 +8,152 @@ all skills.
 
 ## Unreleased
 
+### Fixed (2026-11-25, cloud delegation: close-out round)
+
+- `/swarm` skill 2.2.12: every cloud command is complete in itself (no `ROOT` shell variable
+  carried between commands). `plan` (now with `--run`) and `start` take
+  `--root "$(git rev-parse --show-toplevel)"`, so a linked worktree is refused as
+  `NOT_MAIN_WORKTREE` again and no work is started on the main worktree's branch; every
+  `status` call takes the main worktree (`git worktree list --porcelain | sed -n '1s/^worktree //p'`, not the parent of the common
+  directory, which is another repository's top level when the git dir is separate),
+  so a first run from a linked worktree reads the right ledger, gets `LEDGER_MISSING` and
+  goes local under `auto` and `prefer`. The proof now covers refusals of `start` too, and
+  every answer other than `LEDGER_MISSING` (`NOT_A_REPO` and `BAD_ROOT` included) runs
+  nothing and tells the operator to rerun without `--cloud` when no run with this id is active; there is no local fallback for
+  `NOT_A_REPO` any more. The skill also says where the run id comes from (chosen and printed
+  in step 1 with a valid example, reused on a retry or resume, asked for when unknown) and
+  gives exits other than 0 and 3 of `plan`, and exit 2 of `start`, a rule: relay stderr, run
+  nothing, stop.
+- A no-flag test pins that the landed-base proof reads the merge base and never the branch: with
+  the proof read from `HEAD`, the four golden comparisons would have been silently skipped on
+  this PR (and still green with `CI=1`); now one test fails.
+- The no-flag comparison's tests of the fail-in-CI arm name the outcome (`fail`, `skip` or
+  `ok`) instead of `pytest.raises(pytest.fail.Exception)`, which let a skip escape and
+  report the test as skipped. Turning the arm into a skip now fails three tests.
+- The macOS sandbox step's skip guard fails on any skipped test, not only on a reason that
+  names the sandbox, except four allowlisted host conditions (no pasteboard, no node, no
+  terminal device, running as root), and it fails when no test ran at all (an empty or
+  foreign report, or one whose only tests are allowlisted skips). A test checks the allowlist
+  against the literal skip reasons in the three cloud test files; a skip written in another
+  form (a variable, `importorskip`) is not seen by that test, but the guard still fails on it
+  in CI.
+- `resolve_root` refuses an explicit empty `--root` (`BAD_ROOT`, exit 2) instead of reading it as the working
+  directory, so an empty `--root "$(git rev-parse --show-toplevel)"` outside a repository can no longer reach another
+  repository's run.
+- Cloud review no longer obeys the repository's rung breaker. Once `cloud-review.sh`
+  pins the repository store, 20 recorded failures of the requested rung in any other
+  review made it skip that rung and answer with another model, which a cloud review
+  never accepts (`review-model-downgraded`, one retest spent). The script now treats
+  no rung as tripped; the rows are still recorded and the breaker still serves local
+  reviews.
+
+### Fixed (2026-11-24, cloud delegation: round 8)
+
+- Grant checks read the grant store of the `--root` repository, not the caller's
+  working directory. Every `gates.py` call of the dispatcher (`plan --run`, `start`,
+  the orchestrator, `resolve --action accept-deps`, `cleanup --remote`) and the
+  `loop-round` of the review now run with `--root` as the working directory, so
+  a grant recorded in another checkout no longer authorizes `cleanup --remote` or
+  a push for this one. An absolute `GATES_STORE` works as before; a relative one
+  is relative to `--root`. `cloud-review.sh` pins the store it resolved before it
+  enters its scratch directory. Grant from the `--root` repository; `/swarm`
+  skill 2.2.8 says so.
+- A scanner-positive task id is `SECRET_IN_PROMPT` however it is reached. `plan` and
+  `start` scan the ids as written before normalization, so a flagged id that is also
+  a duplicate or an invalid id no longer ends as `TASK_ID_DUPLICATE` or
+  `TASK_ID_INVALID` (exit 2, which the skill had no rule for, so a retry that added an invalid id left the decision to the model; `TASK_ID_DUPLICATE` is an exit-3 refusal that `/swarm` answered by running every task locally). A benign
+  duplicate id is still `TASK_ID_DUPLICATE`. `/swarm` skill 2.2.9: a refusal from
+  `plan` falls back to local only when `status --run <run>` reports
+  `LEDGER_MISSING`; otherwise the run may already be active and nothing runs.
+- A `needs-secret` entry that is not a valid name is refused as `TASK_INVALID` without
+  echoing it: the message gives the task id and the entry position only. It used to
+  quote the whole entry, and a pasted value that the scanner has no pattern for
+  reached stderr through `plan` and `start`. The `est` annotation error no longer
+  quotes its value either, and neither do the two `tier` errors (a free-text `tier`
+  next to a valid `model_request` used to be quoted in the conflict message). The
+  remaining messages are fixed text, except `TASK_ID_INVALID` and `DEP_UNKNOWN`, which quote an unflagged task id or
+  dependency name because they must name the task (a flagged id is refused before any message is built). A `tier` or a
+  `model_request` name that is not a string is a `TASK_INVALID` error instead of an uncaught `TypeError`.
+- Admission never moves an existing remote task branch. The admit push is leased to
+  an absent ref (`--force-with-lease=<ref>:`), so when two clones reuse a run and task
+  id and one branch is an ancestor of the other's base, the second no longer
+  fast-forwards it. A remote branch at exactly the wanted OID is still accepted on
+  retry (no push, no creation credit); one at another OID is `branch-conflict`.
+- `cloud-review.sh` reports `UNAVAILABLE` (exit 3), not `cap`, when the round accounting
+  fails for a store reason, such as a default evidence store that became tracked by git.
+  Exit 1 of `loop-round` is a cap only when `gates.py` also printed its `LOOP-CAP:` line.
+  The script prints one sanitized `CLOUD-REVIEW-REASON:` line and the dispatcher shows it
+  in the `review-unavailable` detail.
+- The no-flag test (`tests/test_swarm_cloud_noflag.py`) resolves its baseline from
+  `origin/main` only. It no longer reads the obsolete stacked remote-tracking ref, so
+  a checkout that kept that ref and one that pruned it compare against the same text.
+  When the cloud work is already on the base the comparison items retire only if the
+  base tree itself carries the dispatcher and the skill's cloud block; a CI run
+  without that proof fails instead of skipping.
+
+### Changed (2026-11-25, review-gate diffs and finds helpers by exact name)
+
+- review-gate 1.20.3 `--all` diffs, and picks its tier, against `origin/main` (else
+  the branch `main`) by exact ref name. Before, it used whatever `main` resolved to,
+  so a local `main` ahead of `origin/main` no longer hides commits.
+- In every mode the gate ends with `GATE: FAIL` when git cannot compute the diff (no
+  base branch, no common history, no commit yet, a path outside the repository);
+  before, that read as "Nothing to review".
+- `adversary-host.sh` resolves its directory once when it is sourced, so `gates.py`
+  and `model_requests.py` are found from any working directory, also in zsh.
+
+### Changed (2026-11-24, review-gate takes its runtime from the base tip)
+
+- review-gate 1.20.2 loads its helpers from the tip of `origin/main` (else the
+  local `main`) instead of the merge-base. A branch that has not been rebased now
+  gets main's current helpers; fetch first if `origin/main` is stale. `origin` must
+  be the repository the change merges into, with a protected `main`. If that tip has
+  no FFS runtime, the gate uses the user-scope install (`bash setup.sh --scope user`)
+  and is blocked without one, even when the fork point had a runtime.
+
+### Changed (2026-11-24, the ship seam is described as advisory)
+
+- gsd-core 1.15 runs `workflow.code_review_command` after the PR exists and
+  continues whatever it returns. feature-implement 2.23.2, `docs/commands.md` and
+  the seam's comments no longer say that it walls ship; feature-implement checks
+  the `ship:gsd` grant itself, like every other operator-gated action.
+
+### Changed (2026-11-24, review-gate stops when the evidence store is refused)
+
+- review-gate 1.20.1 ends with `GATE: FAIL` when `gates.py` refuses the evidence
+  store, instead of trying another runtime or continuing without the skip-list,
+  review meter and intent check. A runtime without `findings-queue` still falls
+  back. The queue is listed once instead of twice.
+
+### Changed (2026-11-21, review-gate keeps the reviewed branch out of its own runtime)
+
+- review-gate 1.20.0 reuses one base-ref runtime snapshot per commit, kept under
+  `<git-common-dir>/ffs-trusted/`, instead of extracting a new temporary copy in
+  every block. Snapshots unused for 7 days are removed; a read-only git dir falls
+  back to a temporary copy (#293).
+- The user-scope install now ships `adversary-host.sh`, `run-bounded.sh`,
+  `review-tier.sh` and `security-surface.sh`, and `adversary-host.sh` finds
+  `gates.py` and `model_requests.py` in that layout, so the fallback runtime works
+  when the base ref has no FFS runtime (#292). Existing unmanaged copies are
+  reported as collisions; rerun `setup.sh` with `--adopt-collisions` to replace them.
+- The Claude reviewer runs from an empty directory with `--setting-sources user`,
+  so the reviewed repository's `.claude/settings.json` and `CLAUDE.md` do not load.
+- Inline Python in the gate path runs with `python3 -I`, so modules in the
+  reviewed repository root are never imported.
+- The review diff and `review-tier.sh` ignore the reviewed branch's
+  `.gitattributes` (`GIT_ATTR_SOURCE` set to the empty tree, git 2.40 or later), and
+  the diff skips textconv and external diff drivers. `review-tier.sh` never picks the
+  light tier when a changed file is binary.
+- `gates.py` refuses a default evidence store that is tracked by git, including a
+  committed symlink or a case variant of `.feature-fix-swarm`. The manifest and `vendor/`
+  files a project-scope install commits there are allowed.
+- The tracked-store check also covers Unicode spellings of the directory, checkouts whose
+  git dir is not named `.git` (bare-repository worktree, submodule, `--separate-git-dir`)
+  and inherited `GIT_DIR`-style variables. It stops when git cannot answer inside a
+  checkout, and its message no longer suggests `git rm --cached`, which kept the file.
+- `clean_code_metrics.py` runs `crapper` and `dryer` only from absolute paths
+  outside the reviewed checkout.
+
 ### Fixed (2026-11-21, cloud delegation: round 7)
 
 - `start` now always prints `CLOUD:local tasks=<ids>`, with an empty value when
@@ -229,7 +375,7 @@ all skills.
   `ffs:cloud-deferred` block ahead of the init gate prints one line saying cloud
   delegation for that skill arrives in a later release and that `/swarm --cloud`
   is available now, then stops. Nothing else in either skill changes
-  (versions 2.23.2 and 3.3.2; 2.23.2 is the merge bump over the base's 2.23.1, originally 2.22.3). The no-flag test now compares both files with the
+  (versions 2.23.3 and 3.3.2; 2.23.3 is the merge bump over main's 2.23.2, which carries main's own change; originally 2.22.3). The no-flag test now compares both files with the
   base outside that block and the version line.
 - The cloud review no longer passes a downgraded reviewer silently.
   `adversary-host.sh` records which model answered

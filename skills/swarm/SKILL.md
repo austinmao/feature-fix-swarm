@@ -1,7 +1,7 @@
 ---
 name: swarm
 description: "Ad-hoc parallel task executor. Pass natural language tasks directly (or --tasks-file); independent tasks use concurrent host-native volume/execution/judgment roles and dependent tasks run serially. No spec directory required; use feature-implement for full-feature work."
-version: "2.2.7"
+version: "2.2.13"
 permissions:
   filesystem: write
   network: true
@@ -55,22 +55,35 @@ Otherwise skip it entirely and continue below exactly as before.
    `[local]` `[after: t0]` `[verify: cmd]` `[id: x]`. Estimate a missing `owns`
    or `est` and set `owns_source: "estimated"`. Never invent `verify`: an absent
    one stays absent (the task then runs locally). Write the list to a temp
-   file (`FILE`); `P` is the policy.
-2. **Plan.** Run `bash scripts/gsd/cloud-dispatch.sh plan --tasks FILE --policy P --with-doctor`.
+   file (`FILE`); `P` is the policy. Choose the run id `<run>` now (matching
+   `[A-Za-z0-9][A-Za-z0-9_.-]{0,39}`, new for each invocation, for example
+   `swarm-20261125T100000Z`) and print it: every later step uses it.
+   When the operator retries or resumes an earlier invocation, reuse that
+   invocation's run id; if it is not known, ask the operator rather than
+   choosing a new one (a new id has no ledger, and the `LEDGER_MISSING` of
+   step 6 would prove nothing about the earlier run).
+2. **Plan.** Run `bash scripts/gsd/cloud-dispatch.sh plan --run <run> --tasks FILE --policy P --root "$(git rev-parse --show-toplevel)" --with-doctor`.
    If it exits 3 with `CLOUD-REFUSED: SECRET_IN_PROMPT` (a task id looks like a
    secret), that is terminal for this invocation: relay the redacted refusal
    line and STOP. Dispatch nothing, cloud or local, under `auto`, `prefer` and
    `required` alike, and under `--dry-run`. Step 6's local fallback does not
    apply: a retry of an already started run with an edited batch is refused here
    before `start` can say `RUN_EXISTS`, and its unchanged tasks may be running in
-   the cloud.
+   the cloud. Any other exit of `plan` except 0 and 3 (exit 2, an input error
+   such as an invalid run id, task id, `est` or `needs-secret` entry or an
+   unusable `--root`; exit 78, a store or configuration error) is not a
+   refusal: relay its stderr, run no task, cloud or local, tell the operator
+   to rerun without `--cloud` if they want the tasks run locally and no run
+   with this id is active, and stop.
 3. **`--dry-run`.** Print the plan table (groups, route, provider, reasons,
    refusals, preconditions) and STOP. Do not run the reconcile pass below, do
    not start anything, do not execute any task.
 4. **Without `--dry-run`.** Show the operator the groups, routes, providers,
    exposed secret names and budgets from the plan, then record grants:
    - Interactive session: ask ONE question covering the task list, the providers
-     and every exposed secret name. On a yes, record exactly those keys:
+     and every exposed secret name. On a yes, record exactly those keys, from the
+     directory `plan` and `start` use (`cd "$(git rev-parse --show-toplevel)"`
+     first: the dispatcher reads that repository's grant store, not the shell's directory):
      `python3 lib/gates.py grant <run> --action cloud-dispatch:<provider> --action push:origin/ffs/cloud/<run> [--action secret-use:<NAME> ...] --ttl-hours 24 --reason "interactive /swarm --cloud"`
    - Autonomous or headless run: never self-grant. Rely on grants that already
      exist; `start` refuses when one is missing.
@@ -89,10 +102,23 @@ Otherwise skip it entirely and continue below exactly as before.
    integration ref a crashed start left behind). Relay that stderr, run no task
    (cloud or local) and stop for the operator to inspect what the message names.
    Do not call `start` again until the operator has done so and says to proceed.
-   Step 6 does not apply: exit 78 is an error, not a refusal.
+   Step 6 does not apply: exit 78 is an error, not a refusal. Exit 2 (an input
+   error such as an invalid run id) is handled as `plan`'s exit 2 in step 2.
 6. **Refusals.** Exit code 3 means refused. Relay the `CLOUD-REFUSED:` line.
    Under `auto` or `prefer`, continue with every task locally; under
-   `required`, stop. **Exception: `CLOUD-REFUSED: SECRET_IN_PROMPT`** (from
+   `required`, stop. **A refusal from `plan` or `start` falls back to local only
+   when the run does not exist:** first run
+   `bash scripts/gsd/cloud-dispatch.sh status --run <run> --root "$(git worktree list --porcelain | sed -n '1s/^worktree //p')"`
+   (the run id chosen in step 1); only its stderr line `CLOUD-ERROR: LEDGER_MISSING`
+   proves there is no run. Any other result (a status document, or any other
+   error, `NOT_A_REPO` and `BAD_ROOT` included) means a run with this id may
+   already be running tasks in the cloud: run nothing, cloud or local, relay
+   the refusal and the status, tell the operator to rerun without `--cloud` if
+   they want the tasks run locally and no run with this id is active, and ask
+   the operator. (From a linked
+   worktree `plan` is refused as `NOT_MAIN_WORKTREE` and this `status` reads the
+   main worktree's ledger, so a first run goes local.)
+   **Exception: `CLOUD-REFUSED: SECRET_IN_PROMPT`** (from
    `plan` or `start`) is terminal as in step 2: dispatch nothing, cloud or local.
    **Exception: `CLOUD-REFUSED: RUN_EXISTS`** is not a
    refusal to offload. The run was already started (a retry after a lost
@@ -114,7 +140,7 @@ Otherwise skip it entirely and continue below exactly as before.
    the run id and the cause to fix, run no `reconcile.sh`, no local task and no
    cloud task, and do nothing else. The same `start` (same run id, same tasks
    file) may be repeated, once, after the cause is fixed.
-   Otherwise run `bash scripts/gsd/cloud-dispatch.sh status --run <run> --json` and treat
+   Otherwise run `bash scripts/gsd/cloud-dispatch.sh status --run <run> --root "$(git worktree list --porcelain | sed -n '1s/^worktree //p')" --json` and treat
    the run as started only on `batch=same`: report it as in step 8, and if
    `orchestrator.alive` is false and the line carried no `orchestrator=` token,
    run `bash scripts/gsd/reconcile.sh` once so a dead
@@ -132,7 +158,7 @@ Otherwise skip it entirely and continue below exactly as before.
    operator-only. When a task needs one, print the exact suggested command for
    the operator and leave it.
 8. **Step 3 additions.** Report each cloud task from
-   `bash scripts/gsd/cloud-dispatch.sh status --run <run>` (state, provider,
+   `bash scripts/gsd/cloud-dispatch.sh status --run <run> --root "$(git worktree list --porcelain | sed -n '1s/^worktree //p')"` (state, provider,
    URL, blocker). Print the integration ref `ffs/cloud/<run>/integration` and
    a suggested merge command for the operator. Merge nothing, push nothing
    else, deploy nothing.

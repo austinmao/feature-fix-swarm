@@ -322,7 +322,7 @@ left in the title.
 | `[owns: a/**, b.py]` | Repo-relative globs the task may change, comma separated. Required for the cloud. `**` spans directories, `*` does not. A glob also covers everything below it. |
 | `[est: 45m]` | Estimate. Accepts `45m`, `2h`, `1h30m` or bare minutes (`90`). Drives the threshold. Missing means 0. |
 | `[verify: cmd]` | Test command run in the sandbox. May contain balanced brackets. Falls back to `config.verify.cmd`. |
-| `[needs-secret: NAME ...]` | Secret names the task uses, separated by commas or spaces. Use `UPPER_SNAKE` names. |
+| `[needs-secret: NAME ...]` | Secret names the task uses, separated by commas or spaces. Use `UPPER_SNAKE` names. An entry that is not a valid name is refused as `TASK_INVALID` with the task id and the entry position; the entry itself is never printed, because a pasted value can sit where a name belongs. |
 | `[local]` or `[local: reason]` | Never offload this task. |
 | `[after: t1 t2]` | Task ids this task depends on. |
 | `[id: x]` | Explicit task id, `^[a-z0-9][a-z0-9-]{0,23}$`. Default is `t1` to `tN` in input order. |
@@ -668,9 +668,10 @@ reviews. The same rule applies to the other scripts the dispatcher runs
 (`lifecycle.sh`, `reconcile.sh`, `reconcile-agent.sh`, `host-pressure.sh`).
 `cloud-review.sh` sources
 `adversary-host.sh` and `fence-data.sh` from its own directory.
-`adversary-host.sh` sources `run-bounded.sh` and loads `lib/gates.py` and
-`lib/model_requests.py` from two directories above the script. The installer
-ships all of these files to the managed lib. `doctor` fails with
+`adversary-host.sh` sources `run-bounded.sh` and loads `gates.py` and
+`model_requests.py` from two directories above the script: `lib/` in a
+consumer checkout, flat (`gates.py`, `model_requests.py`) in the managed lib.
+The installer ships all of these files to the managed lib, one copy each. `doctor` fails with
 `REVIEW_UNAVAILABLE` when `cloud-review.sh` or `adversary-host.sh` cannot be
 found. It does not check the other files, so a partial install shows up as
 `review-unavailable` on a result.
@@ -808,11 +809,11 @@ integration ref stays local until you merge it.
 `cloud_dispatch.py`. It looks for the library in `$FFS_LIB_DIR`, then
 `<script>/../../lib`, then `~/.claude/lib/feature-fix-swarm`. Every verb
 takes `--root ABS`, the absolute path of the main worktree (default: from
-the current directory; a linked worktree is refused).
+the current directory; a linked worktree is refused, and an explicit empty `--root` is `BAD_ROOT`, never the current directory).
 
 | Verb | Arguments | Effect |
 |---|---|---|
-| `plan` | `--tasks FILE --policy auto\|prefer\|required [--run R] [--with-doctor] [--sequential]` | Prints the route plan as one JSON document. Writes nothing. Refuses a task id the secret scanner flags (`SECRET_IN_PROMPT`, exit 3) before it prints the plan, as `start` does. Reads config from the working tree. With `--run` it also reports which grants are missing. `doctor` runs only with `--with-doctor`; otherwise `preconditions.doctor` is `unknown`. |
+| `plan` | `--tasks FILE --policy auto\|prefer\|required [--run R] [--with-doctor] [--sequential]` | Prints the route plan as one JSON document. Writes nothing. Refuses a task id the secret scanner flags (`SECRET_IN_PROMPT`, exit 3) before it prints the plan, as `start` does (ids are scanned as written, before normalization, so a flagged duplicate or invalid id is `SECRET_IN_PROMPT` too). Reads config from the working tree. With `--run` it also reports which grants are missing. `doctor` runs only with `--with-doctor`; otherwise `preconditions.doctor` is `unknown`. |
 | `start` | `--run R --tasks FILE --policy auto\|prefer\|required [--foreground] [--sequential]` | Runs the run-level refusals, `doctor`, the router, and the grant checks. Scans task text and packets. Writes the ledger and `tasks.json`, creates the integration ref (an existing one is never adopted: `INTEGRATION_REF`, and `INTEGRATION_REF_UNCONFIRMED` when an identical retry of a crashed start finds it, exit 78; the message says how to remove it by hand without touching anything else: for a symbolic ref, inspect its target and run `git symbolic-ref --delete <ref>`; for a plain ref, `git update-ref --no-deref -d <ref> <inspected-oid>`; then start again), and spawns the orchestrator. Prints `CLOUD:started run=R tasks=N`, `CLOUD:local tasks=<ids>` (always printed, empty when no task is local; `/swarm` runs locally only these ids, never the plan's groups, because `start` routes again) and `CLOUD:orchestrator-started pid=N`. Refuses a run id that already has a ledger. |
 | `orchestrate` | `--run R [--resume] [--detach] [--once] [--wait-lock SECONDS]` | Runs the orchestrator. `--detach` re-spawns it in its own session and prints `CLOUD:detached pid=N`. `--once` runs a single tick. `--wait-lock` waits up to that many seconds for the orchestrator lock instead of exiting at once, and exits 75 if the lock stays held. `--resume` changes nothing in the orchestrator itself; startup always resumes a parked run. |
 | `status` | `--run R [--json]` | Read-only. Per task: state, provider, generation, branch, URL, blocker, decisions, review and verify evidence. Also orchestrator pid, liveness, heartbeat age, and the integration tip. |
@@ -831,7 +832,7 @@ the current directory; a linked worktree is refused).
 |---|---|
 | 0 | Success. For `orchestrate` also: run done, run parked, or another orchestrator already holds the lock. |
 | 2 | Usage or input error (bad arguments, bad run or task id, invalid tasks file or annotation). |
-| 3 | Refused. The line `CLOUD-REFUSED: <CODE> <detail>` is printed on stdout. `doctor` uses 3 for not green. `RUN_EXISTS` is the exception to "run it locally": `start` found a ledger for that run id (typically a retry after a lost acknowledgement), so the tasks may already be running in the cloud. The refusal ends with `batch=same` (optionally `local-claimed=<ids>`), `batch=other` or `batch=unknown`, and may then add `orchestrator=restarted` or `orchestrator=restart-failed` (the identical retry found an active run with no orchestrator and the spawn failed with an `OSError`: nothing else changed, the local claims stand, the token adds `cause=<ERRNO>` (the errno name, such as `ENOENT`, or the fixed token `OSERROR` when the exception carries no errno; never the message), and the same retry tries again once the cause is fixed; `/swarm` reports it and ends, running no `reconcile.sh` and no task). The batch token comes from comparing the retried batch (every task id and its content, its `depends_on` and its order, cloud and local) with the whole batch the first attempt started, which the ledger stores in `batch`. `batch=same` needs an exact match, so a superset, an edited batch, a changed order or a changed dependency (also from `--sequential`) is `batch=other`; a ledger without the stored batch or claimed-task list (an older release) gives `batch=unknown`. `local-claimed=<ids>` names the local tasks the first attempt claimed before it printed them; a retry never offers them as `local=` again, because that caller may already have started them. `orchestrator=restarted` means an identical retry found an active run that no orchestrator owned and started one. `start` takes the run's orchestrator lock while it reserves the run, creates the integration ref and commits the initialization record, so a start that loses a race gets `RUN_EXISTS` too, and an identical retry of a start that died before that record finishes it. `/swarm` reads `status --run <run>`, never starts the run again and never runs a task the ledger holds; on `batch=same` it runs `reconcile.sh` once if the orchestrator is dead and the line carried no `orchestrator=` token (`restart-failed` ends after the report); it starts a claimed local task again only after the operator confirms, and runs none of the local groups that contain one until the operator has said which to run; on any other answer it stops and never starts those cloud tasks under a new run id. `RUN_NOT_INITIALIZED` is also exit 3: `orchestrate` (a resume included) found a run with no initialization record (this includes a run created by an earlier build). An identical retry of `start` finishes a run that this build's `start` left uninitialized; a run from an earlier build has no stored batch record, so its retry ends `batch=unknown` and finishes nothing. `SECRET_IN_PROMPT` is exit 3 too: `start` scans every task id, local ones included, and the task text, and names only the scanner class, never the value. `/swarm` treats it (from `plan` or `start`) as terminal for the invocation: it relays the refusal and dispatches nothing, cloud or local, under any policy and under `--dry-run`, because a retried run with an edited batch is refused here before `RUN_EXISTS` and its unchanged tasks may already run in the cloud. A route error that quotes a task id or dependency name the scanner flags prints the scanner class instead of the name. |
+| 3 | Refused. The line `CLOUD-REFUSED: <CODE> <detail>` is printed on stdout. `doctor` uses 3 for not green. `RUN_EXISTS` is the exception to "run it locally": `start` found a ledger for that run id (typically a retry after a lost acknowledgement), so the tasks may already be running in the cloud. The refusal ends with `batch=same` (optionally `local-claimed=<ids>`), `batch=other` or `batch=unknown`, and may then add `orchestrator=restarted` or `orchestrator=restart-failed` (the identical retry found an active run with no orchestrator and the spawn failed with an `OSError`: nothing else changed, the local claims stand, the token adds `cause=<ERRNO>` (the errno name, such as `ENOENT`, or the fixed token `OSERROR` when the exception carries no errno; never the message), and the same retry tries again once the cause is fixed; `/swarm` reports it and ends, running no `reconcile.sh` and no task). The batch token comes from comparing the retried batch (every task id and its content, its `depends_on` and its order, cloud and local) with the whole batch the first attempt started, which the ledger stores in `batch`. `batch=same` needs an exact match, so a superset, an edited batch, a changed order or a changed dependency (also from `--sequential`) is `batch=other`; a ledger without the stored batch or claimed-task list (an older release) gives `batch=unknown`. `local-claimed=<ids>` names the local tasks the first attempt claimed before it printed them; a retry never offers them as `local=` again, because that caller may already have started them. `orchestrator=restarted` means an identical retry found an active run that no orchestrator owned and started one. `start` takes the run's orchestrator lock while it reserves the run, creates the integration ref and commits the initialization record, so a start that loses a race gets `RUN_EXISTS` too, and an identical retry of a start that died before that record finishes it. `/swarm` reads `status --run <run>`, never starts the run again and never runs a task the ledger holds; on `batch=same` it runs `reconcile.sh` once if the orchestrator is dead and the line carried no `orchestrator=` token (`restart-failed` ends after the report); it starts a claimed local task again only after the operator confirms, and runs none of the local groups that contain one until the operator has said which to run; on any other answer it stops and never starts those cloud tasks under a new run id. `RUN_NOT_INITIALIZED` is also exit 3: `orchestrate` (a resume included) found a run with no initialization record (this includes a run created by an earlier build). An identical retry of `start` finishes a run that this build's `start` left uninitialized; a run from an earlier build has no stored batch record, so its retry ends `batch=unknown` and finishes nothing. `SECRET_IN_PROMPT` is exit 3 too: `start` scans every task id, local ones included, and the task text, and names only the scanner class, never the value. `/swarm` treats it (from `plan` or `start`) as terminal for the invocation: it relays the refusal and dispatches nothing, cloud or local, under any policy and under `--dry-run`, because a retried run with an edited batch is refused here before `RUN_EXISTS` and its unchanged tasks may already run in the cloud. A route error that quotes a task id or dependency name the scanner flags prints the scanner class instead of the name. An exit-3 refusal from `plan` or `start` (other than `SECRET_IN_PROMPT`) falls back to local under `auto` and `prefer` only when `status --run <run> --root <main worktree>` proves there is no ledger for the run id (`CLOUD-ERROR: LEDGER_MISSING`); any other answer (`NOT_A_REPO` and `BAD_ROOT` included) runs nothing and tells the operator to rerun without `--cloud` when no run with this id is active. From a linked worktree `plan` is `NOT_MAIN_WORKTREE` and that `status` reads the main worktree's ledger, so a first run goes local. Other exits of `plan` than 0 and 3, and exit 2 of `start`, are input or store errors, not refusals: nothing runs. |
 | 4 | `status` only: ok, but at least one task is `needs-operator` or `uncertain`. |
 | 75 | `orchestrate --wait-lock` gave up because the orchestrator lock stayed held. Nothing else returns 75. |
 | 78 | Store, config or internal error. The line `CLOUD-ERROR: <CODE> <detail>` is printed on stderr. |
@@ -1025,7 +1026,7 @@ that ends terminal but not `integrated` becomes `failed` with blocker
 | `verify-cmd-missing` | `needs-operator` | The effective verify command was empty or whitespace-only when verification ran. The router refuses such a task, so this is a defensive stop for a hand-edited or older ledger. No tests ran. | `resolve --action reject` or `abandon --retry` |
 | `manifest-invalid` | `needs-operator` | The task's own result branch (or a manifest carrying its nonce) has a manifest the validator rejected. The detail names the validator error code. | `abandon [--retry]` |
 | `binary-change` | `needs-operator` | The result changes binary content. This always blocks; there is no allowlist. The reviewer cannot read the bytes. | `resolve --action reject` or `abandon --retry` |
-| `review-cap` | `needs-operator` | The two review rounds of the current meter are spent. | `resolve --action retest` (fresh meter; refused after two retests of this task generation, counted from the stale re-review when one began), `resolve --action reject` or `abandon --retry` |
+| `review-cap` | `needs-operator` | The two review rounds of the current meter are spent (`gates.py` printed its `LOOP-CAP:` line). A refused or unreadable evidence store is `review-unavailable` instead, with the reason in the detail. | `resolve --action retest` (fresh meter; refused after two retests of this task generation, counted from the stale re-review when one began), `resolve --action reject` or `abandon --retry` |
 | `sandbox-unavailable` | `needs-operator` | The sandbox cannot run, or the tree cannot be materialized. | `resolve --action retest` after the fix, or `reject` |
 | `merge-conflict` | `needs-operator` | The tip and the candidate changed overlapping paths (FFS merges only disjoint paths), the merged tree was not the exact expected tree, the integration ref moved outside FFS, the integration ref already holds the published result but the task's approval has no reviewer-model evidence (reset the ref to the ledger tip first), a case collision between two results in the merged tree (detail `case-colliding paths`), a git error while integrating, or the integration ref is a symbolic ref (FFS never moves it). | `resolve --action retest` after the fix, or `reject` |
 | `patch-id-mismatch` | `needs-operator` | The merged change differs from the reviewed change. | `resolve --action retest`, or `reject` |
@@ -1033,7 +1034,7 @@ that ends terminal but not `integrated` becomes `failed` with blocker
 | `ruleset-unverified` | `needs-operator` | Active `update` and `deletion` rules for the task branch could not be confirmed (secrets exposed). | Fix the ruleset, then `resolve --action retest` |
 | `grant-missing` | `needs-operator` | A push or `cloud-dispatch` grant is missing. | Grant it, then `resolve --action retest` |
 | `scan-refused` | `needs-operator` | The outbound scan refused a push of a task branch, or the packet scan refused a submit. The detail lists finding classes and locations. | Fix the finding, then `resolve --action retest` |
-| `branch-conflict` | `needs-operator` | The task branch exists locally or on origin at a different OID, or at submit it is no longer at the admitted OID on origin (moved or deleted). | Fix the branch, then `resolve --action retest` |
+| `branch-conflict` | `needs-operator` | The task branch exists locally or on origin at a different OID (admission never moves an existing remote task branch: its push is leased to an absent ref), or at submit it is no longer at the admitted OID on origin (moved or deleted). | Fix the branch, then `resolve --action retest` |
 | `push-failed` | `needs-operator` | The push of a task branch failed 5 times, for example a protected-branch rejection. | Fix the cause, then `resolve --action retest` |
 | `internal-error` | `needs-operator` | One step of one task failed 3 times in a row, or a collect blocker this version does not know or cannot apply from the task's current state. The detail names the error type. Other tasks keep running. | `resolve --action retest` |
 | `integration-ref-foreign` | `needs-operator` | After a restart, the integration ref holds commits on top of the published result that FFS did not publish. | Review the commits, then `resolve --action reject` or `abandon` |
@@ -1064,12 +1065,23 @@ means granted, 1 not granted, anything else is treated as a refusal.
 | `install:<pkg>` | `resolve --action accept-deps` for each added or changed package. | At `resolve`. |
 | `install:unattributed:<digest12>` | `resolve --action accept-deps` when the change cannot be attributed to named registry packages. `<digest12>` is the first 12 characters of the report digest, which the decision text prints. It binds the grant to this one report. | At `resolve`. |
 
-Record grants with the FFS grant ledger:
+Record grants with the FFS grant ledger, **from the repository you pass as
+`--root`** (the main worktree). The dispatcher runs every grant check, and the
+review's round accounting, with that repository as the working directory, so
+the default evidence store (`.feature-fix-swarm/evidence.json` of that
+repository) is the one it reads. A grant recorded while standing in another
+checkout is not seen, and a grant in another checkout never authorizes
+`start`, a push, or `cleanup --remote` for this one.
 
 ```bash
+cd <root>   # the repository passed as --root
 python3 lib/gates.py grant <run> --action cloud-dispatch:claude \
   --action push:origin/ffs/cloud/<run> --ttl-hours 24 --reason "cloud run"
 ```
+
+`GATES_STORE` still overrides the default. An absolute path is used as it is,
+from anywhere. A relative path is read relative to `--root`, so grant from
+`--root` or use an absolute path.
 
 Grants expire. An expired grant stops the next admit or submit with
 `grant-missing` or `exposure-not-granted`. Grant again and run
@@ -1125,10 +1137,13 @@ there.
 
 It also ships the closure that `cloud-review.sh` needs to the managed lib
 (`~/.claude/lib/feature-fix-swarm`): `scripts/gsd/adversary-host.sh`,
-`scripts/gsd/run-bounded.sh`, `scripts/gsd/fence-data.sh`, `lib/gates.py` and
-`lib/model_requests.py`. The managed lib keeps `gates.py` and
-`model_requests.py` flat for other tools, so they are shipped a second time
-under `lib/`.
+`scripts/gsd/run-bounded.sh`, `scripts/gsd/fence-data.sh`, and the flat
+`gates.py` and `model_requests.py` (the last place `adversary-host.sh` looks).
+There is one copy of each module: the managed lib has no `lib/` subdirectory.
+A managed lib left by an earlier build that did ship `lib/gates.py` keeps
+that file, because the installer does not delete files it no longer lists;
+`adversary-host.sh` looks in `lib/` first, so remove the stale
+`<managed lib>/lib/` directory by hand after upgrading.
 
 ## Cloud environment setup
 

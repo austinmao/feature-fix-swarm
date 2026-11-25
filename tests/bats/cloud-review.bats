@@ -181,6 +181,65 @@ EOF
   [ ! -e "$CODEX_CALLS" ]
 }
 
+# A repository whose default evidence store directory is tracked: gates.py refuses it with a plain
+# message and exit 1, which is the same status the round cap uses.
+tracked_store_repo() {
+  REPO="$BATS_TEST_TMPDIR/tracked"
+  mkdir -p "$REPO/.feature-fix-swarm"
+  git -C "$REPO" init -q
+  printf '{}\n' > "$REPO/.feature-fix-swarm/evidence.json"  # the store file itself is committed
+  git -C "$REPO" add .feature-fix-swarm/evidence.json
+  git -C "$REPO" -c user.name=t -c user.email=t@example.invalid commit -q -m tracked
+}
+
+@test "a refused (tracked) evidence store is UNAVAILABLE, not cap, and names the reason" {
+  make_codex 'VERDICT: APPROVE\n'
+  tracked_store_repo
+  cd "$REPO"
+  unset GATES_STORE
+  run env ADVERSARY_BIN_CODEX="$BIN/codex-stub" ADVERSARY_BIN_CLAUDE="$BIN/claude-stub" \
+    bash "$SCRIPT" r1 t1 claude "$DIFF" "$SUMMARY" 1
+  [ "$status" -eq 3 ]
+  [ "$(last_line)" = "CLOUD-REVIEW: UNAVAILABLE" ]
+  [[ "$output" != *"CLOUD-REVIEW: cap"* ]]
+  [[ "$output" == *"CLOUD-REVIEW-REASON: round accounting failed (rc=1)"* ]]
+  [ ! -e "$CODEX_CALLS" ]
+}
+
+# stub_gates <exit-code> <stdout-line> : the script run from a copy whose gates.py is a stub
+stub_gates() {
+  STUB="$BATS_TEST_TMPDIR/stub"
+  mkdir -p "$STUB/scripts" "$STUB/lib"
+  cp -R "$ROOT/scripts/gsd" "$STUB/scripts/gsd"
+  cat > "$STUB/lib/gates.py" <<STUBEND
+import sys
+if sys.argv[1] == "loop-round":
+    print("$2")
+    sys.exit($1)
+print("$BATS_TEST_TMPDIR/stub-store.json")
+STUBEND
+}
+
+@test "loop-round exit 1 without the documented cap marker fails closed as UNAVAILABLE" {
+  make_codex 'VERDICT: APPROVE\n'
+  stub_gates 1 "something unrelated happened"
+  run env ADVERSARY_BIN_CODEX="$BIN/codex-stub" ADVERSARY_BIN_CLAUDE="$BIN/claude-stub" \
+    bash "$STUB/scripts/gsd/cloud-review.sh" r1 t1 claude "$DIFF" "$SUMMARY" 1
+  [ "$status" -eq 3 ]
+  [ "$(last_line)" = "CLOUD-REVIEW: UNAVAILABLE" ]
+  [ ! -e "$CODEX_CALLS" ]
+}
+
+@test "loop-round exit 1 with the documented cap marker is still cap" {
+  make_codex 'VERDICT: APPROVE\n'
+  stub_gates 1 "LOOP-CAP: review:cloud:t1:g1 round 3 exceeds sealed max 2 (run r1)"
+  run env ADVERSARY_BIN_CODEX="$BIN/codex-stub" ADVERSARY_BIN_CLAUDE="$BIN/claude-stub" \
+    bash "$STUB/scripts/gsd/cloud-review.sh" r1 t1 claude "$DIFF" "$SUMMARY" 1
+  [ "$status" -eq 4 ]
+  [ "$(last_line)" = "CLOUD-REVIEW: cap" ]
+  [ ! -e "$CODEX_CALLS" ]
+}
+
 @test "round cap is per generation and per task" {
   make_codex 'VERDICT: APPROVE\n'
   review claude 1; review claude 1
@@ -265,6 +324,22 @@ PY
   [ "$status" -eq 0 ]
 }
 
+@test "a relative GATES_STORE is pinned before the reviewer directory: round and evidence rows share one store" {
+  make_codex 'VERDICT: APPROVE\n'
+  mkdir -p "$BATS_TEST_TMPDIR/repo" && cd "$BATS_TEST_TMPDIR/repo"
+  export GATES_STORE="rel/gates.json"
+  review claude 1 "Run.A_1"
+  [ "$status" -eq 0 ]
+  [ "$(last_line)" = "CLOUD-REVIEW: APPROVE" ]
+  run python3 - "$BATS_TEST_TMPDIR/repo/rel/gates.json" <<'PY'
+import json, sys
+data = json.load(open(sys.argv[1]))
+assert data["_degradation"]["invocations"], data
+assert data["_loops"]["Run.A_1"], data
+PY
+  [ "$status" -eq 0 ]
+}
+
 @test "attempt argument gives an operator retest a fresh, still bounded, meter" {
   make_codex 'VERDICT: APPROVE\n'
   review claude 1; [ "$status" -eq 0 ]
@@ -324,6 +399,22 @@ EOF
   review claude
   [ "$status" -eq 0 ]
   [ "$(model_line_before_verdict)" = "CLOUD-REVIEW-MODEL: requested=gpt-6.2-sol answered=gpt-6.1-terra descent=1" ]
+}
+
+@test "a tripped rung elsewhere in the repository never makes cloud review skip the requested model" {
+  # 20 recorded failures of the requested rung (a usage-limit outage in some other review): the shared breaker would skip
+  # it, and a cloud review accepts no descent, so the approval would end review-model-downgraded.
+  for _ in $(seq 1 20); do
+    python3 "$ROOT/lib/gates.py" note-degraded rung-attempt --rung-id "codex:gpt-6.2-sol:xhigh" --outcome fail >/dev/null
+  done
+  [[ "$(python3 "$ROOT/lib/gates.py" note-degraded --tripped)" == *'"codex:gpt-6.2-sol:xhigh"'* ]]
+  make_codex_failing 'NEVER-MATCHES' 'fine\nVERDICT: APPROVE\n'
+  review claude
+  [ "$status" -eq 0 ]
+  [ "$(model_line_before_verdict)" = "CLOUD-REVIEW-MODEL: requested=gpt-6.2-sol answered=gpt-6.2-sol descent=0" ]
+  [[ "$(head -n 1 "$BATS_TEST_TMPDIR/codex.args")" == *"gpt-6.2-sol"* ]]
+  # the rows are still recorded: the successful attempt is on the ledger and clears the breaker
+  [ "$(python3 "$ROOT/lib/gates.py" note-degraded --tripped)" = "[]" ]
 }
 
 @test "model line: absent when the reviewer never ran" {

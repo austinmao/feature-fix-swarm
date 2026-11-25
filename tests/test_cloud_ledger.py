@@ -1360,7 +1360,8 @@ def test_crash_when_operator_adopts_a_task_holding_a_slot(tmp_path, monkeypatch,
     if doc["tasks"]["a"]["state"] == cl.NEEDS_OPERATOR:  # adopt never landed: the slot is still legitimately held
         assert cl.slot_keys(world.slots) == ["R1/a/g1"]
     else:
-        assert_recoverable(world) and cl.slot_keys(world.slots) == []
+        assert_recoverable(world)
+        assert cl.slot_keys(world.slots) == []
 
 
 @pytest.mark.parametrize("crash_at,when", [(n, w) for n in range(2) for w in ("before", "after")])

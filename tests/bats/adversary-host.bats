@@ -834,3 +834,28 @@ EOF
   [[ "$output" == *"review attempt exceeded"* ]]
   [[ "$output" != *"gpt-5.6-sol unavailable"* ]]
 }
+
+@test "Claude adversary runs outside the reviewed repo with user settings only" {
+  STUB_DIR="$BATS_TEST_TMPDIR/bin"
+  mkdir -p "$STUB_DIR"
+  cat > "$STUB_DIR/isolated-claude" <<EOF2
+#!/usr/bin/env bash
+printf '%s\n' "\$@" > "$BATS_TEST_TMPDIR/claude.args"
+pwd -P > "$BATS_TEST_TMPDIR/claude.cwd"
+cat >/dev/null
+echo 'VERDICT: PASS'
+EOF2
+  chmod +x "$STUB_DIR/isolated-claude"
+  repo="$BATS_TEST_TMPDIR/reviewed"
+  mkdir -p "$repo" && git -C "$repo" init -q
+  repo="$(cd "$repo" && pwd -P)"
+  ADVERSARY_BIN_CLAUDE=isolated-claude PATH="$STUB_DIR:$PATH" \
+    run bash -c "cd '$repo' && . '$LIB' && adversary_invoke claude 10 opus high review"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"VERDICT: PASS"* ]]
+  grep -Fqx -- '--setting-sources' "$BATS_TEST_TMPDIR/claude.args"
+  grep -Fqx -- 'user' "$BATS_TEST_TMPDIR/claude.args"
+  cwd="$(cat "$BATS_TEST_TMPDIR/claude.cwd")"
+  [[ "$cwd" != "$repo"* ]]
+  [ ! -e "$cwd" ]
+}

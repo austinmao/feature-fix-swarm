@@ -1,7 +1,7 @@
 ---
 name: feature-implement
 description: "Execute a decomposed feature via the gsd-core loop with preflight-only host fallback, no stateful cross-vendor replay, autonomy grants, gates.py completion authority, and a fail-closed review/ship tail. --adhoc uses the same walls over gsd-quick."
-version: "2.23.2"
+version: "2.23.3"
 allowed-tools:
   - Read
   - Edit
@@ -260,8 +260,9 @@ call is `check-grant "$RUN_ID" --action "<type:prod-target>" --require-environme
 (sig ba1efa84: deterministic per-call hard mode at this skill's own call
 site) — proceed on exit 0; otherwise
 `pending` + STOP that action path only. Never bypass with prose; never re-ask a
-granted action. (Ship itself is walled inside gsd's `code_review_command` —
-`scripts/gsd/review-gate-command.sh` REVISEs without a `ship:gsd` grant.)
+granted action. Ship is one of these actions:
+`check-grant "$RUN_ID" --action ship:gsd`. The `code_review_command` seam also
+REVISEs without that grant, but gsd runs it after the PR exists and never blocks on it.
 
 For a cold handoff, `scripts/gsd/takeover-check.sh --list` shows only the
 discoverable record metadata. Stored resume text is display-only and is never
@@ -282,7 +283,7 @@ Config contract (seeded by `/feature-spec` from `templates/gsd-config.base.json`
 `workflow.test_command = bash scripts/gsd/gates-test-command.sh`,
 `workflow.code_review_command = bash scripts/gsd/review-gate-command.sh`.
 Verify both keys are present in `$PLANNING/config.json` before executing; ERROR if not —
-without them gsd runs ungated. A per-spec project may wrap the test command
+without them gsd runs no test gate and no ship review. A per-spec project may wrap the test command
 (for example `GSD_TEST_CMD='bash .planning/<project>/gsd-test-command' bash scripts/gsd/gates-test-command.sh`);
 it must still end in `scripts/gsd/gates-test-command.sh`.
 

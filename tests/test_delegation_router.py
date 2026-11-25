@@ -182,6 +182,55 @@ def test_normalize_rejects_invalid(raw):
         dr.normalize_tasks([raw], sequential=False)
     assert info.value.code == dr.TASK_INVALID
 
+PASSPHRASE = "Zq7! synthetic pass phrase"  # not a name, not scanner-shaped: it must still never be echoed
+
+
+@pytest.mark.parametrize("line", [
+    {"prompt": "p", "needs_secrets": [PASSPHRASE]},
+    "do it [needs-secret: %s]" % PASSPHRASE,
+])
+def test_an_invalid_needs_secret_entry_is_never_echoed(line):
+    with pytest.raises(RouteError) as info:
+        dr.normalize_tasks([{"id": "build-1", "prompt": "p"}, line], sequential=False)
+    assert info.value.code == dr.TASK_INVALID
+    assert PASSPHRASE not in str(info.value) and "pass phrase" not in str(info.value)
+    assert "t2" in str(info.value) and "entry 1" in str(info.value)
+
+
+@pytest.mark.parametrize("raw, code", [
+    ("do it [est: %s]" % PASSPHRASE, dr.ANNOTATION_INVALID),
+    ({"prompt": "p", "tier": PASSPHRASE}, dr.TASK_INVALID),
+    ({"prompt": "p", "tier": PASSPHRASE, "model_request": {"kind": "tier", "name": "judgment"}}, dr.TASK_INVALID),
+    ({"prompt": "p", "tier": "volume", "model_request": {"kind": "tier", "name": "judgment"}}, dr.TASK_INVALID),
+    # the "unknown tier" error: reachable only next to an exact request, which names no tier of its own
+    ({"prompt": "p", "tier": PASSPHRASE, "model_request": {"kind": "exact", "id": "gpt-x"}}, dr.TASK_INVALID),
+    ({"prompt": "p", "model_request": {"kind": "tier", "name": PASSPHRASE}}, dr.TASK_INVALID),
+    ({"prompt": "p", "model_request": {"kind": PASSPHRASE}}, dr.TASK_INVALID),
+])
+def test_the_other_free_text_validation_errors_never_echo_the_value_either(raw, code):
+    with pytest.raises(RouteError) as info:
+        dr.normalize_tasks([raw], sequential=False)
+    assert info.value.code == code
+    assert PASSPHRASE not in str(info.value) and "pass phrase" not in str(info.value)
+
+
+@pytest.mark.parametrize("raw", [
+    {"prompt": "p", "tier": ["x"]},
+    {"prompt": "p", "tier": {"a": 1}},
+    {"prompt": "p", "model_request": {"kind": "tier", "name": ["x"]}},
+    {"prompt": "p", "tier": "volume", "model_request": {"kind": "tier", "name": {"a": 1}}},
+])
+def test_a_tier_that_is_not_a_string_is_a_typed_task_error_not_a_type_error(raw):
+    with pytest.raises(RouteError) as info:
+        dr.normalize_tasks([raw], sequential=False)
+    assert info.value.code == dr.TASK_INVALID
+
+
+def test_an_invalid_needs_secret_entry_names_the_task_id_when_it_has_one():
+    with pytest.raises(RouteError) as info:
+        dr.normalize_tasks([{"id": "build-1", "prompt": "p", "needs_secrets": ["OK_NAME", PASSPHRASE]}], sequential=False)
+    assert "build-1" in str(info.value) and "entry 2" in str(info.value) and PASSPHRASE not in str(info.value)
+
 
 # ── denylist and overlap ─────────────────────────────────────────────────────
 

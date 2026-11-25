@@ -32,8 +32,19 @@ def git(repo: Path, *args: str, stdin: str = "", check: bool = True) -> str:
     env = dict(os.environ)
     env.update(GIT_ENV)
     proc = subprocess.run(["git", "-C", str(repo)] + list(args), input=stdin, capture_output=True,
-                          text=True, env=env, check=check)
+                          text=True, env=env)
+    if check and proc.returncode:
+        raise AssertionError("git %s failed (rc=%d): %s" % (" ".join(args[:6]), proc.returncode, proc.stderr.strip()))
     return proc.stdout.strip()
+
+
+def test_the_git_helper_failure_carries_git_stderr(tmp_path):
+    """check=True with captured output raises a CalledProcessError whose text has no stderr; the cause of a rare git
+    failure (a full disk, no process) must be readable from the test report."""
+    with pytest.raises(AssertionError) as info:
+        git(tmp_path, "rev-parse", "--verify", "no-such-ref")
+    assert "no-such-ref" in str(info.value) and "rc=" in str(info.value) and "fatal" in str(info.value).lower()
+    assert git(tmp_path, "rev-parse", "--verify", "no-such-ref", check=False) == ""
 
 
 def real_validate_manifest(raw, **kwargs):
@@ -933,6 +944,32 @@ def test_revise_still_rejects_and_keeps_the_model_line_out_of_the_text(world):
     res = _review_with(world, "HIGH: bad\n" + MODEL_OK + "CLOUD-REVIEW: REVISE\n", rc=1)
     assert_fail(res, "rejected", cc.B_REVIEW_REVISE)
     assert "CLOUD-REVIEW-MODEL" not in res.detail and res.data["model"] == "gpt-6.2-sol"
+
+
+def test_an_unavailable_review_shows_the_scripts_sanitized_reason(world):
+    data = candidate_for(world)
+    out = "CLOUD-REVIEW-REASON: round accounting failed (rc=1): evidence store is tracked by git\nCLOUD-REVIEW: UNAVAILABLE\n"
+    res = cc.review(repo=str(world.main), run=RUN, task=TASK, generation=GEN, producer="codex", base_oid=world.base,
+                    candidate_oid=data["candidate_oid"], manifest=data["manifest"], runner=lambda *_a: (3, out))
+    assert res.blocker == cc.B_REVIEW_UNAVAILABLE and "evidence store is tracked by git" in res.detail
+    prose = "CLOUD-REVIEW-REASON: x\nreviewer chatter\nCLOUD-REVIEW: UNAVAILABLE\n"  # not exactly the one line: ignored
+    res = cc.review(repo=str(world.main), run=RUN, task=TASK, generation=GEN, producer="codex", base_oid=world.base,
+                    candidate_oid=data["candidate_oid"], manifest=data["manifest"], runner=lambda *_a: (3, prose))
+    assert res.detail == "review UNAVAILABLE (rc=3)"
+
+
+def test_review_script_runs_in_the_target_repository_not_the_callers_directory(world, tmp_path, monkeypatch):
+    """cloud-review.sh resolves the default evidence store from its working directory."""
+    data = candidate_for(world)
+    seen = tmp_path / "cwd.txt"
+    script = tmp_path / "probe-review.sh"
+    script.write_text("#!/usr/bin/env bash\npwd -P > '%s'\nprintf 'CLOUD-REVIEW: UNAVAILABLE\\n'\nexit 3\n" % seen)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    cc.review(repo=str(world.main), run=RUN, task=TASK, generation=GEN, producer="claude",
+              base_oid=world.base, candidate_oid=data["candidate_oid"], manifest=data["manifest"], script=str(script))
+    assert seen.read_text().strip() == os.path.realpath(str(world.main))
 
 
 def test_review_script_end_to_end_with_stub(world, tmp_path):

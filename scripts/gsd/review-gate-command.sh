@@ -4,6 +4,8 @@
 #   "The diff is piped to the command via stdin; the command must output JSON with a
 #    `verdict` field (`"APPROVED"` or `"REVISE"`). Non-zero exit or `"REVISE"` verdict
 #    blocks the ship workflow."
+# That last sentence does not hold in gsd-core 1.15: workflows/ship.md runs this
+# after the PR exists and continues whatever it returns. The verdict is advisory.
 # NOTE: this is stdin-diff + stdout-JSON, NOT file-paths-on-stdin — verified above,
 # overriding the file-paths assumption in the original task brief.
 set -uo pipefail
@@ -21,10 +23,9 @@ if [ -n "${GSD_PROJECT:-}" ] && [ -d ".planning/${GSD_PROJECT}/phases" ]; then
   PHASES_ROOT=".planning/${GSD_PROJECT}/phases"
 fi
 
-# Autonomy-grant wall (fail-closed): ship is an operator-gated action. This seam
-# runs inside /gsd:ship and a REVISE verdict blocks it, so the grant ledger check
-# lives here (day-1 wrapper; native ship:pre capability gate deferred — no
-# third-party gate evaluator at gsd-core 1.6.1, upstream #2004).
+# Autonomy-grant check: ship is an operator-gated action. A missing grant REVISEs;
+# the check that stops a run is feature-implement's own `check-grant` (native
+# ship:pre capability gate deferred, upstream #2004).
 REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
 # RUN_ID: env (exported by feature-implement) > FFS_SPEC_ID > branch-derived spec-NNN.
 # No hardcoded default — a wrong ledger key silently checks another run's
@@ -96,7 +97,7 @@ if [ -n "$_spec_md" ]; then
   elif [ "$_int_rc" -eq 2 ] && printf '%s\n' "$_int_out" | grep -qxF 'unknown command: intent-check'; then
     echo "WARN: gates.py lacks intent-check (rollout skew); intent wall skipped" >&2
   else
-    python3 -c 'import json,sys; print(json.dumps({"verdict":"REVISE","note":sys.argv[1]+" — intent breached; no review round spent. Delete more or stop."}))' "$_int_out"
+    python3 -I -c 'import json,sys; print(json.dumps({"verdict":"REVISE","note":sys.argv[1]+" — intent breached; no review round spent. Delete more or stop."}))' "$_int_out"
     exit 1
   fi
 fi
@@ -205,7 +206,7 @@ if printf '%s\n' "$FINAL_VERDICT" | grep -Eq '^VERDICT: BLOCK[[:space:]]*$'; the
   done <<<"$CLEAN_OUTPUT"
   [ "$_n_find" -gt 0 ] || python3 "$GATES_PY" findings-queue add review-gate-command.sh \
     "unparsed BLOCK verdict" --severity HIGH --spec "$SID" >/dev/null 2>&1 || true
-  printf '{"verdict":"REVISE","findings":%s}\n' "$(printf '%s' "$CLEAN_OUTPUT" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')"
+  printf '{"verdict":"REVISE","findings":%s}\n' "$(printf '%s' "$CLEAN_OUTPUT" | python3 -I -c 'import json,sys; print(json.dumps(sys.stdin.read()))')"
   exit 1
 fi
 
@@ -218,7 +219,7 @@ if [ -n "$GATES_PY" ] && [ -n "$RESIDUAL_FOCUS" ]; then
   _rg_sigs="$(printf '%s' "$RESIDUAL_FOCUS" | grep -oE '^- [0-9a-f]{12} ' | awk '{print $2}' | sort -u)"
   while IFS= read -r _rg_sig; do
     [ -n "$_rg_sig" ] || continue
-    _rg_full="$(python3 "$GATES_PY" findings-queue list 2>/dev/null | python3 -c '
+    _rg_full="$(python3 "$GATES_PY" findings-queue list 2>/dev/null | python3 -I -c '
 import json, sys
 pfx = sys.argv[1]
 try:

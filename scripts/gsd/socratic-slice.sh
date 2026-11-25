@@ -143,7 +143,7 @@ REQUIRED_SECTIONS=(
 parse_frontmatter_file() {
   local path="$1"
   local parse_output
-  parse_output="$(python3 - "$path" <<'PY'
+  parse_output="$(python3 -I - "$path" <<'PY'
 import re
 import sys
 from pathlib import Path
@@ -443,7 +443,7 @@ resolve_gates_py() {
 # depth on the stored reason text itself, not a quoting requirement for the
 # call below.
 sanitize_reason_value() {
-  python3 -c '
+  python3 -I -c '
 import re
 import sys
 raw = sys.argv[1] if len(sys.argv) > 1 else ""

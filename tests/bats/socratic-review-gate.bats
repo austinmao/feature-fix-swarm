@@ -232,9 +232,10 @@ build_hv_harness() {
 
   harness="$BATS_TEST_TMPDIR/hv-socratic-harness.sh"
   # The block loads socratic-slice.sh from the base-ref snapshot, so run it in
-  # a repo whose main commit holds this tree's scripts/.
+  # a repo whose main commit holds this tree's scripts/ and lib/ (a snapshot
+  # without lib/gates.py is refused).
   HV_FIXTURE_REPO="$BATS_TEST_TMPDIR/hv-repo"
-  mkdir -p "$HV_FIXTURE_REPO" && cp -R "$REPO_ROOT/scripts" "$HV_FIXTURE_REPO/"
+  mkdir -p "$HV_FIXTURE_REPO" && cp -R "$REPO_ROOT/scripts" "$REPO_ROOT/lib" "$HV_FIXTURE_REPO/"
   git -C "$HV_FIXTURE_REPO" init -q -b main && git -C "$HV_FIXTURE_REPO" add -A
   git -C "$HV_FIXTURE_REPO" -c user.name=t -c user.email=t@t commit -qm base
 

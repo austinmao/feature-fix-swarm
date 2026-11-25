@@ -13,6 +13,7 @@ import os
 import re
 import subprocess
 import sys
+import socket
 from collections import defaultdict
 
 TEST_PAT = re.compile(
@@ -31,40 +32,87 @@ BOOKKEEPING_PAT = re.compile(r"^(\.planning/|spike-results/|specs/)")
 
 def sh(args, cwd, timeout=60):
     try:
-        r = subprocess.run(args, cwd=cwd, capture_output=True, text=True, timeout=timeout)
-        return r.stdout.strip(), r.returncode
+        r = subprocess.run(args, cwd=cwd, capture_output=True, text=True, timeout=timeout,
+                           env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"})
+        return (r.stdout if "-z" in args else r.stdout.strip()), r.returncode
     except Exception as e:  # noqa: BLE001 - collector must never crash the audit
         return f"ERROR:{e}", 1
 
 
 def worktrees(repo):
-    out, _ = sh(["git", "worktree", "list", "--porcelain"], repo)
+    out, rc = sh(["git", "worktree", "list", "--porcelain", "-z"], repo)
+    if rc:
+        raise RuntimeError("Cannot read worktree registry")
     wts, cur = [], {}
-    for line in out.splitlines():
-        if not line.strip():
+    for field in out.split("\0"):
+        if not field:
             if cur:
                 wts.append(cur)
             cur = {}
             continue
-        k, _, v = line.partition(" ")
+        k, _, v = field.partition(" ")
         if k == "worktree":
-            cur["path"] = v
+            cur["path"] = os.path.realpath(v)
+            cur["registered_path"] = v
         elif k == "HEAD":
-            cur["head"] = v[:10]
+            cur["head"] = v
         elif k == "branch":
-            cur["branch"] = v.replace("refs/heads/", "")
+            cur["branch"] = v.removeprefix("refs/heads/")
         elif k == "detached":
             cur["branch"] = None
+        elif k in ("locked", "prunable"):
+            cur[k] = True
+            cur[k + "_reason"] = v
     if cur:
         wts.append(cur)
-    return wts
+    # A legacy alias does not create another estate; Git common-dir identity
+    # is attached to this audit below and independent clones run separately.
+    expected, rc = sh(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"], repo)
+    if rc:
+        raise RuntimeError("Cannot determine worktree registry owner")
+    expected = os.path.realpath(expected)
+    unique = {}
+    for wt in wts:
+        owner, rc = sh(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"], wt["path"])
+        wt["common_dir"] = os.path.realpath(owner) if rc == 0 else None
+        wt["ownership_error"] = rc != 0 or wt["common_dir"] != expected
+        admin, admin_rc = sh(["git", "rev-parse", "--absolute-git-dir"], wt["path"])
+        wt["ownership_error"] = wt["ownership_error"] or admin_rc != 0
+        wt["primary"] = not wt["ownership_error"] and os.path.realpath(admin) == expected
+        key = (wt["path"], wt["common_dir"])
+        if key not in unique:
+            unique[key] = wt
+        else:
+            unique[key].setdefault("aliases", []).append(wt["registered_path"])
+            for flag in ("locked", "prunable"):
+                if wt.get(flag):
+                    unique[key][flag] = True
+    return list(unique.values())
 
 
 def dirty(path):
-    out, rc = sh(["git", "status", "--porcelain"], path)
-    if rc != 0 or out.startswith("ERROR:"):
+    out, rc = sh(["git", "status", "--porcelain=v1", "-z", "--untracked-files=all"], path)
+    if rc != 0:
         return -1
-    return len([x for x in out.splitlines() if x.strip()])
+    entries, count, i = out.split("\0"), 0, 0
+    while i < len(entries):
+        entry = entries[i]
+        if entry:
+            count += 1
+            if "R" in entry[:2] or "C" in entry[:2]:
+                i += 1  # -z rename/copy has one extra pathname field.
+        i += 1
+    return count
+
+
+def ignored(path):
+    out, rc = sh(["git", "ls-files", "--others", "--ignored", "--exclude-standard", "-z"], path)
+    return -1 if rc else sum(bool(x) for x in out.split("\0"))
+
+
+def exact_merged_pr(pr, head, base):
+    return bool(pr and pr.get("mergedAt") and pr.get("headRefOid") == head
+                and pr.get("baseRefName") == base)
 
 
 def diff_sets(repo, base, ref):
@@ -76,10 +124,12 @@ def diff_sets(repo, base, ref):
                alone reports it unmerged, which is the false-positive this
                function exists to kill.
     """
-    a_raw, _ = sh(["git", "diff", "--no-renames", "--name-only", f"{base}...{ref}"], repo, timeout=120)
-    b_raw, _ = sh(["git", "diff", "--no-renames", "--name-only", f"{base}..{ref}"], repo, timeout=120)
-    added = [f for f in a_raw.splitlines() if f and not f.startswith("ERROR:")]
-    differing = {f for f in b_raw.splitlines() if f and not f.startswith("ERROR:")}
+    a_raw, a_rc = sh(["git", "diff", "--no-renames", "--name-only", "-z", f"{base}...{ref}"], repo, timeout=120)
+    b_raw, b_rc = sh(["git", "diff", "--no-renames", "--name-only", "-z", f"{base}..{ref}"], repo, timeout=120)
+    if a_rc or b_rc:
+        raise RuntimeError("Cannot compare branch content; retain branch")
+    added = [f for f in a_raw.split("\0") if f]
+    differing = {f for f in b_raw.split("\0") if f}
     residual = [f for f in added if f in differing]
     residual_code = [f for f in residual if not BOOKKEEPING_PAT.match(f)]
     return added, residual, residual_code
@@ -164,6 +214,24 @@ def planning_state(wt_path):
     return st
 
 
+FINISHED_STATUS = re.compile(r"\b(complete|completed|done|shipped|archived)\b", re.I)
+
+
+def session_hold(planning):
+    """True when gsd session state reserves the worktree.
+
+    A run PID file (live or stale) or an unfinished STATE.md status means a
+    stopped or resumable session may still own the work; a dead PID is not
+    deletion proof.
+    """
+    if not planning:
+        return False
+    if "runner_pid_alive" in planning:
+        return True
+    status = planning.get("status")
+    return bool(status) and not FINISHED_STATUS.search(status)
+
+
 def classify(rec):
     """One disposition per branch — the consolidation plan's unit of work.
 
@@ -175,6 +243,18 @@ def classify(rec):
     stale-abandoned    PR closed unmerged, or untouched >30d with residual
     """
     pr = rec.get("pr") or {}
+    if rec.get("worktree_current"):
+        return "retain-current-worktree"
+    if rec.get("worktree_primary"):
+        return "retain-primary-worktree"
+    if rec.get("worktree") and (
+        rec.get("worktree_dirty", -1) != 0
+        or rec.get("worktree_ignored", -1) != 0
+        or rec.get("worktree_locked") or rec.get("worktree_prunable")
+        or rec.get("worktree_ownership_error")
+        or session_hold(rec.get("planning"))
+    ):
+        return "retain-worktree-payload"
     if rec.get("landed"):
         return "delete-safe"
     if pr.get("state") == "OPEN":
@@ -196,7 +276,7 @@ def gh_prs(repo):
     try:
         r = subprocess.run(
             ["gh", "pr", "list", "--state", "all", "--limit", "400", "--json",
-             "number,title,state,headRefName,mergeStateStatus,mergedAt,isDraft,url"],
+             "number,title,state,headRefName,headRefOid,baseRefName,mergeStateStatus,mergedAt,isDraft,url"],
             cwd=repo, capture_output=True, text=True, timeout=180, env=env,
         )
         if r.returncode != 0:
@@ -217,7 +297,17 @@ def main():
     ap.add_argument("--base", default="main")
     ap.add_argument("--no-gh", action="store_true")
     args = ap.parse_args()
-    repo = os.path.abspath(args.repo)
+    requested_repo = os.path.abspath(args.repo)
+    top, root_rc = sh(["git", "rev-parse", "--show-toplevel"], requested_repo)
+    if root_rc:
+        print(json.dumps({"error": "Repository unavailable; check the requested checkout and mounted storage", "requested_repo": requested_repo}))
+        return 1
+    repo = os.path.realpath(top)
+    common, common_rc = sh(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"], repo)
+    if common_rc:
+        raise RuntimeError("Cannot determine physical repository ownership")
+    common = os.path.realpath(common)
+    common_stat = os.stat(common)
     base = args.base
 
     base_sha, rc = sh(["git", "rev-parse", base], repo)
@@ -230,8 +320,10 @@ def main():
 
     prs, gh_err = ({}, "skipped") if args.no_gh else gh_prs(repo)
 
-    out, _ = sh(["git", "for-each-ref", "refs/heads/",
+    out, refs_rc = sh(["git", "for-each-ref", "refs/heads/",
                  "--format=%(refname:short)\t%(committerdate:short)\t%(upstream:short)"], repo)
+    if refs_rc:
+        raise RuntimeError("Cannot enumerate local branch refs")
     branches = []
     for line in out.splitlines():
         parts = line.split("\t")
@@ -242,15 +334,20 @@ def main():
         if name == base:
             continue
 
-        is_merged = sh(["git", "merge-base", "--is-ancestor", name, base], repo)[1] == 0
+        # Pin both sides before any content/ancestry metrics. Later cleanup
+        # must re-read live refs against these expected OIDs, never their names.
+        tip, tip_rc = sh(["git", "rev-parse", "--verify", "refs/heads/" + name], repo)
+        if tip_rc:
+            raise RuntimeError("Cannot pin local branch tip")
+        is_merged = sh(["git", "merge-base", "--is-ancestor", tip, base_sha], repo)[1] == 0
 
-        ab, _ = sh(["git", "rev-list", "--left-right", "--count", f"{base}...{name}"], repo)
+        ab, _ = sh(["git", "rev-list", "--left-right", "--count", f"{base_sha}...{tip}"], repo)
         try:
             behind, ahead = (int(x) for x in ab.split())
         except ValueError:
             behind = ahead = -1
 
-        files, residual, residual_code = diff_sets(repo, base, name)
+        files, residual, residual_code = diff_sets(repo, base_sha, tip)
 
         tests = [f for f in files if TEST_PAT.search(f)]
         srcs = [f for f in files if SRC_PAT.search(f) and not TEST_PAT.search(f)]
@@ -278,6 +375,12 @@ def main():
             "spec": spec_artifacts(repo, sid),
             "worktree": wt["path"] if wt else None,
             "worktree_dirty": dirty(wt["path"]) if wt else None,
+            "worktree_current": bool(wt and wt["path"] == repo),
+            "worktree_primary": bool(wt and wt.get("primary")),
+            "worktree_ownership_error": bool(wt and wt.get("ownership_error")),
+            "worktree_ignored": ignored(wt["path"]) if wt else None,
+            "worktree_locked": bool(wt and wt.get("locked")),
+            "worktree_prunable": bool(wt and wt.get("prunable")),
             "planning": planning_state(wt["path"]) if wt else None,
         }
         pr = prs.get(name)
@@ -287,9 +390,10 @@ def main():
                 "merged": bool(pr.get("mergedAt")), "draft": pr.get("isDraft"),
                 "mergeState": pr.get("mergeStateStatus"), "url": pr.get("url"),
             }
-        # Landed = base already carries this branch's content. Any one of:
-        # fast-forward ancestry, a merged PR, or zero residual code.
-        rec["landed"] = bool(is_merged or (pr and pr.get("mergedAt")) or not residual_code)
+        # Keep unique docs/plans too; old merged PRs do not prove a reused tip.
+        # Errors above never become an empty-diff proof.
+        rec["head"] = tip
+        rec["landed"] = bool(is_merged or exact_merged_pr(pr, tip, base) or not residual)
         rec["disposition"] = classify(rec)
         branches.append(rec)
 
@@ -300,7 +404,8 @@ def main():
         if bname in local_names or pr["state"] != "OPEN":
             continue
         ref = f"origin/{bname}"
-        if sh(["git", "rev-parse", "--verify", "-q", ref], repo)[1] != 0:
+        remote_tip, remote_rc = sh(["git", "rev-parse", "--verify", "-q", ref], repo)
+        if remote_rc != 0:
             branches.append({
                 "branch": bname, "remote_only": True, "ref_missing": True,
                 "landed": False, "disposition": "pr-open-ref-unfetched",
@@ -309,16 +414,16 @@ def main():
                        "url": pr.get("url")},
             })
             continue
-        files, residual, residual_code = diff_sets(repo, base, ref)
+        files, residual, residual_code = diff_sets(repo, base_sha, remote_tip)
         tests = [f for f in files if TEST_PAT.search(f)]
         srcs = [f for f in files if SRC_PAT.search(f) and not TEST_PAT.search(f)]
         sid = spec_id_of(bname, files)
         # L2 (ship round 5): sh() returns "ERROR:..." text on failure —
         # int() over that crashed the whole audit.  Mirror the
         # committed_epoch guard: digits-or-sentinel, never a raw int().
-        ahead_out, ahead_rc = sh(["git", "rev-list", "--count", f"{base}..{ref}"], repo)
+        ahead_out, ahead_rc = sh(["git", "rev-list", "--count", f"{base_sha}..{remote_tip}"], repo)
         rec = {
-            "branch": bname, "remote_only": True, "last_commit": None,
+            "branch": bname, "head": remote_tip, "remote_only": True, "last_commit": None,
             "upstream": ref, "merged_into_base": False,
             "ahead": int(ahead_out) if ahead_rc == 0 and ahead_out.isdigit() else -1,
             "behind": None, "files_changed": len(files),
@@ -340,12 +445,22 @@ def main():
     detached = [w for w in wts if not w.get("branch")]
     for w in detached:
         w["dirty"] = dirty(w["path"])
-        w["on_base"] = sh(["git", "merge-base", "--is-ancestor", w["head"], base], repo)[1] == 0
+        w["ignored"] = ignored(w["path"])
+        w["cleanup_candidate"] = False  # Ancestor HEAD alone never authorizes removal.
+        w["on_base"] = sh(["git", "merge-base", "--is-ancestor", w["head"], base_sha], repo)[1] == 0
 
     result = {
         "repo": repo,
+        "cleanup_authorized": False,
+        "activity_verified": False,
+        "requested_repo": requested_repo,
+        "executing_host": socket.gethostname(),
+        "repository_identity": {"common_dir": common, "device": common_stat.st_dev,
+                                "inode": common_stat.st_ino},
+        "worktrees": wts,
         "base": base,
         "base_sha": base_sha[:10],
+        "base_oid": base_sha,
         "counts": {
             "worktrees": len(wts),
             "detached_worktrees": len(detached),
@@ -369,4 +484,8 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except (RuntimeError, OSError) as exc:
+        print(json.dumps({"error": str(exc), "cleanup_authorized": False}))
+        sys.exit(1)

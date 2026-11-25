@@ -2043,6 +2043,28 @@ def test_staging_leftovers_that_are_not_provably_the_dispatchers_are_never_delet
     assert (elsewhere / "keep").read_text() == "c"
 
 
+def test_staging_leftovers_that_group_or_others_can_reach_are_never_deleted(
+        install_fake, origin, state, tmp_path, clone_parent):
+    """Only an exact 0o700 directory can be the dispatcher's.  The mode is built from stat bits (owner rwx plus group and
+    other read/execute) so the fixture states what it means without a permissive-looking literal.  One leftover is
+    empty inside (a removed mode check would delete it) and one holds a file (a mode check masked down to the owner bits,
+    combined with a recursive delete, would delete it): both must survive, and the 0o500 case above cannot show either."""
+    reachable = stat.S_IRWXU | stat.S_IRGRP | stat.S_IXGRP | stat.S_IROTH | stat.S_IXOTH
+    assert reachable & (stat.S_IRWXG | stat.S_IRWXO) and stat.S_IMODE(reachable) != stat.S_IRWXU
+    empty_inside = _leftover(clone_parent, ch.STAGE_NEW_PREFIX)
+    (empty_inside / "new").mkdir()
+    with_file = _leftover(clone_parent, ch.STAGE_NEW_PREFIX)
+    (with_file / "new").mkdir()
+    (with_file / "new" / "keep").write_text("a")
+    for path in (empty_inside, with_file):
+        os.chmod(str(path), reachable)
+    install_fake("claude")
+    assert ch.ClaudeBackend().launch(launch_ctx(origin, tmp_path)).outcome == "launched"
+    assert (empty_inside / "new").is_dir()
+    assert (with_file / "new" / "keep").read_text() == "a"
+    assert stat.S_IMODE(os.lstat(str(empty_inside)).st_mode) == reachable
+
+
 # ── The ownership marker is written atomically; an empty leftover never wedges the fixed path ──
 
 

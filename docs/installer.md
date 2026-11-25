@@ -62,8 +62,12 @@ consumers stop running stale gate logic. A file named in the consumer's
 `scripts/gsd/fork-allowlist.txt` (first token of each non-comment line) is
 skipped when it already exists there. To check a consumer afterwards, see
 [`sync-drift-check.sh`](#sync-drift-checksh).
-review-gate runs these helpers from a copy of the merge-base with `origin/main` (else `main`), never
+review-gate runs these helpers from a copy of the tip of `origin/main` (else `main`), never
 from the reviewed working tree, so commit the reconciled runtime to `main`.
+`origin` must be the repository the change merges into, and its `main` must be protected.
+When the base ref has no FFS runtime it uses the user-scope copies of
+`adversary-host.sh`, `run-bounded.sh`, `review-tier.sh` and `security-surface.sh`
+under `~/.claude/lib/feature-fix-swarm/scripts/gsd/`.
 
 A pre-existing hand-copied file at the managed path (the old workaround for
 this gap) is an unmanaged collision: the install blocks and preserves it
