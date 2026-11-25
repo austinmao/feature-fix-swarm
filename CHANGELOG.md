@@ -59,8 +59,9 @@ all skills.
   reached stderr through `plan` and `start`. The `est` annotation error no longer
   quotes its value either, and neither do the two `tier` errors (a free-text `tier`
   next to a valid `model_request` used to be quoted in the conflict message). The
-  remaining messages are fixed text: `model_request` errors, `owns` and `verify` have no echoing error, and a flagged task id is
-  refused before any message is built.
+  remaining messages are fixed text, except `TASK_ID_INVALID` and `DEP_UNKNOWN`, which quote an unflagged task id or
+  dependency name because they must name the task (a flagged id is refused before any message is built). A `tier` or a
+  `model_request` name that is not a string is a `TASK_INVALID` error instead of an uncaught `TypeError`.
 - Admission never moves an existing remote task branch. The admit push is leased to
   an absent ref (`--force-with-lease=<ref>:`), so when two clones reuse a run and task
   id and one branch is an ancestor of the other's base, the second no longer

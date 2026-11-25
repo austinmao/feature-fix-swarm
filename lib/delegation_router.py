@@ -491,6 +491,10 @@ def _raw_fields(raw: object) -> Dict[str, Any]:
 def _resolve_tier(fields: Mapping[str, Any]) -> Tuple[str, Dict[str, Any]]:
     request = fields.get("model_request")
     tier = fields.get("tier")
+    if tier is not None and not isinstance(tier, str):
+        raise RouteError(TASK_INVALID, "tier must be a string")
+    if isinstance(request, Mapping) and request.get("kind") == "tier" and not isinstance(request.get("name"), str):
+        raise RouteError(TASK_INVALID, "model_request name must be a string")
     if request is None:
         tier = tier or DEFAULT_TIER
         request = {"kind": "tier", "name": tier}

@@ -202,6 +202,8 @@ def test_an_invalid_needs_secret_entry_is_never_echoed(line):
     ({"prompt": "p", "tier": PASSPHRASE}, dr.TASK_INVALID),
     ({"prompt": "p", "tier": PASSPHRASE, "model_request": {"kind": "tier", "name": "judgment"}}, dr.TASK_INVALID),
     ({"prompt": "p", "tier": "volume", "model_request": {"kind": "tier", "name": "judgment"}}, dr.TASK_INVALID),
+    # the "unknown tier" error: reachable only next to an exact request, which names no tier of its own
+    ({"prompt": "p", "tier": PASSPHRASE, "model_request": {"kind": "exact", "id": "gpt-x"}}, dr.TASK_INVALID),
     ({"prompt": "p", "model_request": {"kind": "tier", "name": PASSPHRASE}}, dr.TASK_INVALID),
     ({"prompt": "p", "model_request": {"kind": PASSPHRASE}}, dr.TASK_INVALID),
 ])
@@ -210,6 +212,18 @@ def test_the_other_free_text_validation_errors_never_echo_the_value_either(raw, 
         dr.normalize_tasks([raw], sequential=False)
     assert info.value.code == code
     assert PASSPHRASE not in str(info.value) and "pass phrase" not in str(info.value)
+
+
+@pytest.mark.parametrize("raw", [
+    {"prompt": "p", "tier": ["x"]},
+    {"prompt": "p", "tier": {"a": 1}},
+    {"prompt": "p", "model_request": {"kind": "tier", "name": ["x"]}},
+    {"prompt": "p", "tier": "volume", "model_request": {"kind": "tier", "name": {"a": 1}}},
+])
+def test_a_tier_that_is_not_a_string_is_a_typed_task_error_not_a_type_error(raw):
+    with pytest.raises(RouteError) as info:
+        dr.normalize_tasks([raw], sequential=False)
+    assert info.value.code == dr.TASK_INVALID
 
 
 def test_an_invalid_needs_secret_entry_names_the_task_id_when_it_has_one():
