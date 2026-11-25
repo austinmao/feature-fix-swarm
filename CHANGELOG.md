@@ -28,8 +28,11 @@ all skills.
   report the test as skipped. Turning the arm into a skip now fails three tests.
 - The macOS sandbox step's skip guard fails on any skipped test, not only on a reason that
   names the sandbox, except four allowlisted host conditions (no pasteboard, no node, no
-  terminal device, running as root). A test derives the allowlist from the skips in the
-  three cloud test files, so a new skip there needs a conscious change.
+  terminal device, running as root), and it fails when no test ran at all (an empty or
+  foreign report, or one whose only tests are allowlisted skips). A test checks the allowlist
+  against the literal skip reasons in the three cloud test files; a skip written in another
+  form (a variable, `importorskip`) is not seen by that test, but the guard still fails on it
+  in CI.
 - `resolve_root` refuses an explicit empty `--root` (`BAD_ROOT`, exit 2) instead of reading it as the working
   directory, so an empty `--root "$(git rev-parse --show-toplevel)"` outside a repository can no longer reach another
   repository's run.

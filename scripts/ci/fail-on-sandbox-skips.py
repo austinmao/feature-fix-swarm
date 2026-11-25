@@ -7,6 +7,7 @@ would skip dozens of tests and leave the step green.  This check turns every ski
 below: runtime conditions of the host (no pasteboard, no node, no terminal device, running as root) that can really
 occur on the macOS job and say nothing about the sandbox.  tests/test_ci_sandbox_skip_guard.py derives the set of
 skips in the cloud test files from their code and fails when it differs from this list.
+The check also fails when no test case ran, so a report of nothing but allowed skips is not a pass.
 
     fail-on-sandbox-skips.py REPORT.xml
 """
@@ -23,14 +24,16 @@ ALLOWED_REASONS = (
 )
 
 
-def unexpected_skips(path: str) -> list:
-    skipped = []
+def scan(path: str) -> tuple:
+    """(skips whose reason is not allowed, number of test cases that actually ran)"""
+    skipped, ran = [], 0
     for case in ET.parse(path).getroot().iter("testcase"):
+        ran += 0 if case.findall("skipped") else 1
         for node in case.findall("skipped"):
             message = (node.get("message") or "").strip()  # the reason only: the body carries a file path
             if message not in ALLOWED_REASONS:
                 skipped.append("%s::%s: %s" % (case.get("classname"), case.get("name"), message))
-    return skipped
+    return skipped, ran
 
 
 def main(argv: list) -> int:
@@ -38,7 +41,7 @@ def main(argv: list) -> int:
         print("usage: fail-on-sandbox-skips.py REPORT.xml", file=sys.stderr)
         return 2
     try:
-        skipped = unexpected_skips(argv[1])
+        skipped, ran = scan(argv[1])
     except (OSError, ET.ParseError) as exc:
         print("cannot read the junit report %s: %s" % (argv[1], exc), file=sys.stderr)
         return 2
@@ -46,6 +49,9 @@ def main(argv: list) -> int:
         print("%d test(s) were skipped on the sandbox leg (only %d host-condition reasons are allowed):" % (len(skipped), len(ALLOWED_REASONS)), file=sys.stderr)
         for line in skipped[:20]:
             print("  " + line, file=sys.stderr)
+        return 1
+    if not ran:
+        print("no test ran: the junit report %s holds no test case that was not skipped" % argv[1], file=sys.stderr)
         return 1
     return 0
 

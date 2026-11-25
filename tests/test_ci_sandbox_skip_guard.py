@@ -105,3 +105,17 @@ def test_a_skip_that_is_not_on_the_allowlist_fails_the_step(tmp_path: Path) -> N
     body = "import pytest\n\ndef test_new_skip():\n    pytest.skip(\"some new reason\")\n"
     done = _guard(_report(tmp_path, body))
     assert done.returncode == 1 and "some new reason" in done.stderr and "test_new_skip" in done.stderr
+
+
+@pytest.mark.parametrize("xml", [
+    '<testsuites><testsuite tests="0"/></testsuites>',
+    "<html/>",
+    '<testsuites><testsuite><testcase classname="c" name="n"><skipped message="no pasteboard in this session"/>'
+    "</testcase></testsuite></testsuites>",
+])
+def test_a_report_in_which_no_test_ran_fails_even_when_every_skip_is_allowlisted(tmp_path: Path, xml: str) -> None:
+    report = tmp_path / "report.xml"
+    report.write_text(xml)
+    done = _guard(report)
+    assert done.returncode == 1 and "no test ran" in done.stderr, (done.returncode, done.stderr)
+
