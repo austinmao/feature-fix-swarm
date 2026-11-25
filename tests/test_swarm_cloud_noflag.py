@@ -402,7 +402,7 @@ def _outcome(repo: Path, ci: bool):
 
 
 def _history(tmp_path: Path, *, merge_main: bool, merge_unrelated: bool, cloud_on_main: bool = False,
-             publish_main: bool = True, block_on_main: bool = True) -> Dict[str, str]:
+             publish_main: bool = True, block_on_main: bool = True, block_on_branch: bool = False) -> Dict[str, str]:
     """main (moves on after `pre`) with branches topic and cloud cut from `pre`; main and topic edit different lines."""
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -420,7 +420,10 @@ def _history(tmp_path: Path, *, merge_main: bool, merge_unrelated: bool, cloud_o
     ids["topic"] = _commit(repo, {"skills/swarm/SKILL.md": skill.replace("three", "changed behavior")}, "unrelated topic")
     _g(repo, "checkout", "-q", "-b", "cloud", ids["pre"])
     if not cloud_on_main:
-        _commit(repo, {"lib/cloud_dispatch.py": "# cloud\n"}, "add the dispatcher")
+        added = {"lib/cloud_dispatch.py": "# cloud\n"}
+        if block_on_branch:
+            added["skills/swarm/SKILL.md"] = CLOUD_SKILL
+        _commit(repo, added, "add the dispatcher")
         _commit(repo, {"docs/cloud.md": "cloud\n"}, "docs")
     if merge_main:
         _g(repo, "merge", "-q", "--no-ff", "-m", "merge main", "main")
@@ -452,6 +455,16 @@ def test_missing_history_skips_locally_and_fails_in_ci(tmp_path: Path) -> None:
         _resolve_base(repo, ci=False)
     kind, message = _outcome(repo, ci=True)
     assert kind == "fail" and "origin/main" in message, (kind, message)
+
+
+def test_a_branch_that_carries_the_block_itself_still_compares_against_the_pre_cloud_base(tmp_path: Path) -> None:
+    """The landed-base proof reads the merge base, never the branch: reading HEAD would retire all four golden
+    comparisons on this very PR, and with CI=1 nothing would turn red."""
+    ids = _history(tmp_path, merge_main=False, merge_unrelated=False, block_on_branch=True)
+    repo = Path(ids["repo"])
+    assert _g(repo, "show", "HEAD:skills/swarm/SKILL.md").count(BEGIN) == 1  # the branch carries the block
+    assert _outcome(repo, ci=True) == ("ok", ids["pre"])
+    assert _outcome(repo, ci=False) == ("ok", ids["pre"])
 
 
 def test_cloud_work_already_on_the_base_is_a_skip_even_in_ci(tmp_path: Path) -> None:

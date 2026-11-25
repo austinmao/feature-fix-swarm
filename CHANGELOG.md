@@ -23,6 +23,9 @@ all skills.
   in step 1 with a valid example, reused on a retry or resume, asked for when unknown) and
   gives exits other than 0 and 3 of `plan`, and exit 2 of `start`, a rule: relay stderr, run
   nothing, stop.
+- A no-flag test pins that the landed-base proof reads the merge base and never the branch: with
+  the proof read from `HEAD`, the four golden comparisons would have been silently skipped on
+  this PR (and still green with `CI=1`); now one test fails.
 - The no-flag comparison's tests of the fail-in-CI arm name the outcome (`fail`, `skip` or
   `ok`) instead of `pytest.raises(pytest.fail.Exception)`, which let a skip escape and
   report the test as skipped. Turning the arm into a skip now fails three tests.
