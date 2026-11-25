@@ -14,7 +14,7 @@ agents; a secret value in it is a leak, and `check` refuses one.
 `lib/gates.py` already parsed a parity manifest (`_parse_parity_manifest_yaml`).
 The registry reuses that parser instead of generating a second file from a
 first, so there is no derived artifact to regenerate and nothing to drift.
-`_resolve_registry` (`lib/gates.py:2305`) resolves it for every existing
+`_resolve_registry` in `lib/gates.py` resolves it for every existing
 `check-grant` call site, which makes those calls non-vacuous without editing a
 single call site.
 
@@ -59,11 +59,11 @@ Three blocks, three audiences:
 Schema authority for the first two blocks lives in `env-registry.sh`; the
 surfaces block is always round-tripped through
 `lib/gates.py:_load_manifest_text` rather than re-parsed, so the gate and the
-validator can never disagree (`scripts/gsd/env-registry.sh:17-20`).
+validator can never disagree (see the header of `scripts/gsd/env-registry.sh`).
 
 ## Resolution and hard mode
 
-Precedence (`lib/gates.py:2305`):
+Precedence (`_resolve_registry` in `lib/gates.py`):
 
 ```
 --manifest <path>  →  $FFS_ENV_REGISTRY  →  config/environments.yaml
@@ -72,12 +72,12 @@ Precedence (`lib/gates.py:2305`):
 
 With none of them present, gates behave exactly as they did before the registry
 existed and print one `ENV-REGISTRY-ABSENT` advisory naming `/ffs-init`
-(`lib/gates.py:2453`).
+(`_registry_absent_advisory` in `lib/gates.py`).
 
 Under `--require-environments`, or `FFS_ENV_REGISTRY_REQUIRED=1`, the registry
 becomes mandatory **and** the authority shifts: a caller-supplied registry's
 verdict content is parsed from **HEAD bytes**, not the working tree
-(`lib/gates.py:2326-2336`). A dirty or uncommitted registry can therefore never
+(`_resolve_registry` and `_head_bytes` in `lib/gates.py`). A dirty or uncommitted registry can therefore never
 widen a production gate — it can only refuse. Soft mode keeps the working-tree
 taxonomy for its refusal classes.
 
@@ -136,7 +136,7 @@ env-registry.sh <detect|check|render|apply|seed> [flags]
 
 Concurrency: a second `apply` fails fast rather than interleaving —
 `ENV-REGISTRY-BUSY: another apply holds .ffs-init.lock`
-(`scripts/gsd/env-registry.sh:1608`). Rerun after the other one finishes.
+(`scripts/gsd/env-registry.sh`). Rerun after the other one finishes.
 
 ### Exit codes
 
@@ -157,7 +157,7 @@ top-level '<key>:' list of rows each with '<k1>:' and '<k2>:'; nothing written
 ### Leak scan
 
 `check` scans the resolved registry, `apply` scans the candidate bytes before
-anything is written. Eight shape classes (`scripts/gsd/env-registry.sh:139-152`):
+anything is written. Eight shape classes (the leak-scan table in `scripts/gsd/env-registry.sh`):
 `pem-block`, `jwt`, `aws-access-key`, `provider-token-prefix`,
 `credential-url`, `secret-assignment`, `hex-run`, `base64-run`. A finding
 reports position and class only:
@@ -173,16 +173,16 @@ the credential, then rewrite history.
 
 `detect` proposes; it never decides. Every proposed row carries `confidence:`
 and `evidence:`, and lands with `verified: null` for a human to confirm
-(`scripts/gsd/env-registry.sh:815-931`).
+(the `detect` verb in `scripts/gsd/env-registry.sh`).
 
 | Heuristic | Trigger | Confidence |
 |---|---|---|
 | `vercel` | `vercel.json` or `.vercel/` → `prod` + `preview` | medium |
 | `wrangler-env` | each `[env.X]` header in `wrangler.toml` | medium |
 | `fly` | `fly.toml` → `prod`; `fly.<name>.toml` → one row each | low / medium |
-| `compose` | any `docker-compose.*` / `compose.*` → `local` | high |
+| `compose` | `docker-compose.yml`/`.yaml` or `compose.yml`/`.yaml` (first found) → `local` | high |
 | `k8s-overlay` | each directory under `k8s/overlays` or `kustomize/overlays` | medium |
-| `dotenv` | each `.env.<suffix>` (not `example`/`sample`/`template`); collects **key names only**, left of `=` | medium |
+| `dotenv` | each `.env.<suffix>` (not `example`/`sample`/`template`); collects **key names only**, left of `=` | medium (low if the file is unreadable) |
 | `workflow-environment` | each `environment:` key in `.github/workflows/*.yml` | medium |
 | `doppler` | each `config:` name in `doppler.yaml` | low |
 | `bare` | nothing detected → a single `local` row | high |
@@ -212,8 +212,8 @@ ADVISORY: <n> proposal(s) suppressed by declines in .ffs-init.json — run
 | Seam | What it reads |
 |---|---|
 | `lib/gates.py` `check-grant` | `surfaces` — a `staging_instance: none` surface fail-closes a production promotion (`docs/promotion-protocol.md`) |
-| `/preflight` (`skills/preflight/SKILL.md:39`) | `env-registry.sh seed` — candidate manifest rows, secret NAMES only |
-| CI (`.github/workflows/ci.yml:45`) | `env-registry.sh check` — typed: 0 ok / 1 schema-or-usage refusal / 2 leak |
+| `/preflight` (`skills/preflight/SKILL.md`) | `env-registry.sh seed` — candidate manifest rows, secret NAMES only |
+| CI (`.github/workflows/ci.yml`) | `env-registry.sh check` — typed: 0 ok / 1 schema-or-usage refusal / 2 leak |
 | `scripts/gsd/test-tier.sh` | `test_tiers` — the only source of CI test commands |
 | Promotion protocol rules 3, 4, 5 | environment scoping, secrets-by-name, per-environment verified dates |
 

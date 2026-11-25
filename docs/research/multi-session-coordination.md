@@ -28,6 +28,8 @@ Operator-confirmed failure modes actually hit (2026-08-07):
 
 Designed but unbuilt (owned by the parallel full-autonomy program, specs 006–008): takeover records + land-queue (006), env registry (007), global finisher lock G11 + handoff fencing G9 (008).
 
+> Update 2026-11-19: land-queue and takeover records were built after this report; see [`skills/land-queue`](../../skills/land-queue/SKILL.md), `scripts/gsd/land-queue.sh` and `scripts/gsd/takeover-check.sh`. The environment registry also exists; see [Environment registry](../environment-registry.md).
+
 **The gap is strictly CROSS-session:** task claiming, path reservations, env/deploy leases with fencing, cross-session journal, human-readable projection.
 
 ## 3. External survey

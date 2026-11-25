@@ -37,7 +37,11 @@ left unresolved in the findings-queue and listed in the phase's
 `WALL-RESIDUALS.md`. **(c) wall the diff** — those residuals are closed at
 the executed-diff review: `review-gate-command.sh` feeds every
 `WALL-RESIDUALS.md` to the ship reviewer as review focus, where each finding
-is falsifiable against real code instead of prose. The findings-queue remains
+is falsifiable against real code instead of prose. On an approved review it
+closes a residual (disposition `fix`) only if the finding is still unresolved and
+its stored record still matches the snapshot of the queue it took before the
+review; a finding re-opened, re-tagged or adjudicated meanwhile is left alone, and
+a `gates.py` without those guards closes nothing and prints a warning. The findings-queue remains
 the authoritative residual record; the manifest is a convenience surface.
 
 ## Accepted risk: loop credential scope (operator decision, 2026-08-07)

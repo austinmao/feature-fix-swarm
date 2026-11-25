@@ -14,6 +14,13 @@ live, and its output parsers are still unverified. See
 [Live verification](#live-verification) for what was and was not checked, and
 [Not in this release](#not-in-this-release).
 
+How-to guides:
+
+- [How to run your first cloud delegation](howto-cloud-first-run.md)
+- [How to give cloud sessions secrets with Doppler](howto-cloud-secrets-doppler.md)
+- [How to give cloud sessions secrets without Doppler](howto-cloud-secrets-other.md)
+  (modes `none`, `provider-env` and `command`)
+
 ## What it is and what it is not
 
 `--cloud` is an opt-in flag on `/swarm` only. Both of these turn it on:
@@ -634,7 +641,17 @@ descent=<0|1>` line, taken from `adversary-host.sh`'s own record of which
 model answered (not from the reviewer's output). It ends with one line
 `CLOUD-REVIEW: APPROVE|REVISE|UNAVAILABLE|cap` and exits 0, 1, 3 or 4. Any
 other verdict, a nonzero reviewer exit, or a diff over 2,000,000 bytes is
-`review-unavailable`. An `APPROVE` only counts when the model that answered
+`review-unavailable`. So is a failure of the round accounting that is not the
+cap: `gates.py loop-round` exits 1 for the cap and for a refused evidence store
+alike, and only its `LOOP-CAP:` line on stdout makes it `CLOUD-REVIEW: cap`.
+For any other failure the script prints one `CLOUD-REVIEW-REASON: round
+accounting failed (rc=N): <first stderr line, limited to a safe character set>`
+line before the verdict line, and the dispatcher puts that reason in the
+`review-unavailable` detail. The script also pins the evidence store it resolved
+(`gates.py store-path`) before it enters its scratch directory, and it treats no
+rung as tripped: the repository's rung breaker, which local reviews share, never
+steers a cloud review onto another model (that would end as
+`review-model-downgraded`). Its rows are still recorded. An `APPROVE` only counts when the model that answered
 is the requested judgment-tier model. `adversary-host.sh` can descend to a
 weaker model of the same vendor and still return `APPROVE`. That approval ends
 in `needs-operator` with `review-model-downgraded`, and an approval whose model
@@ -885,7 +902,7 @@ commit it started on. Missing keys take the defaults below.
 | `verify.timeout_s` | `900` | Wall limit for one test run. |
 | `verify.deps` | `["node_modules", ".venv"]` | Directories of your main worktree linked read-only into the test tree, if they exist. |
 | `verify.read_roots` | `[]` | Extra absolute directories the sandbox may read. Not in the template. |
-| `secrets.provider` | `"none"` | `none`, `provider-env`, `doppler` or `command`. See [Secrets](#secrets). Other values are not rejected and behave like a non-`none` mode. |
+| `secrets.provider` | `"none"` | The code names `none`, `doppler` and `command`. `provider-env` is a documentation label, not a named value. Any other value is not rejected and behaves like a non-`none` mode with no install step. See [Secrets](#secrets). |
 | `secrets.wrapper` | `""` | Command prefix that workers use for test and runtime commands. |
 | `secrets.install` | `""` | Install command for the secrets CLI (`command` mode). |
 | `secrets.exposure.claude`, `.codex` | `[]` | Every secret name reachable from that provider's environment. Not only the ones tasks use. |
@@ -895,7 +912,8 @@ commit it started on. Missing keys take the defaults below.
 | `deadline_hours` | `12` | Whole hours a launched session may run. Also bounds the worker's time budget. |
 
 Secret names should be `UPPER_SNAKE` starting with a letter, 64 characters
-or fewer. The manifest validator rejects other names in `env_report`.
+or fewer. The result manifest validator rejects other names in `env_report`;
+`[needs-secret:]` annotations and `secrets.exposure` entries are checked more loosely.
 
 ### Environment variables
 
@@ -1012,7 +1030,7 @@ that ends terminal but not `integrated` becomes `failed` with blocker
 | `path-outside-owns` | `needs-operator` | A changed path does not match `owns`. | `resolve --action reject`, or `abandon --retry` |
 | `denylist` | `needs-operator` | A changed path matches the denylist, holds a Unicode format or control character (Cf or Cc), or collides in case with another path (detail `case-colliding paths`). | `resolve --action reject`, or `abandon --retry` |
 | `dependency-change` | `needs-operator` | A dependency or lock file changed. | `resolve --action accept-deps` (needs the `install:<pkg>` grants, and `install:unattributed:<digest12>` when the change cannot be attributed to named packages), or `reject` |
-| `review-unavailable` | `needs-operator` | Review failed to produce a verdict, the diff was too large, the review script is missing, or the outbound scan of the review text refused. | `resolve --action retest` (refused after two retests of this task generation) or `reject` |
+| `review-unavailable` | `needs-operator` | Review failed to produce a verdict, the diff was too large, the review script is missing, the round accounting failed for a reason other than the cap (the detail carries the reason), or the outbound scan of the review text refused. | `resolve --action retest` (refused after two retests of this task generation) or `reject` |
 | `review-model-downgraded` | `needs-operator` | The review approved, but a weaker model than the requested judgment-tier model answered. The detail names both models. | `resolve --action retest` (counts against the same two-retest limit as the other review blockers, counted from the stale re-review when one began) or `reject` |
 | `review-model-unknown` | `needs-operator` | The review approved, but the answering model could not be determined. | `resolve --action retest` (same limit) or `reject` |
 | `verify-cmd-missing` | `needs-operator` | The effective verify command was empty or whitespace-only when verification ran. The router refuses such a task, so this is a defensive stop for a hand-edited or older ledger. No tests ran. | `resolve --action reject` or `abandon --retry` |
@@ -1236,6 +1254,9 @@ Codex backend was not run live); the parsers accept JSON with `id` and `status` 
 FFS never reads, stores or sends a secret value. Values live in the provider
 environment, put there by you. FFS handles names only.
 
+Step-by-step guides: [Doppler mode](howto-cloud-secrets-doppler.md) and
+[modes `none`, `provider-env` and `command`](howto-cloud-secrets-other.md).
+
 Two rules apply in every mode:
 
 - Exposure is the whole environment. Every worker session sees everything
@@ -1249,8 +1270,8 @@ Two rules apply in every mode:
 
 | Mode | What FFS does |
 |---|---|
-| `none` | Default. No secret handling. |
-| `provider-env` | Workers read the values as environment variables of the session. No wrapper. |
+| `none` | Default. The worker packet carries no secrets text. |
+| `provider-env` | Not a value the code names. A documentation label for "values are environment variables of the provider session". It behaves like any other value except `none`, `doppler` and `command`: the packet carries your `secrets.wrapper` if set (otherwise it says no wrapper is needed) and the allowed secret names, and `setup.sh` runs no install step. |
 | `doppler` | `setup.sh` installs the Doppler CLI. The worker prompt carries your `secrets.wrapper` if you set one. |
 | `command` | `setup.sh` runs `secrets.install` through `bash -c`. The worker prompt carries your `secrets.wrapper`. |
 
@@ -1260,6 +1281,9 @@ The default. Leave `exposure` empty. Workers get no secrets. Mark any task
 that needs one `[local]`, or use a mode below.
 
 ### Mode provider-env
+
+`provider-env` is a label, not a value the code names; any value other than
+`none`, `doppler` or `command` behaves the same.
 
 1. Set `"provider": "provider-env"` and list every name in
    `exposure.claude` and/or `exposure.codex`.
@@ -1474,8 +1498,9 @@ for the list of files and reasons.
 ### Runbook: review unavailable
 
 Blocker `review-unavailable`: the reviewer CLI is missing or not logged in,
-timed out, printed no single verdict line, or the diff was over 2,000,000
-bytes.
+timed out, printed no single verdict line, the diff was over 2,000,000
+bytes, or the round accounting failed for a reason other than the cap (the
+detail then ends with the reason, for example a refused evidence store).
 
 1. Fix the cause. For a large diff split the task.
 2. `resolve --action retest` re-runs the review.

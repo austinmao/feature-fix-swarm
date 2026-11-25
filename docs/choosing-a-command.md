@@ -108,7 +108,7 @@ months. It bakes TDD/BDD/E2E test contracts into `spec.md` and `plan.md`
 Wrong choice when: the task fits in a sentence and nobody will ever reread
 the spec. That's `/task-swarm`.
 
-- Produces: `specs/NNN/{spec.md, plan.md, tasks.md, prior-art.md, preflight.json}`, `.planning/` seed, grant ledger
+- Produces: `specs/NNN/{spec.md, plan.md, prior-art.md, preflight.json}`, `.planning/` seed, grant ledger
 - Chains: `speckit.specify` → `speckit.plan` → (optional `/autoplan`) → `speckit.clarify` → `spec-decompose` → `preflight` → autonomy-grant → `feature-implement`
 - Operator stops: 0 by default (MAX-AUTH auto-grants at Step 6); 1 with `--gated`
 - Flags: `--gated`, `--no-clarify`, `--no-preflight`, `--no-grant`, `--no-swarm`, `--dry-run`
@@ -133,8 +133,9 @@ having `/feature-spec` or `/task-swarm` invoke it. Same skill, same walls.
 
 ## Deprecated
 
-`/feature` is deprecated. It is a stub that chains `/feature-spec` →
-`/feature-implement`. Call those two directly.
+`/feature` is deprecated. It is a stub that chains `/feature-spec` (only when
+`specs/NNN/tasks.md` is missing) → `/feature-implement`, run attended: it does
+not pass `--autonomous`. Call those two directly.
 
 ## The two gates every path crosses
 
@@ -209,6 +210,27 @@ you delete the only copy.**
 The load-bearing subtlety in both: on a squash-merge repo, `git branch --merged`
 lies. A squash-merged branch looks unmerged by ancestry alone, so both commands
 treat merged-PR state and residual-code emptiness as authoritative instead.
+
+## Other skills
+
+None of these is a front door. Each has one job; the full flags are in
+[Commands](commands.md).
+
+| Skill | Reach for it when |
+|-------|-------------------|
+| `/plan-decompose "description"` | You have a description or a plan and want `tasks.md` without the speckit interview. `/task-swarm` runs it for you |
+| `/spec-decompose NNN` | `specs/NNN/plan.md` exists and you want it turned into a seeded `.planning/` project and gsd phase plans (it writes no `tasks.md`). `/feature-spec` runs it for you |
+| `/swarm "task" ...` | You have several independent tasks to run in parallel waves, with no spec and no ship tail. For a feature, use `/feature-implement`. `--cloud` is experimental, opt-in and available here only (`/feature-implement` and `/task-swarm` print a "later release" line and stop when given it); see [Cloud delegation](cloud-delegation.md) |
+| `/review-gate` | The diff is staged and you want the cross-model review before `/ship`. The finish tail of `/feature-implement` already runs it. It prints `GATE: PASS` or `GATE: FAIL` |
+| `/verify-review` | A review verdict arrived and you are about to act on it. Spot-check its load-bearing claims against current HEAD first |
+| `/code-uplift <path>` | Code already exists and needs review, refactor and tests, not a new feature or a single bug fix |
+| `/testing-policy` | You are writing or judging tests and want the mocking, real-browser and coverage rules. Other skills load it for you |
+| `/adopt-wip` | A worktree or agent session died with uncommitted work that may be worth keeping rather than rebuilding |
+| `/area-status <area>` | You need evidence that a named area of the codebase is actually done, not a recollection. For a spec in flight, use `/spec-status` |
+| `/land-queue` | Several finished branches need to land one at a time under exact merge grants |
+| `/goal-wrap "objective"` | You are about to `/clear`, hand off, or switch machines and want a self-contained goal prompt |
+| `/ffs-init` | First setup of a repo: dependency check and the environment registry |
+| `/retro-triage` | Maintainers only: turn validated retro issues into an advisory brief for a spec |
 
 ## Related
 

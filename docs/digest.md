@@ -52,9 +52,10 @@ new first-parent commit's diff through `python3 lib/gates.py scan-tamper`.
 
 ## Invocation seams (no daemon)
 
-1. **Run end:** `run-finalizer.sh` invokes `digest.sh --immediate` fail-soft
-   just before its final note (presence-guarded; can never change finalizer
-   exit status).
+1. **Run end:** `run-finalizer.sh` invokes `digest.sh --immediate` fail-soft,
+   then runs `retro.sh analyze` (presence-guarded; can never change finalizer
+   exit status). It drops `GATES_STORE` first, so the run-end digest reads the
+   canonical common-dir ledger.
 2. **Operator cron:**
 
 ```cron
@@ -93,5 +94,6 @@ DIGEST_NOTIFY_CMD='slack-post #ops' scripts/gsd/digest.sh --immediate
 
 `specs` (completed/quarantined), `merges` (local git, with shas),
 `degraded-review` (ratio), `tokens` (used vs budget), `pending`,
-`stranded` (branch/worktree counts), `oldest-pr`. gh-backed fields render
-`unavailable` when gh fails; git-backed fields are always local.
+`stranded` (branch/worktree counts), `oldest-pr`. A degraded source renders
+`unavailable`. `oldest-pr` is the only gh-backed field; `merges` and the
+branch and worktree counts come from local git.

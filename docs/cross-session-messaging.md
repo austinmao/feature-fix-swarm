@@ -46,12 +46,20 @@ takes the lock. Its stated gaps: writes performed through the Bash tool and
 
 `lib/gates.py` keeps one JSON ledger that every session reads and writes. Its
 path is pinned to the **main checkout** via `git rev-parse --git-common-dir`
-(`lib/gates.py:1908-1930`), which is the fix for a real incident: four separate
+(`_store_path()` in `lib/gates.py`), which is the fix for a real incident: four separate
 `evidence.json` files were live at audit time, one per worktree, each session
 happily reading its own decoy. `$GATES_STORE` still wins when set.
 
+A default store that git tracks is refused: a committed store would let a branch
+plant grants or resolved findings. The check is on the main checkout's top-level
+directory, including a case or Unicode spelling of `.feature-fix-swarm` and a
+committed symlink in its place; only `install-manifest.json` and `vendor/`, which a
+project-scope install writes there for you to commit, may be tracked. When git cannot answer inside a
+checkout, `gates.py` stops too. Setting `$GATES_STORE` names another store and skips
+the check.
+
 One store also makes the lock mean something. `_StoreLock` takes an exclusive
-`flock` on `<store>.lock` around every read-modify-write, and `_save_store`
+`flock` on the lock file beside the store (`evidence.lock`) around every read-modify-write, and `_save_store`
 writes a same-directory tempfile then `os.replace`s it, so a concurrent reader
 never sees a torn file.
 
@@ -72,14 +80,14 @@ older version of this one — wrote it.
 
 Two locks stop two sessions from doing the same irreversible thing.
 
-**Runner pidfile** (`scripts/gsd/lib-lock.sh:54-114`). An atomic `set -C` claim
+**Runner pidfile** (`ffs_lock_acquire` in `scripts/gsd/lib-lock.sh`). An atomic `set -C` claim
 plus a heartbeat file. A duplicate launch exits **75**. Reclaim requires a
 reclaim-mutex and a machine identity check; a symlinked lock path refuses with
 78. The coord claim is taken after pidfile ownership is confirmed and *before*
 the heartbeat subshell forks — a claim taken after the fork would leave the
 subshell without a generation for the run's whole life.
 
-**Finisher lock** (`scripts/gsd/run-finalizer.sh:98-143`). Per **user**, not per
+**Finisher lock** (`scripts/gsd/run-finalizer.sh`). Per **user**, not per
 repo: `$HOME/.cache/feature-fix-swarm/finisher.lock`. Losing it is a visible
 yield, and this is the closest thing in the system to a directed message: the
 loser writes a `finisher-skipped` evidence event carrying `run_id`, `pr`,
@@ -158,17 +166,17 @@ never timestamps, and a transport failure retains only the failing class's
 cursor so redelivery is guaranteed per class. Full contract in
 [Digest](digest.md).
 
-## What does not exist yet
+## Takeover records and the land queue
 
-Do not go looking for these; they are designed and unbuilt, owned by spec 006:
+Three pieces of the takeover path exist:
 
-- `<store>/takeover/*.json` — the machine-readable takeover record.
-- `takeover-check.sh` — the deterministic re-verify wall.
-- `/land-queue` — the N-items-to-`origin/main` drain.
+- `<store dir>/takeover/spec-NNN.json` — the machine-readable takeover record, in a `takeover/` directory beside `evidence.json`. `scripts/gsd/takeover-record.py` writes it from typed local facts. Records are hostile discovery data, never authority.
+- `scripts/gsd/takeover-check.sh --run-id spec-NNN` — the deterministic re-verify wall. `/feature-implement --autonomous` runs it before executing. `takeover-check.sh --list` shows record metadata only.
+- `/land-queue` (`scripts/gsd/land-queue.sh`) — drains finished branches into the base branch one at a time, with a journal. See the [land-queue skill](../skills/land-queue/SKILL.md).
 
-The only takeover machinery that exists today is the intra-runner reclaim lease
-(`GSD_RECLAIM_LEASE_SECS`, see [Configuration](configuration.md)), which is a
-lock-reclaim timeout and not a takeover record.
+The intra-runner reclaim lease (`GSD_RECLAIM_LEASE_SECS`, see
+[Configuration](configuration.md)) is separate: it is a lock-reclaim timeout and
+not a takeover record.
 
 Known limitation worth planning around: leases have no waiter queue, so shared
 holders can starve an exclusive waiter indefinitely.

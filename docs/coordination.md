@@ -34,7 +34,7 @@ default:
 |---|---|
 | `enforce` (default) | Every command applies its full contract — a held claim refuses a second claimant, a lease conflict blocks. |
 | `audit` | The same decisions are computed and logged, but nothing is refused. |
-| `off` | Every coord command prints `COORD-OFF` and exits 0 without touching the registry. |
+| `off` | Every coord command except `doctor` prints `COORD-OFF` and exits 0 without touching the registry. |
 
 ## CLI reference
 
@@ -51,10 +51,10 @@ COORD-CONTENTION (lock timeout, retryable), `78` store/config refusal
 | `claim <spec-id>` | `[--ttl N] [--heartbeat N]` | `session=<uuid>` then `CLAIM-OK generation=<n>` | `CLAIM-HELD holder=... anchor_pid=... worktree=... expires_at=...` | 0 / 2 / 3 / 64 / 69 / 75 / 78 |
 | `claim-check <spec-id>` | `--generation N` | `CLAIM-OK` | `CLAIM-SUPERSEDED caller_generation=N current_generation=M` | 0 / 4 |
 | `claim-renew <spec-id>` | `--generation N [--ttl N]` | `CLAIM-OK generation=<n>` | `CLAIM-SUPERSEDED ...` (generation mismatch or gone) or `CLAIM-HELD ...` (foreign holder) | 0 / 3 / 4 (plus 69 / 75 / 78 store-failure arms — the runner budgets these, see Runner lifecycle) |
-| `release <spec-id>` | `--generation N` | `RELEASE-OK` | `RELEASE-REFUSED: foreign holder` / `: stale generation` | 0 / 3 |
-| `lease-acquire` | `--resource <key> --mode shared\|exclusive [--ttl N] [--heartbeat N]` | `session=<uuid>` then `LEASE-OK generation=<n>` | lease-held listing | 0 / 3 |
-| `lease-renew` | `--resource <key> --generation N [--ttl N]` | `LEASE-OK generation=<n>` | `LEASE-SUPERSEDED caller_generation=N current_generation=M` | 0 / 4 |
-| `lease-release` | `--resource <key> --generation N` | `RELEASE-OK` | `RELEASE-REFUSED: stale generation` / `: not a recorded holder` | 0 / 3 |
+| `release <spec-id>` | `--generation N` | `RELEASE-OK` | `RELEASE-REFUSED: foreign holder` / `: stale generation` / `: not last holder` | 0 / 3 |
+| `lease-acquire` | `--resource path:<relative-path> --mode shared\|exclusive [--ttl N] [--heartbeat N]` | `session=<uuid>` then `LEASE-OK generation=<n>` | lease-held listing | 0 / 3 |
+| `lease-renew` | `--resource path:<relative-path> --generation N [--ttl N] [--heartbeat N]` | `LEASE-OK generation=<n>` | `LEASE-SUPERSEDED caller_generation=N current_generation=M` | 0 / 4 |
+| `lease-release` | `--resource path:<relative-path> --generation N` | `RELEASE-OK` | `RELEASE-REFUSED: stale generation` / `: not a recorded holder` | 0 / 3 |
 | `status` | (none) | one line per live claim and lease holder (holder, generation, anchor_pid, `anchor_liveness`, historical `acquisition_cli_pid`, worktree, `last_renewed_at`, `ttl_secs`, `expires_at`, and any `flags=`) | — | 0 |
 | `doctor` | (none) | see [Troubleshooting](#troubleshooting) | — | 0 / 69 |
 
@@ -108,9 +108,10 @@ all — see [Manual CLI path](#manual-cli-path) below for how to protect it.
 
 ## Manual CLI path
 
-Any interactive session, and any runner invocation without an explicit
-`GSD_RUN_ID`, gets no automatic protection. Claim manually before starting
-work on a spec:
+A runner invocation without an explicit `GSD_RUN_ID` gets no automatic
+protection. The `/feature-spec` and `/feature-implement` skills take their own
+interactive claim (`--ttl 14400`) in their claim step, but any other
+interactive session does not. Claim manually before starting work on a spec:
 
 ```bash
 export FFS_RUN_ID=spec-NNN   # or whatever spec-stable id this session uses

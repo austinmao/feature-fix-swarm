@@ -46,7 +46,7 @@ placeholder can never mask the smoke gate's verdict.
 | Template | Trigger | What it does |
 |---|---|---|
 | `pr-fast.yml` | `pull_request` | Fast tier, 10-minute cap, concurrency with cancel-in-progress |
-| `main-full.yml` | push to `main` | Full tier across a 3.11/3.12 matrix (`fail-fast: false`), uploads the tier-command transcript as an artifact |
+| `main-full.yml` | push to `main` | Full tier across a 3.11/3.12 matrix (`fail-fast: false`), uploads the resolved tier-command list as an artifact |
 | `nightly-deep.yml` | `schedule` + `workflow_dispatch` | Deep tier; on failure a separate job opens an issue rather than reddening the default branch |
 | `deploy-staging.yml` | `workflow_call` / `workflow_dispatch` | Deploy → smoke gate → `gates.py promote` |
 | `deploy-prod.yml` | `workflow_call` / `workflow_dispatch` | Default-branch refusal → `check-grant --require-environments` → deploy → smoke gate → rollback **emitted** |

@@ -82,8 +82,16 @@ python3 scripts/verify-skill-blocks.py
 python3 scripts/lint_host_dispatch.py skills/*/SKILL.md
 python3 scripts/lint_model_routing.py
 python3 lib/model_requests.py lint templates/model-requests.json
-shellcheck -S warning setup.sh hooks/*.sh scripts/*.sh scripts/hooks/*.sh scripts/gsd/*.sh tests/fixtures/socratic-installer-stub.sh
+shellcheck -S warning setup.sh hooks/*.sh scripts/*.sh scripts/hooks/*.sh scripts/gsd/*.sh scripts/coord/*.sh scripts/ci/*.sh tests/fixtures/socratic-installer-stub.sh
 bats --print-output-on-failure $(find . -name '*.bats' -not -path './.git/*')
+```
+
+CI also runs these checks, so run them before you push:
+
+```bash
+bandit -r lib scripts -x lib/tests,lib/run_state/tests -lll -q
+bash scripts/gsd/env-registry.sh check
+bash tests/live-gsd-package.sh
 ```
 
 On macOS, also keep the zsh parser contract green:
@@ -91,6 +99,16 @@ On macOS, also keep the zsh parser contract green:
 ```bash
 zsh -n setup.sh scripts/gsd/gsd-run.sh scripts/install-prompt-master.sh scripts/install-socratic.sh
 ```
+
+The macOS CI job also runs the sandbox-gated cloud tests
+(`tests/test_cloud_sandbox.py`, `tests/test_cloud_collect.py` and
+`tests/test_cloud_dispatch.py`) with a junit report, then runs
+`scripts/ci/fail-on-sandbox-skips.py` on it. The step fails on any skipped test
+except four host conditions (no pasteboard, no `node`, no `/dev/ttys*` device,
+running as root), and when no test ran at all. A new skip for a host condition
+needs its literal reason added to `ALLOWED_REASONS` in that script. A new
+sandbox-gated skip must not be added there: the test pins the three sandbox
+reasons. `tests/test_ci_sandbox_skip_guard.py` fails when the lists differ.
 
 Tests that require provider credentials or live model calls must remain
 explicit and must never print or commit credential values.
