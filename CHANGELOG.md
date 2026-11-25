@@ -8,6 +8,16 @@ all skills.
 
 ## Unreleased
 
+### Fixed (2026-11-25, cloud delegation: close-out round)
+
+- `/swarm` skill 2.2.10 passes `--root` to `plan`, `start` and the new `status` check as
+  the main worktree (`dirname "$(git rev-parse --path-format=absolute --git-common-dir)"`).
+  From a linked worktree `git rev-parse --show-toplevel` is refused as
+  `NOT_MAIN_WORKTREE`, and the `status` proof added in 2.2.9 hit the same refusal, so a
+  first run from a linked worktree ran nothing. A `NOT_A_REPO` refusal needs no `status`
+  (no ledger can exist) and falls back to local under `auto` and `prefer`, never under
+  `required`.
+
 ### Fixed (2026-11-24, cloud delegation: round 8)
 
 - Grant checks read the grant store of the `--root` repository, not the caller's

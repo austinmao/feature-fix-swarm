@@ -277,6 +277,41 @@ def test_swarm_plan_refusal_runs_locally_only_when_the_ledger_is_proven_missing(
     assert "CLOUD-ERROR: LEDGER_MISSING" in rule
 
 
+ROOT_DERIVATION = 'ROOT="$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")"'
+
+
+def test_swarm_cloud_verbs_take_the_main_worktree_root_so_a_linked_worktree_still_works(tmp_path):
+    """From a linked worktree `--show-toplevel` is refused (NOT_MAIN_WORKTREE); the skill's derivation names the main one."""
+    block = " ".join(_cloud_block().split())
+    assert ROOT_DERIVATION in block
+    assert '--policy P --root "$ROOT" --with-doctor' in block and 'start --run <run> --tasks FILE --policy P --root "$ROOT"' in block
+    assert 'status --run <run> --root "$ROOT"' in block and "git rev-parse --show-toplevel)\"`" not in block
+    main, linked = tmp_path / "main", tmp_path / "linked"
+    main.mkdir()
+    _g(main, "init", "-q", "-b", "main")
+    _g(main, "commit", "-q", "--allow-empty", "-m", "init")
+    _g(main, "worktree", "add", "-q", str(linked))
+
+    def cli(*args, cwd):
+        return subprocess.run([sys.executable, str(ROOT / "lib" / "cloud_dispatch.py"), *args], cwd=str(cwd),
+                              capture_output=True, text=True, timeout=60)
+
+    derived = subprocess.run(["bash", "-c", ROOT_DERIVATION + '; printf %s "$ROOT"'], cwd=str(linked), capture_output=True,
+                             text=True, timeout=60).stdout
+    assert os.path.realpath(derived) == os.path.realpath(str(main))
+    wrong = cli("status", "--run", "never-started", "--root", os.path.realpath(str(linked)), cwd=linked)
+    assert "NOT_MAIN_WORKTREE" in wrong.stdout + wrong.stderr  # what the old text hit
+    right = cli("status", "--run", "never-started", "--root", derived, cwd=linked)
+    assert right.returncode == 78 and right.stderr.startswith("CLOUD-ERROR: LEDGER_MISSING "), (right.stdout, right.stderr)
+
+
+def test_swarm_not_a_repo_refusal_falls_back_local_but_never_under_required():
+    rule = " ".join(_cloud_block().split())
+    sentence = rule[rule.index("CLOUD-REFUSED: NOT_A_REPO"):]
+    sentence = sentence[:sentence.index("**Exception")]
+    assert "falls back to local under `auto` and `prefer`, and stops under `required`" in sentence
+
+
 def test_swarm_exit_78_from_start_is_relayed_and_stops_everything():
     """INTEGRATION_REF_UNCONFIRMED exits 78 with CLOUD-ERROR on stderr: neither success nor an exit-3 refusal."""
     block = _cloud_block()

@@ -1,7 +1,7 @@
 ---
 name: swarm
 description: "Ad-hoc parallel task executor. Pass natural language tasks directly (or --tasks-file); independent tasks use concurrent host-native volume/execution/judgment roles and dependent tasks run serially. No spec directory required; use feature-implement for full-feature work."
-version: "2.2.9"
+version: "2.2.10"
 permissions:
   filesystem: write
   network: true
@@ -56,7 +56,10 @@ Otherwise skip it entirely and continue below exactly as before.
    or `est` and set `owns_source: "estimated"`. Never invent `verify`: an absent
    one stays absent (the task then runs locally). Write the list to a temp
    file (`FILE`); `P` is the policy.
-2. **Plan.** Run `bash scripts/gsd/cloud-dispatch.sh plan --tasks FILE --policy P --with-doctor`.
+2. **Plan.** Set `ROOT="$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")"`:
+   the main worktree, which every dispatcher verb requires (from a linked worktree
+   `git rev-parse --show-toplevel` is the wrong directory and is refused as
+   `NOT_MAIN_WORKTREE`). Run `bash scripts/gsd/cloud-dispatch.sh plan --tasks FILE --policy P --root "$ROOT" --with-doctor`.
    If it exits 3 with `CLOUD-REFUSED: SECRET_IN_PROMPT` (a task id looks like a
    secret), that is terminal for this invocation: relay the redacted refusal
    line and STOP. Dispatch nothing, cloud or local, under `auto`, `prefer` and
@@ -71,12 +74,12 @@ Otherwise skip it entirely and continue below exactly as before.
    exposed secret names and budgets from the plan, then record grants:
    - Interactive session: ask ONE question covering the task list, the providers
      and every exposed secret name. On a yes, record exactly those keys, from the
-     repository you pass as `--root` in step 5 (`cd "$(git rev-parse --show-toplevel)"`
+     repository you pass as `--root` (`cd "$ROOT"`
      first: the dispatcher reads that repository's grant store, not the shell's directory):
      `python3 lib/gates.py grant <run> --action cloud-dispatch:<provider> --action push:origin/ffs/cloud/<run> [--action secret-use:<NAME> ...] --ttl-hours 24 --reason "interactive /swarm --cloud"`
    - Autonomous or headless run: never self-grant. Rely on grants that already
      exist; `start` refuses when one is missing.
-5. **Start cloud groups.** `bash scripts/gsd/cloud-dispatch.sh start --run <run> --tasks FILE --policy P --root "$(git rev-parse --show-toplevel)"`.
+5. **Start cloud groups.** `bash scripts/gsd/cloud-dispatch.sh start --run <run> --tasks FILE --policy P --root "$ROOT"`.
    On exit 0 it prints `CLOUD:started run=<run> tasks=N` and then
    `CLOUD:local tasks=<ids>`: the comma-separated ids of every task it routed
    locally, empty when there are none. `start` routes again, and under `auto`
@@ -95,11 +98,14 @@ Otherwise skip it entirely and continue below exactly as before.
 6. **Refusals.** Exit code 3 means refused. Relay the `CLOUD-REFUSED:` line.
    Under `auto` or `prefer`, continue with every task locally; under
    `required`, stop. **A refusal from `plan` falls back to local only when the
-   run does not exist:** first run `bash scripts/gsd/cloud-dispatch.sh status --run <run>` (the run id of steps 4 and 5);
+   run does not exist:** first run `bash scripts/gsd/cloud-dispatch.sh status --run <run> --root "$ROOT"` (the run id of steps 4 and 5);
    only its stderr line `CLOUD-ERROR: LEDGER_MISSING` proves there is no run.
    Any other result (a status document, or any other error) means a run with
    this id may already be running tasks in the cloud: run nothing, cloud or
-   local, relay the refusal and the status, and ask the operator.
+   local, relay the refusal and the status, and ask the operator. One refusal
+   needs no `status`: `CLOUD-REFUSED: NOT_A_REPO` (the directory is not a git
+   repository, so no ledger can exist) falls back to local under `auto` and
+   `prefer`, and stops under `required`.
    **Exception: `CLOUD-REFUSED: SECRET_IN_PROMPT`** (from
    `plan` or `start`) is terminal as in step 2: dispatch nothing, cloud or local.
    **Exception: `CLOUD-REFUSED: RUN_EXISTS`** is not a
