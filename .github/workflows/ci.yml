@@ -240,7 +240,8 @@ jobs:
       - name: Sandbox-gated cloud tests (macOS only, sandbox-exec is darwin-only)
         if: runner.os == 'macOS'
         # The preflight above runs in another process than pytest, so a transient failure at collection time would skip
-        # every gated test and stay green: the junit report is checked for any sandbox skip.
+        # every gated test and stay green: the junit report fails on any skip except the four host-condition reasons
+        # allowlisted in scripts/ci/fail-on-sandbox-skips.py (no pasteboard, no node, no terminal device, root).
         run: |
           python -m pytest -q --junitxml="$RUNNER_TEMP/sandbox-gated.xml" tests/test_cloud_sandbox.py tests/test_cloud_collect.py tests/test_cloud_dispatch.py
           python scripts/ci/fail-on-sandbox-skips.py "$RUNNER_TEMP/sandbox-gated.xml"

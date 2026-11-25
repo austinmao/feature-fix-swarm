@@ -1,6 +1,8 @@
-"""scripts/ci/fail-on-sandbox-skips.py: the macOS leg must not stay green when sandbox-gated tests skip."""
+"""scripts/ci/fail-on-sandbox-skips.py: the macOS leg must not stay green when any cloud test skips."""
 from __future__ import annotations
 
+import ast
+import importlib.util
 import subprocess
 import sys
 import textwrap
@@ -46,7 +48,7 @@ def _guard(report: Path) -> subprocess.CompletedProcess:
 def test_a_skipped_sandbox_gated_test_fails_the_step(tmp_path: Path) -> None:
     done = _guard(_report(tmp_path, MODULE))
     assert done.returncode == 1
-    assert "2 sandbox-gated test(s) were skipped" in done.stderr
+    assert "2 test(s) were skipped" in done.stderr
     assert "test_gated_by_marker" in done.stderr and "test_gated_inline" in done.stderr
     assert "test_other_skip" not in done.stderr
 
@@ -71,3 +73,35 @@ def test_the_macos_cloud_step_runs_the_guard_on_the_junit_report_it_writes() -> 
     assert "--junitxml=\"$RUNNER_TEMP/sandbox-gated.xml\"" in step
     assert step.index("python -m pytest") < step.index("scripts/ci/fail-on-sandbox-skips.py \"$RUNNER_TEMP/sandbox-gated.xml\"")
     assert "if: runner.os == 'macOS'" in step and "|| true" not in step and "continue-on-error" not in step
+
+
+def _skip_reasons(path: Path) -> set:
+    """Every literal reason of a `pytest.skip(...)` call and of a `skipif(..., reason=...)` marker in the file."""
+    reasons = set()
+    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+            continue
+        if node.func.attr == "skip" and node.args and isinstance(node.args[0], ast.Constant):
+            reasons.add(node.args[0].value)
+        if node.func.attr == "skipif":
+            reasons.update(k.value.value for k in node.keywords if k.arg == "reason" and isinstance(k.value, ast.Constant))
+    return reasons
+
+
+def test_the_allowlist_is_exactly_the_non_sandbox_skips_the_cloud_test_files_contain() -> None:
+    spec = importlib.util.spec_from_file_location("fail_on_sandbox_skips", GUARD)
+    guard = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(guard)
+    found = set()
+    for name in ("test_cloud_sandbox.py", "test_cloud_collect.py", "test_cloud_dispatch.py"):
+        found |= _skip_reasons(ROOT / "tests" / name)
+    sandbox_gated = {r for r in found if "sandbox" in r.lower()}
+    assert len(sandbox_gated) == 3, sandbox_gated  # the marker and the two inline reasons; a new one is a conscious change
+    assert found - sandbox_gated == set(guard.ALLOWED_REASONS)
+    assert not any("sandbox" in r.lower() for r in guard.ALLOWED_REASONS)
+
+
+def test_a_skip_that_is_not_on_the_allowlist_fails_the_step(tmp_path: Path) -> None:
+    body = "import pytest\n\ndef test_new_skip():\n    pytest.skip(\"some new reason\")\n"
+    done = _guard(_report(tmp_path, body))
+    assert done.returncode == 1 and "some new reason" in done.stderr and "test_new_skip" in done.stderr
