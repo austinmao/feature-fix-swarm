@@ -8,6 +8,15 @@ all skills.
 
 ## Unreleased
 
+### Changed (2026-11-24, review-gate takes its runtime from the base tip)
+
+- review-gate 1.20.2 loads its helpers from the tip of `origin/main` (else the
+  local `main`) instead of the merge-base. A branch that has not been rebased now
+  gets main's current helpers; fetch first if `origin/main` is stale. `origin` must
+  be the repository the change merges into, with a protected `main`. If that tip has
+  no FFS runtime, the gate uses the user-scope install (`bash setup.sh --scope user`)
+  and is blocked without one, even when the fork point had a runtime.
+
 ### Changed (2026-11-24, the ship seam is described as advisory)
 
 - gsd-core 1.15 runs `workflow.code_review_command` after the PR exists and

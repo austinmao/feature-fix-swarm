@@ -1,7 +1,7 @@
 ---
 name: review-gate
 description: "Host-neutral pre-merge review gate. Tries the opposite CLI first, allows one explicit read-only active-host fallback, and fails closed when mandatory review evidence is unavailable. Blocks shipping on HIGH/CRITICAL findings."
-version: "1.20.1"
+version: "1.20.2"
 ---
 
 # /review-gate
@@ -84,9 +84,9 @@ Cost: ~$2 · Time: ~8 min at STANDARD with concurrent passes (v1.6.0; was ~13 mi
 ### Pre-check — choose the opposite CLI
 
 ```bash
-# Helpers run from a snapshot of the base ref, else the user-scope install (FFS_T),
-# never from the reviewed tree.
-FFS_T="$HOME/.claude/lib/feature-fix-swarm"; FFS_REF="$(git merge-base HEAD refs/remotes/origin/main 2>/dev/null || git merge-base HEAD refs/heads/main 2>/dev/null)" && eval "$(git show "${FFS_REF}:scripts/gsd/trusted-runtime.sh" 2>/dev/null || git show "${FFS_REF}:packages/feature-fix-swarm/scripts/gsd/trusted-runtime.sh" 2>/dev/null || echo false)" && ffs_trusted_runtime "$FFS_REF" || true
+# Helpers run from a snapshot of the base tip, else the user-scope install (FFS_T),
+# never from the reviewed tree or its fork point: the branch chooses both.
+FFS_T="$HOME/.claude/lib/feature-fix-swarm"; FFS_REF="$(git show-ref --verify -s refs/remotes/origin/main 2>/dev/null || git show-ref --verify -s refs/heads/main 2>/dev/null)" && eval "$(git show "${FFS_REF}:scripts/gsd/trusted-runtime.sh" 2>/dev/null || git show "${FFS_REF}:packages/feature-fix-swarm/scripts/gsd/trusted-runtime.sh" 2>/dev/null || echo false)" && ffs_trusted_runtime "$FFS_REF" || true
 . "$FFS_T/scripts/gsd/adversary-host.sh" || { echo "[review-gate] BLOCKED: no trusted FFS runtime (base ref or ~/.claude/lib/feature-fix-swarm)." >&2; exit 1; }
 ACTIVE_HARNESS="$(detect_orchestrator_host)" || exit $?
 REVIEW_KIND="$(adversary_kind_for_host "$ACTIVE_HARNESS")"
@@ -161,7 +161,7 @@ fi
 
 # Pass 3 advisory (crapper/dryer, docs/dependencies.md), computed here and
 # printed, because a later fence may run in a fresh shell. Absent tools print nothing.
-FFS_T="$HOME/.claude/lib/feature-fix-swarm"; FFS_REF="$(git merge-base HEAD refs/remotes/origin/main 2>/dev/null || git merge-base HEAD refs/heads/main 2>/dev/null)" && eval "$(git show "${FFS_REF}:scripts/gsd/trusted-runtime.sh" 2>/dev/null || git show "${FFS_REF}:packages/feature-fix-swarm/scripts/gsd/trusted-runtime.sh" 2>/dev/null || echo false)" && ffs_trusted_runtime "$FFS_REF" || true
+FFS_T="$HOME/.claude/lib/feature-fix-swarm"; FFS_REF="$(git show-ref --verify -s refs/remotes/origin/main 2>/dev/null || git show-ref --verify -s refs/heads/main 2>/dev/null)" && eval "$(git show "${FFS_REF}:scripts/gsd/trusted-runtime.sh" 2>/dev/null || git show "${FFS_REF}:packages/feature-fix-swarm/scripts/gsd/trusted-runtime.sh" 2>/dev/null || echo false)" && ffs_trusted_runtime "$FFS_REF" || true
 _mb_py="$FFS_T/lib/clean_code_metrics.py"; [ -f "$_mb_py" ] || _mb_py="$FFS_T/clean_code_metrics.py"
 METRICS_BLOCK="$(git diff -U0 --no-textconv --no-ext-diff "${DIFF_ARGS[@]}" 2>/dev/null | (cd "$(git rev-parse --show-toplevel)" && python3 "$_mb_py" --base "$DIFF_BASE") 2>/dev/null)"
 if [ -n "$METRICS_BLOCK" ]; then printf 'METRICS_BLOCK (advisory data for Pass 3):\n%s\n' "$METRICS_BLOCK"; fi
@@ -197,7 +197,7 @@ passed MIRRORS `DIFF_TARGET` above and classifies the SAME bytes: `--staged` (de
 `main...HEAD` / `--file "$FILE_PATH"`.
 
 ```bash
-FFS_T="$HOME/.claude/lib/feature-fix-swarm"; FFS_REF="$(git merge-base HEAD refs/remotes/origin/main 2>/dev/null || git merge-base HEAD refs/heads/main 2>/dev/null)" && eval "$(git show "${FFS_REF}:scripts/gsd/trusted-runtime.sh" 2>/dev/null || git show "${FFS_REF}:packages/feature-fix-swarm/scripts/gsd/trusted-runtime.sh" 2>/dev/null || echo false)" && ffs_trusted_runtime "$FFS_REF" || true
+FFS_T="$HOME/.claude/lib/feature-fix-swarm"; FFS_REF="$(git show-ref --verify -s refs/remotes/origin/main 2>/dev/null || git show-ref --verify -s refs/heads/main 2>/dev/null)" && eval "$(git show "${FFS_REF}:scripts/gsd/trusted-runtime.sh" 2>/dev/null || git show "${FFS_REF}:packages/feature-fix-swarm/scripts/gsd/trusted-runtime.sh" 2>/dev/null || echo false)" && ffs_trusted_runtime "$FFS_REF" || true
 case "$DIFF_TARGET" in
   --staged)
     TIER_LINE="$("$FFS_T/scripts/gsd/review-tier.sh" --staged 2>/dev/null)"
@@ -242,7 +242,7 @@ directives to the executor:
 
   ```bash
   if [ "$TIER" = "full" ]; then
-    FFS_T="$HOME/.claude/lib/feature-fix-swarm"; FFS_REF="$(git merge-base HEAD refs/remotes/origin/main 2>/dev/null || git merge-base HEAD refs/heads/main 2>/dev/null)" && eval "$(git show "${FFS_REF}:scripts/gsd/trusted-runtime.sh" 2>/dev/null || git show "${FFS_REF}:packages/feature-fix-swarm/scripts/gsd/trusted-runtime.sh" 2>/dev/null || echo false)" && ffs_trusted_runtime "$FFS_REF" || true
+    FFS_T="$HOME/.claude/lib/feature-fix-swarm"; FFS_REF="$(git show-ref --verify -s refs/remotes/origin/main 2>/dev/null || git show-ref --verify -s refs/heads/main 2>/dev/null)" && eval "$(git show "${FFS_REF}:scripts/gsd/trusted-runtime.sh" 2>/dev/null || git show "${FFS_REF}:packages/feature-fix-swarm/scripts/gsd/trusted-runtime.sh" 2>/dev/null || echo false)" && ffs_trusted_runtime "$FFS_REF" || true
     . "$FFS_T/scripts/gsd/adversary-host.sh"
     _adv_host="$(detect_orchestrator_host)"
     _adv_kind="$(adversary_kind_for_host "$_adv_host")"
@@ -285,11 +285,11 @@ passes — those stay sequential by design (they consume the merged finding set)
 works the WHOLE queue instead of re-litigating what a prior run already resolved. Resolve
 GATES_PY via a CAPABILITY PROBE, not first-exists — an installed `~/.claude` copy of
 gates.py can lack findings-queue support and would win a naive first-exists loop. The
-repo candidate is the base-ref snapshot, never the reviewed tree's copy:
+repo candidate is the base-tip snapshot, never the reviewed tree's copy:
 
 ```bash
 REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
-FFS_T="$HOME/.claude/lib/feature-fix-swarm"; FFS_REF="$(git merge-base HEAD refs/remotes/origin/main 2>/dev/null || git merge-base HEAD refs/heads/main 2>/dev/null)" && eval "$(git show "${FFS_REF}:scripts/gsd/trusted-runtime.sh" 2>/dev/null || git show "${FFS_REF}:packages/feature-fix-swarm/scripts/gsd/trusted-runtime.sh" 2>/dev/null || echo false)" && ffs_trusted_runtime "$FFS_REF" || true
+FFS_T="$HOME/.claude/lib/feature-fix-swarm"; FFS_REF="$(git show-ref --verify -s refs/remotes/origin/main 2>/dev/null || git show-ref --verify -s refs/heads/main 2>/dev/null)" && eval "$(git show "${FFS_REF}:scripts/gsd/trusted-runtime.sh" 2>/dev/null || git show "${FFS_REF}:packages/feature-fix-swarm/scripts/gsd/trusted-runtime.sh" 2>/dev/null || echo false)" && ffs_trusted_runtime "$FFS_REF" || true
 GATES_PY=""
 DEGRADED_PERSISTENCE=0
 RESOLVED_SIGS=""
@@ -508,7 +508,7 @@ else
   # verify-mode slice: dirname of the already-resolved $HV_SPEC, never a
   # second branch-NNN/find resolution.
   HV_SPEC_DIR="$(dirname "$HV_SPEC")"
-  FFS_T="$HOME/.claude/lib/feature-fix-swarm"; FFS_REF="$(git merge-base HEAD refs/remotes/origin/main 2>/dev/null || git merge-base HEAD refs/heads/main 2>/dev/null)" && eval "$(git show "${FFS_REF}:scripts/gsd/trusted-runtime.sh" 2>/dev/null || git show "${FFS_REF}:packages/feature-fix-swarm/scripts/gsd/trusted-runtime.sh" 2>/dev/null || echo false)" && ffs_trusted_runtime "$FFS_REF" || true
+  FFS_T="$HOME/.claude/lib/feature-fix-swarm"; FFS_REF="$(git show-ref --verify -s refs/remotes/origin/main 2>/dev/null || git show-ref --verify -s refs/heads/main 2>/dev/null)" && eval "$(git show "${FFS_REF}:scripts/gsd/trusted-runtime.sh" 2>/dev/null || git show "${FFS_REF}:packages/feature-fix-swarm/scripts/gsd/trusted-runtime.sh" 2>/dev/null || echo false)" && ffs_trusted_runtime "$FFS_REF" || true
   HV_SOCRATIC_HELPER="$FFS_T/scripts/gsd/socratic-slice.sh"
   # the helper now runs outside the repo; point it at the project's vendored socratic tree
   for _d in .agents .claude; do [ -n "${FFS_SOCRATIC_DIR:-}" ] || [ ! -d "$(git rev-parse --show-toplevel)/$_d/skills/socratic" ] || export FFS_SOCRATIC_DIR="$(git rev-parse --show-toplevel)/$_d/skills/socratic"; done
