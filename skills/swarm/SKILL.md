@@ -1,7 +1,7 @@
 ---
 name: swarm
 description: "Ad-hoc parallel task executor. Pass natural language tasks directly (or --tasks-file); independent tasks use concurrent host-native volume/execution/judgment roles and dependent tasks run serially. No spec directory required; use feature-implement for full-feature work."
-version: "2.2.10"
+version: "2.2.11"
 permissions:
   filesystem: write
   network: true
@@ -55,7 +55,13 @@ Otherwise skip it entirely and continue below exactly as before.
    `[local]` `[after: t0]` `[verify: cmd]` `[id: x]`. Estimate a missing `owns`
    or `est` and set `owns_source: "estimated"`. Never invent `verify`: an absent
    one stays absent (the task then runs locally). Write the list to a temp
-   file (`FILE`); `P` is the policy.
+   file (`FILE`); `P` is the policy. Choose the run id `<run>` now (matching
+   `[A-Za-z0-9][A-Za-z0-9_.-]{0,39}`, new for each invocation, for example
+   `swarm-<UTC date and time>`) and print it: steps 2, 4, 5 and 6 all use it.
+   When the operator retries or resumes an earlier invocation, reuse that
+   invocation's run id; if it is not known, ask the operator rather than
+   choosing a new one (a new id has no ledger, and the `LEDGER_MISSING` of
+   step 6 would prove nothing about the earlier run).
 2. **Plan.** Set `ROOT="$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")"`:
    the main worktree, which every dispatcher verb requires (from a linked worktree
    `git rev-parse --show-toplevel` is the wrong directory and is refused as
@@ -66,7 +72,10 @@ Otherwise skip it entirely and continue below exactly as before.
    `required` alike, and under `--dry-run`. Step 6's local fallback does not
    apply: a retry of an already started run with an edited batch is refused here
    before `start` can say `RUN_EXISTS`, and its unchanged tasks may be running in
-   the cloud.
+   the cloud. Any other non-zero exit of `plan` (exit 2, a usage or input
+   error such as an invalid task id, `est` or `needs-secret` entry; exit 78, a
+   store or configuration error) is not a refusal: relay its stderr, run no
+   task, cloud or local, and stop. Step 6's local fallback does not apply.
 3. **`--dry-run`.** Print the plan table (groups, route, provider, reasons,
    refusals, preconditions) and STOP. Do not run the reconcile pass below, do
    not start anything, do not execute any task.
@@ -98,7 +107,7 @@ Otherwise skip it entirely and continue below exactly as before.
 6. **Refusals.** Exit code 3 means refused. Relay the `CLOUD-REFUSED:` line.
    Under `auto` or `prefer`, continue with every task locally; under
    `required`, stop. **A refusal from `plan` falls back to local only when the
-   run does not exist:** first run `bash scripts/gsd/cloud-dispatch.sh status --run <run> --root "$ROOT"` (the run id of steps 4 and 5);
+   run does not exist:** first run `bash scripts/gsd/cloud-dispatch.sh status --run <run> --root "$ROOT"` (the run id chosen in step 1);
    only its stderr line `CLOUD-ERROR: LEDGER_MISSING` proves there is no run.
    Any other result (a status document, or any other error) means a run with
    this id may already be running tasks in the cloud: run nothing, cloud or

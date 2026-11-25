@@ -17,6 +17,10 @@ all skills.
   first run from a linked worktree ran nothing. A `NOT_A_REPO` refusal needs no `status`
   (no ledger can exist) and falls back to local under `auto` and `prefer`, never under
   `required`.
+- `/swarm` skill 2.2.11 says where the run id comes from (chosen and printed in step 1,
+  reused on a retry or resume, asked for when unknown, because a new id has no ledger and
+  `LEDGER_MISSING` would prove nothing) and gives `plan` exits 2 and 78 a rule: relay
+  stderr, run nothing, stop.
 - Cloud review no longer obeys the repository's rung breaker. Once `cloud-review.sh`
   pins the repository store, 20 recorded failures of the requested rung in any other
   review made it skip that rung and answer with another model, which a cloud review
@@ -38,7 +42,7 @@ all skills.
 - A scanner-positive task id is `SECRET_IN_PROMPT` however it is reached. `plan` and
   `start` scan the ids as written before normalization, so a flagged id that is also
   a duplicate or an invalid id no longer ends as `TASK_ID_DUPLICATE` or
-  `TASK_ID_INVALID` (which `/swarm` answers by running every task locally). A benign
+  `TASK_ID_INVALID` (exit 2, which the skill had no rule for, so a retry that added an invalid id left the decision to the model; `TASK_ID_DUPLICATE` is an exit-3 refusal that `/swarm` answered by running every task locally). A benign
   duplicate id is still `TASK_ID_DUPLICATE`. `/swarm` skill 2.2.9: a refusal from
   `plan` falls back to local only when `status --run <run>` reports
   `LEDGER_MISSING`; otherwise the run may already be active and nothing runs.

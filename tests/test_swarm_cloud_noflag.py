@@ -265,7 +265,7 @@ def test_swarm_plan_refusal_runs_locally_only_when_the_ledger_is_proven_missing(
     assert "falls back to local only when the run does not exist" in rule
     assert "status --run <run>" in rule and "CLOUD-ERROR: LEDGER_MISSING" in rule
     assert "Any other result" in rule and "run nothing, cloud or local" in rule
-    assert "the run id of steps 4 and 5" in rule
+    assert "the run id chosen in step 1" in rule
     # the status verb really answers a run with no ledger with exactly that stderr line, and exit 78
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -303,6 +303,17 @@ def test_swarm_cloud_verbs_take_the_main_worktree_root_so_a_linked_worktree_stil
     assert "NOT_MAIN_WORKTREE" in wrong.stdout + wrong.stderr  # what the old text hit
     right = cli("status", "--run", "never-started", "--root", derived, cwd=linked)
     assert right.returncode == 78 and right.stderr.startswith("CLOUD-ERROR: LEDGER_MISSING "), (right.stdout, right.stderr)
+
+
+def test_swarm_names_the_run_id_source_and_stops_on_other_plan_failures():
+    block = " ".join(_cloud_block().split())
+    step1 = block[block.index("1. **Normalize tasks.**"):block.index("2. **Plan.**")]
+    assert "Choose the run id `<run>` now" in step1 and "print it" in step1
+    assert "reuse that invocation's run id" in step1 and "ask the operator rather than choosing a new one" in step1
+    step2 = block[block.index("2. **Plan.**"):block.index("3. **`--dry-run`.**")]
+    assert "Any other non-zero exit of `plan`" in step2 and "exit 2" in step2 and "exit 78" in step2
+    assert "run no task, cloud or local, and stop" in step2
+    assert "the run id chosen in step 1" in block
 
 
 def test_swarm_not_a_repo_refusal_falls_back_local_but_never_under_required():
