@@ -17,6 +17,12 @@ all skills.
   first run from a linked worktree ran nothing. A `NOT_A_REPO` refusal needs no `status`
   (no ledger can exist) and falls back to local under `auto` and `prefer`, never under
   `required`.
+- Cloud review no longer obeys the repository's rung breaker. Once `cloud-review.sh`
+  pins the repository store, 20 recorded failures of the requested rung in any other
+  review made it skip that rung and answer with another model, which a cloud review
+  never accepts (`review-model-downgraded`, one retest spent). The script now treats
+  no rung as tripped; the rows are still recorded and the breaker still serves local
+  reviews.
 
 ### Fixed (2026-11-24, cloud delegation: round 8)
 

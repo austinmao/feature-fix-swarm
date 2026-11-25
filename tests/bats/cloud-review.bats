@@ -401,6 +401,22 @@ EOF
   [ "$(model_line_before_verdict)" = "CLOUD-REVIEW-MODEL: requested=gpt-6.2-sol answered=gpt-6.1-terra descent=1" ]
 }
 
+@test "a tripped rung elsewhere in the repository never makes cloud review skip the requested model" {
+  # 20 recorded failures of the requested rung (a usage-limit outage in some other review): the shared breaker would skip
+  # it, and a cloud review accepts no descent, so the approval would end review-model-downgraded.
+  for _ in $(seq 1 20); do
+    python3 "$ROOT/lib/gates.py" note-degraded rung-attempt --rung-id "codex:gpt-6.2-sol:xhigh" --outcome fail >/dev/null
+  done
+  [[ "$(python3 "$ROOT/lib/gates.py" note-degraded --tripped)" == *'"codex:gpt-6.2-sol:xhigh"'* ]]
+  make_codex_failing 'NEVER-MATCHES' 'fine\nVERDICT: APPROVE\n'
+  review claude
+  [ "$status" -eq 0 ]
+  [ "$(model_line_before_verdict)" = "CLOUD-REVIEW-MODEL: requested=gpt-6.2-sol answered=gpt-6.2-sol descent=0" ]
+  [[ "$(head -n 1 "$BATS_TEST_TMPDIR/codex.args")" == *"gpt-6.2-sol"* ]]
+  # the rows are still recorded: the successful attempt is on the ledger and clears the breaker
+  [ "$(python3 "$ROOT/lib/gates.py" note-degraded --tripped)" = "[]" ]
+}
+
 @test "model line: absent when the reviewer never ran" {
   make_claude 'VERDICT: APPROVE\n'
   run env ADVERSARY_BIN_CODEX="$BIN/does-not-exist" ADVERSARY_BIN_CLAUDE="$BIN/claude-stub" \
