@@ -215,7 +215,7 @@ case "$DIFF_TARGET" in
     ;;
   file)
     # the variable, not a pathspec prefix, says "literal": older helpers honour it too
-    TIER_LINE="$(env -u GIT_GLOB_PATHSPECS -u GIT_ICASE_PATHSPECS GIT_LITERAL_PATHSPECS=1 "$FFS_T/scripts/gsd/review-tier.sh" --file "$FILE_PATH" 2>/dev/null)"
+    TIER_LINE="$(unset GIT_GLOB_PATHSPECS GIT_ICASE_PATHSPECS; GIT_LITERAL_PATHSPECS=1 "$FFS_T/scripts/gsd/review-tier.sh" --file "$FILE_PATH" 2>/dev/null)"
     ;;
 esac
 _tier_rc=$?

@@ -656,6 +656,7 @@ PY
 
 @test "the --file tier sizes the one path the diff reviews" {
   local sh wt="$BATS_TEST_TMPDIR/main-wt" name="" var
+  FIX="${FIX%/repo}/a=b/repo"  # env(1) would read a helper path with "=" as an assignment
   make_fixture .
   git -C "$FIX" worktree add -q "$wt" main
   cp "$ROOT/scripts/gsd/review-tier.sh" "$ROOT/scripts/gsd/security-surface.sh" "$wt/scripts/gsd/"
