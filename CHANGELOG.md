@@ -8,6 +8,19 @@ all skills.
 
 ## Unreleased
 
+### Changed (2026-11-25, review-gate --file reviews exactly the named path)
+
+- review-gate 1.20.5 takes everything after `--file` as one path, spaces included, so
+  `--file` comes last. The path is exact, not a pattern. A path git does not track now
+  fails the gate. Before, `--file notes v2.sql` reviewed `notes`, `--file [test].sql`
+  could review `t.sql`, and an untracked path passed with nothing reviewed.
+- `review-tier.sh` sizes what the gate reviews: top-level `.planning/` and
+  `spike-results/` files no longer count, so with only those staged it sizes the whole
+  work tree, and a file moved out of them counts as new. A `--file` that selects no
+  change, or a missing `security-surface.sh`, is `standard fail-safe`, not `light`.
+- The base-tip snapshot path no longer depends on `CDPATH`, a `cd` function or a zsh
+  `chpwd` hook.
+
 ### Changed (2026-11-25, review-gate never auto-closes a finding that changed)
 
 - `review-gate-command.sh` snapshots the findings queue before the review and closes a

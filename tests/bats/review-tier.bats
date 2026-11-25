@@ -382,8 +382,8 @@ use_utf8() {
   [[ "$output" == "full security-surface path" ]] || false
   # the work tree is what the reviewed diff compares with HEAD
   modify_tracked f02.txt 300 && git add f02.txt && git show HEAD:f02.txt > f02.txt
-  run bash "$SCRIPT" --file f02.txt
-  [[ "$output" == light\ * ]] || false
+  run --separate-stderr bash "$SCRIPT" --file f02.txt
+  [ "$output" = "standard fail-safe" ]
 }
 
 @test "--file mode before the first commit is the fail-safe, not light" {
@@ -443,4 +443,84 @@ bump_submodule() {
   modify_tracked f02.txt 300   # unstaged: only HEAD mode would see it
   run bash "$SCRIPT"
   [[ "$output" == light\ * ]] || false
+}
+
+@test "staged run bookkeeping alone does not keep the tier on the staged diff" {
+  local dir var
+  for dir in .planning spike-results; do
+    git reset -q --hard
+    mkdir -p "$dir" docs && echo n > "$dir/n.md" && echo d > docs/a.md && git add docs "$dir"
+    git commit -q -m docs -- docs
+    mkdir -p lib/auth && echo x > lib/auth/s.py && git add lib && git commit -q -m auth -- lib
+    echo y > lib/auth/s.py
+    [ "$(git diff --staged --name-only)" = "$dir/n.md" ]
+    for var in GIT_NONE GIT_LITERAL_PATHSPECS GIT_ICASE_PATHSPECS; do
+      run env "$var=1" bash "$SCRIPT"
+      [[ "$output" == "full security-surface path" ]] || { echo "$dir $var: $output"; false; }
+    done
+    (cd docs && bash "$SCRIPT") | grep -qx 'full security-surface path'
+    git reset -q --hard HEAD~2
+  done
+}
+
+@test "a staged change next to bookkeeping keeps the tier on the staged diff" {
+  mkdir -p .planning docs/.planning && echo n > .planning/n.md && echo n > docs/.planning/n.md
+  git add .planning docs
+  modify_tracked f01.txt 300   # unstaged: only HEAD mode would see it
+  run bash "$SCRIPT"
+  [[ "$output" == light\ * ]] || { echo "$output"; false; }
+}
+
+@test "--file is one exact path when the caller sets literal pathspecs, else a pattern" {
+  echo one > '[test].sql.txt' && echo one > t.sql.txt && echo one > ':!f01.txt' && git add -A && git commit -q -m names
+  echo two > '[test].sql.txt' && modify_tracked t.sql.txt 300
+  modify_tracked ':!f01.txt' 300
+  run env GIT_LITERAL_PATHSPECS=1 bash "$SCRIPT" --file '[test].sql.txt'
+  [[ "$output" == light\ * ]] || { echo "$output"; false; }
+  run env GIT_LITERAL_PATHSPECS=1 bash "$SCRIPT" --file ':!f01.txt'
+  [[ "$output" == standard\ moderate* ]] || { echo "$output"; false; }
+  # an older fence diffs the pattern, so without the variable the tier covers all it selects
+  run bash "$SCRIPT" --file '*.sql.txt'
+  [[ "$output" == standard\ moderate* ]] || { echo "$output"; false; }
+  mkdir -p lib/auth && echo x > lib/auth/s.py && git add lib
+  run bash "$SCRIPT" --file ':/lib/auth/s.py'
+  [[ "$output" == "full security-surface path" ]] || { echo "$output"; false; }
+}
+
+@test "inherited case folding does not widen the bookkeeping exclusion" {
+  mkdir -p .PLANNING && echo x > .PLANNING/auth.sql && git add -A
+  [ "$(git diff --staged --name-only)" = .PLANNING/auth.sql ] || skip "no case-distinct name"
+  run env GIT_ICASE_PATHSPECS=1 bash "$SCRIPT"
+  [[ "$output" == "full security-surface path" ]] || { echo "$output"; false; }
+}
+
+@test "a rename out of run bookkeeping counts every line it adds to the reviewed diff" {
+  mkdir -p .planning src && seq 1 300 > .planning/n.md && git add .planning && git commit -q -m plan
+  local base; base="$(git rev-parse HEAD)"
+  git mv .planning/n.md src/n.md
+  run bash "$SCRIPT"
+  [[ "$output" == standard\ moderate* ]] || { echo "staged: $output"; false; }
+  git commit -q -m move
+  run env REVIEW_TIER_BASE="$base" bash "$SCRIPT" --all
+  [[ "$output" == standard\ moderate* ]] || { echo "all: $output"; false; }
+  git reset -q --soft HEAD~1 && git reset -q && git add -N src/n.md
+  run bash "$SCRIPT"
+  [[ "$output" == standard\ moderate* ]] || { echo "HEAD: $output"; false; }
+}
+
+@test "a missing security-surface.sh is the fail-safe, and a cd function cannot hide it" {
+  mkdir -p lib/auth "$BATS_TEST_TMPDIR/bare" && echo x > lib/auth/s.py && git add lib
+  run bash -c 'cd() { builtin cd "$@" && echo noise; }; export -f cd; bash "$1"' _ "$SCRIPT"
+  [[ "$output" == "full security-surface path" ]] || { echo "$output"; false; }
+  cp "$SCRIPT" "$BATS_TEST_TMPDIR/bare/"
+  run --separate-stderr env KEYWORDS=none bash "$BATS_TEST_TMPDIR/bare/review-tier.sh"
+  [ "$status" -eq 0 ]
+  [ "$output" = "standard fail-safe" ]
+}
+
+@test "--file that selects no change is the fail-safe, not light" {
+  run --separate-stderr bash "$SCRIPT" --file missing.txt
+  [ "$output" = "standard fail-safe" ]
+  run bash "$SCRIPT" --file ""
+  [ "$status" -eq 2 ]
 }

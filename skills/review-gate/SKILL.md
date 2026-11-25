@@ -1,7 +1,7 @@
 ---
 name: review-gate
 description: "Host-neutral pre-merge review gate. Tries the opposite CLI first, allows one explicit read-only active-host fallback, and fails closed when mandatory review evidence is unavailable. Blocks shipping on HIGH/CRITICAL findings."
-version: "1.20.4"
+version: "1.20.5"
 ---
 
 # /review-gate
@@ -73,7 +73,7 @@ Cost: ~$2 · Time: ~8 min at STANDARD with concurrent passes (v1.6.0; was ~13 mi
 ```
 /review-gate             # review staged diff (default)
 /review-gate --all       # review all changes vs main branch
-/review-gate --file path # review a single file
+/review-gate --file path # review a single file; --file comes last, the rest is the path
 /review-gate --dry-run   # print what would be reviewed, no API calls
 ```
 
@@ -110,30 +110,27 @@ ARGS="${ARGUMENTS:-}"
 DRY_RUN=0
 DIFF_TARGET="--staged"
 FILE_PATH=""
-_next_is_file=0
 
-# zsh-safe: parameter expansion does not word-split in zsh, but
-# command-substitution output does (bash + zsh + dash) — no subshell,
-# so assignments inside the loop persist.
-for arg in $(printf '%s\n' "${ARGS}"); do
-  if [ "$_next_is_file" -eq 1 ]; then
-    FILE_PATH="$arg"
-    _next_is_file=0
-    continue
-  fi
+# Read the raw text token by token: no word splitting and no globbing, so bash
+# and zsh see the same path whatever their options.
+_rest="$ARGS"
+while [ -n "$_rest" ]; do
+  case "$_rest" in
+    [[:space:]]*) _rest="${_rest#?}"; continue ;;
+    --file|--file=*|--file[[:space:]]*) DIFF_TARGET="file"; FILE_PATH="${_rest#--file}"; FILE_PATH="${FILE_PATH#?}"; break ;;
+  esac
+  arg="${_rest%%[[:space:]]*}"; _rest="${_rest#"$arg"}"
   case "$arg" in
     --all)        DIFF_TARGET="main" ;;
     --dry-run)    DRY_RUN=1 ;;
-    --file=*)     DIFF_TARGET="file"; FILE_PATH="${arg#--file=}" ;;
-    --file)       DIFF_TARGET="file"; _next_is_file=1 ;;
   esac
 done
 
 # Fixed --file parity (finding: the old `--file*` case retained the flag
 # itself as DIFF_TARGET and discarded the path, so `git diff --file...HEAD`
-# silently produced an empty diff and bypassed review). Both `--file <path>`
-# (two tokens, above) and `--file=<path>` are parsed into FILE_PATH; file
-# mode diffs via `git diff HEAD -- "$FILE_PATH"`.
+# silently produced an empty diff and bypassed review). After `--file ` or
+# `--file=`, the rest of the arguments is FILE_PATH, spaces included; file mode
+# diffs via `git diff HEAD -- ":(literal)$FILE_PATH"` and fails when git tracks no such path.
 # Run bookkeeping (.planning/, spike-results/) is excluded from the reviewer's
 # diff: it is not production source, and on long spec branches it balloons the
 # review surface by hundreds of doc files (2026-07-30 estate audit). File mode
@@ -141,14 +138,16 @@ done
 # Every mode except --file covers the whole tree from any directory. --ignore-submodules=untracked
 # is git's default; naming it overrides a reviewed .gitmodules that hides a bump.
 DIFF_SCOPE=(":(top)" ":(top,exclude).planning/" ":(top,exclude)spike-results/")
-[ "$DIFF_TARGET" = "file" ] || unset GIT_LITERAL_PATHSPECS GIT_ICASE_PATHSPECS
+unset GIT_LITERAL_PATHSPECS GIT_ICASE_PATHSPECS
 DIFF_OPTS=(--no-relative --ignore-submodules=untracked)
 DIFF_BASE=HEAD
 if [ "$DIFF_TARGET" = "--staged" ]; then
   DIFF_ARGS=("${DIFF_OPTS[@]}" --staged -- "${DIFF_SCOPE[@]}")
   git diff --quiet "${DIFF_ARGS[@]}" 2>/dev/null && DIFF_ARGS=("${DIFF_OPTS[@]}" HEAD -- "${DIFF_SCOPE[@]}")
 elif [ "$DIFF_TARGET" = "file" ]; then
-  DIFF_ARGS=("${DIFF_OPTS[@]}" HEAD -- "$FILE_PATH")
+  [ -n "$FILE_PATH" ] && git ls-files --error-unmatch --with-tree=HEAD -- ":(literal)$FILE_PATH" >/dev/null 2>&1 ||
+    { echo "GATE: FAIL — --file takes the rest of the arguments as one tracked path, and git tracks no '$FILE_PATH'."; exit 1; }
+  DIFF_ARGS=("${DIFF_OPTS[@]}" HEAD -- ":(literal)$FILE_PATH")
 else
   # exact refs: a tag named main must not become the base
   DIFF_REF="$(git show-ref --verify -s refs/remotes/origin/main 2>/dev/null || git show-ref --verify -s refs/heads/main 2>/dev/null)" ||
@@ -215,7 +214,8 @@ case "$DIFF_TARGET" in
       TIER_LINE="$(REVIEW_TIER_BASE="$DIFF_REF" "$FFS_T/scripts/gsd/review-tier.sh" --all 2>/dev/null)"
     ;;
   file)
-    TIER_LINE="$("$FFS_T/scripts/gsd/review-tier.sh" --file "$FILE_PATH" 2>/dev/null)"
+    # the variable, not a pathspec prefix, says "literal": older helpers honour it too
+    TIER_LINE="$(env -u GIT_GLOB_PATHSPECS -u GIT_ICASE_PATHSPECS GIT_LITERAL_PATHSPECS=1 "$FFS_T/scripts/gsd/review-tier.sh" --file "$FILE_PATH" 2>/dev/null)"
     ;;
 esac
 _tier_rc=$?

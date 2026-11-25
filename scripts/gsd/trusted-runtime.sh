@@ -12,7 +12,8 @@ ffs_trusted_runtime() {
   [ -n "$ref" ] && top="$(git rev-parse --show-toplevel)" || return 1
   git cat-file -e "${ref}:packages/feature-fix-swarm/lib/gates.py" 2>/dev/null && tree="${ref}:packages/feature-fix-swarm"
   id="$(git -C "$top" rev-parse --verify -q "$tree")" || return 1  # commit id (flat) or tree id (packaged)
-  cache="$(cd "$top" && cd "$(git rev-parse --git-common-dir)" && pwd)/ffs-trusted" || return 1
+  cache="$(git -C "$top" rev-parse --git-common-dir)/ffs-trusted" || return 1
+  case "$cache" in /*) ;; *) cache="$top/$cache" ;; esac  # no cd: CDPATH or a chpwd hook would change the path
   if [ ! -f "$cache/$id/.complete" ]; then
     paths="$(git -C "$top" ls-tree --name-only "$tree" lib scripts skills 2>/dev/null)"
     [ -n "$paths" ] || return 1
