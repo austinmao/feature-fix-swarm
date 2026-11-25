@@ -9,7 +9,7 @@
 #   --staged (default)  git diff --staged; if empty, git diff HEAD instead
 #   --all               git diff <base>...HEAD (three-dot = merge-base);
 #                       base = $REVIEW_TIER_BASE (default: main)
-#   --file <path>       git diff -- <path>
+#   --file <path>       git diff HEAD -- <path>
 #
 # Env:
 #   REVIEW_TIER={light|standard|full}  overrides auto-detection (reason:
@@ -28,6 +28,7 @@
 # rejected by `git rev-parse --verify --end-of-options` before it can ever
 # reach `git diff` as an option.
 set -uo pipefail
+export LC_ALL=C  # file names are raw bytes
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091 # dynamic path, resolved at runtime via BASH_SOURCE
@@ -100,10 +101,17 @@ is_migration_path() {
   return 1
 }
 
+# The same scope options as review-gate's diff. Names come unquoted (-z; a newline
+# in a name becomes a tab), and a rename gives its old and its new name.
+DIFF_OPTS=(--no-relative --ignore-submodules=untracked)
+diff_names() {
+  git diff --name-only -z --no-renames "${DIFF_OPTS[@]}" "$@" 2>/dev/null | tr '\n\0' '\t\n'
+}
+
 DIFF_TARGET=()
 case "$MODE" in
   staged)
-    STAGED_NAMES="$(git diff --staged --name-only 2>/dev/null)"
+    STAGED_NAMES="$(diff_names --staged)"
     rc=$?
     [ $rc -ne 0 ] && fail_safe "git diff --staged --name-only failed"
     if [ -n "$STAGED_NAMES" ]; then
@@ -125,23 +133,19 @@ case "$MODE" in
     DIFF_TARGET=("${BASE_OID}...HEAD")
     ;;
   file)
-    DIFF_TARGET=(-- "$FILE_PATH")
+    DIFF_TARGET=(HEAD -- "$FILE_PATH")
     ;;
 esac
 
-NAME_ONLY_OUT="$(git diff --name-only "${DIFF_TARGET[@]}" 2>/dev/null)"
+NAME_ONLY_OUT="$(diff_names "${DIFF_TARGET[@]}")"
 rc=$?
 [ $rc -ne 0 ] && fail_safe "git diff --name-only failed"
 
-NUMSTAT_OUT="$(GIT_ATTR_SOURCE=4b825dc642cb6eb9a060e54bf8d69288fbee4904 git diff --numstat "${DIFF_TARGET[@]}" 2>/dev/null)"
+NUMSTAT_OUT="$(GIT_ATTR_SOURCE=4b825dc642cb6eb9a060e54bf8d69288fbee4904 git diff --numstat "${DIFF_OPTS[@]}" "${DIFF_TARGET[@]}" 2>/dev/null)"
 rc=$?
 [ $rc -ne 0 ] && fail_safe "git diff --numstat failed"
 
 FILE_COUNT=0
-if [ -n "$NAME_ONLY_OUT" ]; then
-  FILE_COUNT=$(printf '%s\n' "$NAME_ONLY_OUT" | grep -c .)
-fi
-
 LINE_COUNT=0
 HAS_SECURITY_PATH=0
 HAS_MIGRATION_PATH=0
@@ -160,6 +164,7 @@ fi
 if [ -n "$NUMSTAT_OUT" ]; then
   while IFS=$'\t' read -r add del _path; do
     [ -z "${add:-}" ] && continue
+    FILE_COUNT=$((FILE_COUNT + 1))
     if [ "$add" = "-" ] || [ "$del" = "-" ]; then
       # binary (or, on git < 2.40 where GIT_ATTR_SOURCE is ignored, marked
       # binary/-diff by the reviewed branch): line count unknown, so never light.
