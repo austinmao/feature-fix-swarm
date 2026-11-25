@@ -282,7 +282,7 @@ def test_swarm_plan_refusal_runs_locally_only_when_the_ledger_is_proven_missing(
 
 
 TOPLEVEL = '"$(git rev-parse --show-toplevel)"'
-MAIN_WORKTREE = '"$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")"'
+MAIN_WORKTREE = '"$(git worktree list --porcelain | sed -n \'1s/^worktree //p\')"'
 
 
 def test_swarm_cloud_block_carries_no_shell_variable_between_commands():
@@ -315,6 +315,26 @@ def test_swarm_status_commands_reach_the_main_worktree_ledger_from_a_linked_work
     assert MAIN_WORKTREE in flat
     status = run(MAIN_WORKTREE)  # what the status proof is given: the main worktree
     assert status.returncode == 78 and status.stderr.startswith("CLOUD-ERROR: LEDGER_MISSING "), (status.stdout, status.stderr)
+
+
+def test_swarm_status_root_is_not_another_repository_when_the_git_dir_is_separate(tmp_path):
+    """The git dir sits in `outer/p.git`, and `outer` is itself a repository: the parent of the common directory is
+    another repository's top level, whose ledger says LEDGER_MISSING while this checkout's run may be active."""
+    outer, work = tmp_path / "outer", tmp_path / "work"
+    outer.mkdir()
+    _g(outer, "init", "-q", "-b", "main")
+    _g(outer, "commit", "-q", "--allow-empty", "-m", "outer")
+    _g(tmp_path, "init", "-q", "-b", "main", "--separate-git-dir", str(outer / "p.git"), str(work))
+    _g(work, "commit", "-q", "--allow-empty", "-m", "work")
+
+    def status(root_expression):
+        script = 'python3 "%s" status --run never-started --root %s' % (ROOT / "lib" / "cloud_dispatch.py", root_expression)
+        return subprocess.run(["bash", "-c", script], cwd=str(work), capture_output=True, text=True, timeout=60)
+
+    old = status('"$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")"')
+    assert old.returncode == 78 and "LEDGER_MISSING" in old.stderr  # the false proof the old expression gave
+    new = status(MAIN_WORKTREE)
+    assert "LEDGER_MISSING" not in new.stdout + new.stderr and new.returncode != 78, (new.returncode, new.stdout, new.stderr)
 
 
 def test_swarm_refusal_runs_locally_only_when_the_ledger_is_proven_missing_and_nothing_else_does():

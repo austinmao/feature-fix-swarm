@@ -14,11 +14,12 @@ all skills.
   carried between commands). `plan` (now with `--run`) and `start` take
   `--root "$(git rev-parse --show-toplevel)"`, so a linked worktree is refused as
   `NOT_MAIN_WORKTREE` again and no work is started on the main worktree's branch; every
-  `status` call takes the main worktree (`dirname "$(git rev-parse --path-format=absolute --git-common-dir)"`),
+  `status` call takes the main worktree (`git worktree list --porcelain | sed -n '1s/^worktree //p'`, not the parent of the common
+  directory, which is another repository's top level when the git dir is separate),
   so a first run from a linked worktree reads the right ledger, gets `LEDGER_MISSING` and
   goes local under `auto` and `prefer`. The proof now covers refusals of `start` too, and
   every answer other than `LEDGER_MISSING` (`NOT_A_REPO` and `BAD_ROOT` included) runs
-  nothing and tells the operator to rerun without `--cloud`; there is no local fallback for
+  nothing and tells the operator to rerun without `--cloud` when no run with this id is active; there is no local fallback for
   `NOT_A_REPO` any more. The skill also says where the run id comes from (chosen and printed
   in step 1 with a valid example, reused on a retry or resume, asked for when unknown) and
   gives exits other than 0 and 3 of `plan`, and exit 2 of `start`, a rule: relay stderr, run
