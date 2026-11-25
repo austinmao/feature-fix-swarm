@@ -395,7 +395,7 @@ def adversarial_inputs(size: int):
         "pem-label-run": b"-----BEGIN " + b"A " * (size // 2),  # one long label, no PRIVATE KEY, no dashes
         "pem-label-private-run": b"-----BEGIN " + b"PRIVATE KEY " * (size // 12),
         "pem-label-lines": b"-----BEGIN A B C D E F G H I J K L M N O P Q R S T\n" * (size // 52),
-        "pem-unterminated": b"-----BEGIN RSA PRIVATE KEY-----\n" + b"A" * size,
+        "pem-unterminated": b"-----BEGIN RSA " + b"PRIVATE KEY-----\n" + b"A" * size,
         "sk-ant": b"sk-ant-AAAAAAAA " * (size // 16),
         "sk-proj": b"sk-proj-AAAAAAAA " * (size // 17),
         "sk-key": b"sk-" + b"A1" * (size // 2),
