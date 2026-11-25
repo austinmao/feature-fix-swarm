@@ -140,8 +140,8 @@ references to either.
 
 | Var | Default | Consumer | Effect |
 |---|---|---|---|
-| `REVIEW_TIER` | auto-detect | `scripts/gsd/review-tier.sh:78` | Hard override of diff-risk tier (`light\|standard\|full`) |
-| `REVIEW_TIER_BASE` | `main` | `scripts/gsd/review-tier.sh:116` | Merge-base for `--all` diffs |
+| `REVIEW_TIER` | auto-detect | `scripts/gsd/review-tier.sh:79` | Hard override of diff-risk tier (`light\|standard\|full`) |
+| `REVIEW_TIER_BASE` | `main` | `scripts/gsd/review-tier.sh:124` | Merge-base for `--all` diffs |
 | `GSD_REVIEW_TIMEOUT` | `600` | `scripts/gsd/review-gate-command.sh:179` | Budget for ship-time review, both hosts combined. gsd-core 1.15 stops the seam after 120 s whatever this is |
 | `GSD_REVIEW_MODEL_REQUEST` | `{"kind":"tier","name":"judgment"}` | `scripts/gsd/review-gate-command.sh` | Typed ship-review request; exact requests disable all fallback |
 | `PLAN_ADVERSARY` | on | `scripts/gsd/plan-adversary.sh:48` | `off` skips the cross-model plan review |
