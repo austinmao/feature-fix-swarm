@@ -1,7 +1,7 @@
 ---
 name: review-gate
 description: "Host-neutral pre-merge review gate. Tries the opposite CLI first, allows one explicit read-only active-host fallback, and fails closed when mandatory review evidence is unavailable. Blocks shipping on HIGH/CRITICAL findings."
-version: "1.20.2"
+version: "1.20.3"
 ---
 
 # /review-gate
@@ -146,13 +146,18 @@ if [ "$DIFF_TARGET" = "--staged" ]; then
 elif [ "$DIFF_TARGET" = "file" ]; then
   DIFF_ARGS=(HEAD -- "$FILE_PATH")
 else
-  DIFF_ARGS=("$DIFF_TARGET"...HEAD -- . "${BOOKKEEPING_EXCLUDES[@]}")
-  DIFF_BASE="$(git merge-base "$DIFF_TARGET" HEAD)"
+  # exact refs: a tag named main must not become the base
+  DIFF_REF="$(git show-ref --verify -s refs/remotes/origin/main 2>/dev/null || git show-ref --verify -s refs/heads/main 2>/dev/null)" ||
+    { echo "GATE: FAIL — no origin/main or main branch to diff against."; exit 1; }
+  DIFF_ARGS=("$DIFF_REF"...HEAD -- . "${BOOKKEEPING_EXCLUDES[@]}")
+  DIFF_BASE="$(git merge-base "$DIFF_REF" HEAD)" ||
+    { echo "GATE: FAIL — no history in common with main."; exit 1; }
 fi
 # The empty tree as attribute source (git 2.40+) ignores the reviewed branch's
 # .gitattributes, so -diff/binary marks cannot hide text; real binaries stay one line.
 export GIT_ATTR_SOURCE=4b825dc642cb6eb9a060e54bf8d69288fbee4904
-DIFF=$(git diff --no-textconv --no-ext-diff "${DIFF_ARGS[@]}" 2>/dev/null)
+DIFF=$(git diff --no-textconv --no-ext-diff "${DIFF_ARGS[@]}") ||
+  { echo "GATE: FAIL — git could not compute the diff."; exit 1; }
 
 if [ -z "$DIFF" ]; then
   echo "review-gate: no diff found. Nothing to review."
@@ -193,8 +198,7 @@ ADVERSARIAL_PROMPT="You are an adversarial security and correctness reviewer. $S
 `scripts/gsd/review-tier.sh` classifies the SAME diff this run is about to review as
 light/standard/full, so a 2-file docs diff doesn't pay a 40-file auth review. The mode
 passed MIRRORS `DIFF_TARGET` above and classifies the SAME bytes: `--staged` (default) /
-`--all` with `REVIEW_TIER_BASE=main` PINNED so its base matches the gate's hardcoded
-`main...HEAD` / `--file "$FILE_PATH"`.
+`--all` with `REVIEW_TIER_BASE` PINNED to the base of the captured diff / `--file "$FILE_PATH"`.
 
 ```bash
 FFS_T="$HOME/.claude/lib/feature-fix-swarm"; FFS_REF="$(git show-ref --verify -s refs/remotes/origin/main 2>/dev/null || git show-ref --verify -s refs/heads/main 2>/dev/null)" && eval "$(git show "${FFS_REF}:scripts/gsd/trusted-runtime.sh" 2>/dev/null || git show "${FFS_REF}:packages/feature-fix-swarm/scripts/gsd/trusted-runtime.sh" 2>/dev/null || echo false)" && ffs_trusted_runtime "$FFS_REF" || true
@@ -203,7 +207,8 @@ case "$DIFF_TARGET" in
     TIER_LINE="$("$FFS_T/scripts/gsd/review-tier.sh" --staged 2>/dev/null)"
     ;;
   main)
-    TIER_LINE="$(REVIEW_TIER_BASE=main "$FFS_T/scripts/gsd/review-tier.sh" --all 2>/dev/null)"
+    DIFF_REF="$(git show-ref --verify -s refs/remotes/origin/main 2>/dev/null || git show-ref --verify -s refs/heads/main 2>/dev/null)" &&
+      TIER_LINE="$(REVIEW_TIER_BASE="$DIFF_REF" "$FFS_T/scripts/gsd/review-tier.sh" --all 2>/dev/null)"
     ;;
   file)
     TIER_LINE="$("$FFS_T/scripts/gsd/review-tier.sh" --file "$FILE_PATH" 2>/dev/null)"

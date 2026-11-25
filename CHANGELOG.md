@@ -8,6 +8,17 @@ all skills.
 
 ## Unreleased
 
+### Changed (2026-11-25, review-gate diffs and finds helpers by exact name)
+
+- review-gate 1.20.3 `--all` diffs, and picks its tier, against `origin/main` (else
+  the branch `main`) by exact ref name. Before, it used whatever `main` resolved to,
+  so a local `main` ahead of `origin/main` no longer hides commits.
+- In every mode the gate ends with `GATE: FAIL` when git cannot compute the diff (no
+  base branch, no common history, no commit yet, a path outside the repository);
+  before, that read as "Nothing to review".
+- `adversary-host.sh` resolves its directory once when it is sourced, so `gates.py`
+  and `model_requests.py` are found from any working directory, also in zsh.
+
 ### Changed (2026-11-24, review-gate takes its runtime from the base tip)
 
 - review-gate 1.20.2 loads its helpers from the tip of `origin/main` (else the
