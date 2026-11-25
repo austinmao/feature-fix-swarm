@@ -8,6 +8,17 @@ all skills.
 
 ## Unreleased
 
+### Changed (2026-11-25, review-gate covers the whole change)
+
+- review-gate 1.20.4 covers the whole repository from any directory, in every mode
+  except `--file`. Before, a run from a subdirectory covered only that subdirectory.
+  Only the top-level `.planning/` and `spike-results/` directories are left out, also
+  under `GIT_LITERAL_PATHSPECS` or `GIT_ICASE_PATHSPECS`.
+- A `.gitmodules` `ignore` setting no longer hides a submodule bump from the diff or
+  the tier.
+- `review-tier.sh` checks a moved file under its old and its new name, reads file
+  names unquoted and as bytes, and `--file` compares with HEAD, as the reviewed diff does.
+
 ### Changed (2026-11-25, review-gate diffs and finds helpers by exact name)
 
 - review-gate 1.20.3 `--all` diffs, and picks its tier, against `origin/main` (else
