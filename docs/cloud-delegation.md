@@ -802,7 +802,7 @@ integration ref stays local until you merge it.
 `cloud_dispatch.py`. It looks for the library in `$FFS_LIB_DIR`, then
 `<script>/../../lib`, then `~/.claude/lib/feature-fix-swarm`. Every verb
 takes `--root ABS`, the absolute path of the main worktree (default: from
-the current directory; a linked worktree is refused).
+the current directory; a linked worktree is refused, and an explicit empty `--root` is `BAD_ROOT`, never the current directory).
 
 | Verb | Arguments | Effect |
 |---|---|---|

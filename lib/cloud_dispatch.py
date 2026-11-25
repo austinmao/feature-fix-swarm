@@ -504,8 +504,9 @@ def ls_remote(svc: Services, url: str, pattern: str) -> Tuple[bool, Dict[str, st
 
 
 def resolve_root(svc: Services, root_arg: Optional[str]) -> Path:
-    """The main worktree: ``--root`` (absolute) or the one containing the cwd."""
-    if root_arg:
+    """The main worktree: ``--root`` (absolute) or, when it is not given at all, the one containing the cwd.  An
+    explicit empty ``--root`` (an empty command substitution) is refused, never read as the cwd."""
+    if root_arg is not None:
         candidate = Path(root_arg)
         if not candidate.is_absolute():
             raise UsageError("BAD_ROOT", "--root must be an absolute path")

@@ -28,6 +28,9 @@ all skills.
   names the sandbox, except four allowlisted host conditions (no pasteboard, no node, no
   terminal device, running as root). A test derives the allowlist from the skips in the
   three cloud test files, so a new skip there needs a conscious change.
+- `resolve_root` refuses an explicit empty `--root` (`BAD_ROOT`, exit 2) instead of reading it as the working
+  directory, so an empty `--root "$(git rev-parse --show-toplevel)"` outside a repository can no longer reach another
+  repository's run.
 - Cloud review no longer obeys the repository's rung breaker. Once `cloud-review.sh`
   pins the repository store, 20 recorded failures of the requested rung in any other
   review made it skip that rung and answer with another model, which a cloud review

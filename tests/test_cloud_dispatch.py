@@ -2972,3 +2972,18 @@ def test_undeclared_secret_entries_are_located_never_echoed() -> None:
     assert check.level == cd.FAIL and pasted not in check.detail and "OTHER" not in check.detail, check.detail
     assert "2 needs-secret entries" in check.detail and "task 2 entry 2" in check.detail and "task 2 entry 3" in check.detail
     assert cd._secret_declared_check(config, tasks[:1]).level == cd.OK
+
+
+def test_an_explicit_empty_root_is_refused_never_read_as_the_working_directory(
+        world: World, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture) -> None:
+    """`--root "$(git rev-parse --show-toplevel)"` is empty outside a repository; that must not become the cwd."""
+    monkeypatch.chdir(world.root)
+    tasks = world.tasks_file([T1])
+    world.grant("r1", "cloud-dispatch:claude", "push:origin/ffs/cloud/r1")
+    for argv in (["plan", "--tasks", tasks, "--policy", "auto", "--root", ""],
+                 ["start", "--run", "r1", "--tasks", tasks, "--policy", "auto", "--root", ""],
+                 ["status", "--run", "r1", "--root", ""]):
+        capsys.readouterr()
+        rc, _ = world.cli(*argv)
+        assert rc == 2 and "BAD_ROOT" in capsys.readouterr().err, argv
+    assert not L.run_ledger_path(world.root, "r1").exists()
