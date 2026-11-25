@@ -10,6 +10,7 @@
 bats_require_minimum_version 1.5.0
 
 setup() {
+  unset GSD_PROJECT
   ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
   LEVER="$ROOT/scripts/gsd/plan-wall.sh"
   BACKSTOP="$ROOT/scripts/gsd/gates-test-command.sh"
@@ -186,12 +187,61 @@ EOF
   ! ls .planning/run-state/plan-wall-01-alpha-*.json 2>/dev/null
 }
 
-@test "--run with GSD_PROJECT set but no isolated dir falls back to the plain root" {
+@test "--run with GSD_PROJECT set but no isolated dir fails closed (no root fallback)" {
   stub_alpha_high
   FFS_HOST=claude ADVERSARY_BIN_CLAUDE=stub-claude GSD_PROJECT=absent \
-    run bash "$LEVER" --run
+    run --separate-stderr bash "$LEVER" --run
+  [ "$status" -eq 2 ]
+  [[ "$stderr" == *"GSD_PROJECT=absent"* ]] || false
+  [[ "$stderr" == *".planning/absent/phases is missing"* ]] || false
+  # nothing walled, nothing dispatched
+  ! ls .planning/run-state/plan-wall-*.json 2>/dev/null
+}
+
+@test "--run with GSD_PROJECT unset walls the plain root" {
+  stub_alpha_high
+  FFS_HOST=claude ADVERSARY_BIN_CLAUDE=stub-claude run env -u GSD_PROJECT bash "$LEVER" --run
   [ "$status" -eq 0 ]
   ls .planning/run-state/plan-wall-01-alpha-*.json
+}
+
+@test "--run with empty or whitespace-only GSD_PROJECT behaves as unset" {
+  stub_alpha_high
+  FFS_HOST=claude ADVERSARY_BIN_CLAUDE=stub-claude GSD_PROJECT="  	 " run bash "$LEVER" --run
+  [ "$status" -eq 0 ]
+  ls .planning/run-state/plan-wall-01-alpha-*.json
+  FFS_HOST=claude ADVERSARY_BIN_CLAUDE=stub-claude GSD_PROJECT="" run bash "$LEVER" --run
+  [ "$status" -eq 0 ]
+}
+
+@test "--run trims surrounding whitespace around a valid GSD_PROJECT" {
+  mkdir -p ".planning/projA/phases/01-iso"
+  echo "Phase iso: a plain widget" > .planning/projA/phases/01-iso/PLAN.md
+  stub_alpha_high
+  FFS_HOST=claude ADVERSARY_BIN_CLAUDE=stub-claude GSD_PROJECT=" projA " run bash "$LEVER" --run
+  [ "$status" -eq 0 ]
+  ls .planning/run-state/plan-wall-01-iso-*.json
+}
+
+@test "--run refuses an invalid GSD_PROJECT (not one path segment)" {
+  stub_alpha_high
+  for bad in .. ../x a/b a..b -x; do
+    FFS_HOST=claude ADVERSARY_BIN_CLAUDE=stub-claude GSD_PROJECT="$bad" \
+      run --separate-stderr bash "$LEVER" --run
+    [ "$status" -eq 2 ]
+    [[ "$stderr" == *"GSD_PROJECT must be one path segment"* ]] || false
+  done
+  ! ls .planning/run-state/plan-wall-*.json 2>/dev/null
+}
+
+@test "--run explicit root arg beats an invalid or missing GSD_PROJECT" {
+  stub_alpha_high
+  FFS_HOST=claude ADVERSARY_BIN_CLAUDE=stub-claude GSD_PROJECT=absent \
+    run bash "$LEVER" --run .planning/phases
+  [ "$status" -eq 0 ]
+  FFS_HOST=claude ADVERSARY_BIN_CLAUDE=stub-claude GSD_PROJECT=../x \
+    run bash "$LEVER" --run .planning/phases
+  [ "$status" -eq 0 ]
 }
 
 @test "--run explicit root arg beats GSD_PROJECT" {

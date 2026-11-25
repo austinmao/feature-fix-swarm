@@ -7,6 +7,7 @@
 bats_require_minimum_version 1.5.0
 
 setup() {
+  unset GSD_PROJECT
   ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
   SEAM="$ROOT/scripts/gsd/review-gate-command.sh"
   STUB_DIR="$BATS_TEST_TMPDIR/bin"
