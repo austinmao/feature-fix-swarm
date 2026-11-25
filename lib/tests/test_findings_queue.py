@@ -45,6 +45,104 @@ def _run(*args: str, store: Path) -> subprocess.CompletedProcess:
     )
 
 
+def _record_sha(row: dict) -> str:
+    """Full-record CAS recipe: sorted keys, compact separators, UTF-8 Unicode."""
+    return hashlib.sha256(json.dumps(
+        row, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode("utf-8")).hexdigest()
+
+
+def test_expected_record_hash_guards_resolve(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    sig, _, _ = gates.findings_add(store, "café.py", "résumé missing")
+    row = gates.findings_list(store)[0]
+    before = store.read_bytes()
+    # wrong digest and unknown sig both refuse with no store write
+    proc = _run("resolve", sig, "--disposition", "refute", "--reason", "résolu",
+                "--expected-record-sha256", "f" * 64, store=store)
+    assert proc.returncode != 0 and store.read_bytes() == before
+    proc = _run("resolve", "a" * 64, "--disposition", "fix", "--reason", "x",
+                "--expected-record-sha256", _record_sha(row), store=store)
+    assert proc.returncode != 0 and store.read_bytes() == before
+    proc = _run("resolve", sig, "--disposition", "fix", "--reason", "x",
+                "--expected-record-sha256", "not-a-hash", store=store)
+    assert proc.returncode != 0 and store.read_bytes() == before
+    proc = _run("resolve", sig, "--disposition", "refute", "--reason", "résolu",
+                "--expected-record-sha256", _record_sha(row), store=store)
+    assert proc.returncode == 0
+    after = gates.findings_list(store)[0]
+    assert after["resolved"] is True and after["reason"] == "résolu"
+
+
+def test_record_changed_between_read_and_resolve_is_refused(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    sig, _, _ = gates.findings_add(store, "a.py", "issue")
+    read_hash = _record_sha(gates.findings_list(store)[0])
+    # another actor refutes then reopens it after it was read: still unresolved,
+    # but the record now carries the refutation in its history
+    gates.findings_resolve(store, sig, disposition="refute", reason="adjudicated")
+    gates.findings_add(store, "a.py", "issue")
+    assert gates.findings_list(store)[0]["resolved"] is False
+    assert _record_sha(gates.findings_list(store)[0]) != read_hash
+    before = store.read_bytes()
+    proc = _run("resolve", sig, "--disposition", "fix", "--reason", "auto closure",
+                "--if-unresolved", "--expected-record-sha256", read_hash, store=store)
+    assert proc.returncode != 0 and store.read_bytes() == before
+    assert gates.findings_list(store)[0]["resolved"] is False
+
+
+def test_if_unresolved_refuses_already_resolved_without_byte_change(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    sig, _, _ = gates.findings_add(store, "a.py", "issue")
+    assert gates.findings_resolve(store, sig, disposition="refute", reason="prior adjudication")
+    before = store.read_bytes()
+    proc = _run("resolve", sig, "--disposition", "fix", "--reason", "auto closure",
+                "--if-unresolved", store=store)
+    assert proc.returncode != 0 and store.read_bytes() == before
+    # Without the opt-in flag, double-resolve semantics are unchanged.
+    proc = _run("resolve", sig, "--disposition", "fix", "--reason", "explicit correction",
+                store=store)
+    assert proc.returncode == 0
+    assert gates.findings_list(store)[0]["history"][-1]["reason"] == "prior adjudication"
+
+
+def test_if_unresolved_resolves_open_record_and_flag_like_reason(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    sig, _, _ = gates.findings_add(store, "b.py", "another issue")
+    row = gates.findings_list(store)[0]
+    proc = _run("resolve", sig, "--disposition", "fix", "--reason", "--if-unresolved",
+                "--if-unresolved", "--expected-record-sha256", _record_sha(row), store=store)
+    assert proc.returncode == 0
+    after = gates.findings_list(store)[0]
+    assert after["resolved"] is True and after["reason"] == "--if-unresolved"
+
+
+def test_resolve_requires_exactly_one_positional(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    sig, _, _ = gates.findings_add(store, "a.py", "issue")
+    before = store.read_bytes()
+    for extra in (["--expected-record-sha256=" + "f" * 64],  # '=' form is not a flag
+                  ["--if-unresolve"],                         # typo'd switch
+                  ["stray"]):
+        proc = _run("resolve", sig, "--disposition", "fix", "--reason", "x", *extra,
+                    store=store)
+        assert proc.returncode == 2 and "usage" in proc.stderr, extra
+        assert store.read_bytes() == before, extra
+    # a switch swallowed as the value of a value flag is an invalid digest
+    proc = _run("resolve", sig, "--disposition", "fix", "--reason", "x",
+                "--expected-record-sha256", "--if-unresolved", store=store)
+    assert proc.returncode == 2 and store.read_bytes() == before
+
+
+def test_record_sha_parity_with_script_recipe(tmp_path) -> None:
+    store = tmp_path / "evidence.json"
+    gates.findings_add(store, "café.py", "résumé 🔥 missing")
+    row = gates.findings_list(store)[0]
+    assert gates.findings_record_sha256(row) == _record_sha(row)
+    script = (DISPATCH_DIR.parent / "scripts" / "gsd" / "review-gate-command.sh").read_text()
+    assert 'sort_keys=True, separators=(",", ":"), ensure_ascii=False' in script
+
+
 # ── function-level happy path (PATH-004) ─────────────────────────────────────
 
 def test_add_list_resolve_function_lifecycle(tmp_path) -> None:
