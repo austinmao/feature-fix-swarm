@@ -21,6 +21,9 @@ all skills.
   reused on a retry or resume, asked for when unknown, because a new id has no ledger and
   `LEDGER_MISSING` would prove nothing) and gives `plan` exits 2 and 78 a rule: relay
   stderr, run nothing, stop.
+- The no-flag comparison's tests of the fail-in-CI arm name the outcome (`fail`, `skip` or
+  `ok`) instead of `pytest.raises(pytest.fail.Exception)`, which let a skip escape and
+  report the test as skipped. Turning the arm into a skip now fails three tests.
 - Cloud review no longer obeys the repository's rung breaker. Once `cloud-review.sh`
   pins the repository store, 20 recorded failures of the requested rung in any other
   review made it skip that rung and answer with another model, which a cloud review

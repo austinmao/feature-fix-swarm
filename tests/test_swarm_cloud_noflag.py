@@ -373,6 +373,18 @@ def _commit(repo: Path, files: Dict[str, str], message: str) -> str:
 CLOUD_SKILL = f"line one\n{BEGIN}\ncloud block\n{END}\nline two\nline three\n"
 
 
+def _outcome(repo: Path, ci: bool):
+    """``("fail"|"skip"|"ok", message)``.  `pytest.raises(pytest.fail.Exception)` would let a skip escape and report the
+    test as skipped, so an arm that regressed from failing to skipping would stay green; this names the outcome."""
+    try:
+        base = _resolve_base(repo, ci=ci)
+    except pytest.fail.Exception as exc:
+        return "fail", str(exc)
+    except pytest.skip.Exception as exc:
+        return "skip", str(exc)
+    return "ok", base
+
+
 def _history(tmp_path: Path, *, merge_main: bool, merge_unrelated: bool, cloud_on_main: bool = False,
              publish_main: bool = True, block_on_main: bool = True) -> Dict[str, str]:
     """main (moves on after `pre`) with branches topic and cloud cut from `pre`; main and topic edit different lines."""
@@ -422,9 +434,8 @@ def test_missing_history_skips_locally_and_fails_in_ci(tmp_path: Path) -> None:
     repo = Path(ids["repo"])
     with pytest.raises(pytest.skip.Exception):
         _resolve_base(repo, ci=False)
-    with pytest.raises(pytest.fail.Exception) as failure:
-        _resolve_base(repo, ci=True)
-    assert "origin/main" in str(failure.value)
+    kind, message = _outcome(repo, ci=True)
+    assert kind == "fail" and "origin/main" in message, (kind, message)
 
 
 def test_cloud_work_already_on_the_base_is_a_skip_even_in_ci(tmp_path: Path) -> None:
@@ -468,9 +479,8 @@ def test_a_base_without_the_cloud_block_is_never_a_landed_base(tmp_path: Path) -
     with pytest.raises(pytest.skip.Exception) as skipped:
         _resolve_base(repo, ci=False)
     assert "does not carry the cloud block" in str(skipped.value)
-    with pytest.raises(pytest.fail.Exception) as failure:
-        _resolve_base(repo, ci=True)
-    assert "does not carry the cloud block" in str(failure.value)
+    kind, message = _outcome(repo, ci=True)
+    assert kind == "fail" and "does not carry the cloud block" in message, (kind, message)
 
 
 def test_a_history_with_no_cloud_work_anywhere_fails_in_ci(tmp_path: Path) -> None:
@@ -479,8 +489,7 @@ def test_a_history_with_no_cloud_work_anywhere_fails_in_ci(tmp_path: Path) -> No
     _g(repo, "checkout", "-q", "main")  # HEAD is the base itself and the dispatcher exists nowhere
     with pytest.raises(pytest.skip.Exception):
         _resolve_base(repo, ci=False)
-    with pytest.raises(pytest.fail.Exception):
-        _resolve_base(repo, ci=True)
+    assert _outcome(repo, ci=True)[0] == "fail"
 
 
 def test_a_synthetic_pr_merge_puts_the_main_tip_on_the_first_parent_and_still_resolves_to_it(tmp_path: Path) -> None:
