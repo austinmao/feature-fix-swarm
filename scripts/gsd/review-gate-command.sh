@@ -4,6 +4,8 @@
 #   "The diff is piped to the command via stdin; the command must output JSON with a
 #    `verdict` field (`"APPROVED"` or `"REVISE"`). Non-zero exit or `"REVISE"` verdict
 #    blocks the ship workflow."
+# That last sentence does not hold in gsd-core 1.15: workflows/ship.md runs this
+# after the PR exists and continues whatever it returns. The verdict is advisory.
 # NOTE: this is stdin-diff + stdout-JSON, NOT file-paths-on-stdin — verified above,
 # overriding the file-paths assumption in the original task brief.
 set -uo pipefail
@@ -21,10 +23,9 @@ if [ -n "${GSD_PROJECT:-}" ] && [ -d ".planning/${GSD_PROJECT}/phases" ]; then
   PHASES_ROOT=".planning/${GSD_PROJECT}/phases"
 fi
 
-# Autonomy-grant wall (fail-closed): ship is an operator-gated action. This seam
-# runs inside /gsd:ship and a REVISE verdict blocks it, so the grant ledger check
-# lives here (day-1 wrapper; native ship:pre capability gate deferred — no
-# third-party gate evaluator at gsd-core 1.6.1, upstream #2004).
+# Autonomy-grant check: ship is an operator-gated action. A missing grant REVISEs;
+# the check that stops a run is feature-implement's own `check-grant` (native
+# ship:pre capability gate deferred, upstream #2004).
 REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
 # RUN_ID: env (exported by feature-implement) > FFS_SPEC_ID > branch-derived spec-NNN.
 # No hardcoded default — a wrong ledger key silently checks another run's

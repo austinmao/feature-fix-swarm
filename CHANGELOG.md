@@ -78,6 +78,40 @@ all skills.
   base tree itself carries the dispatcher and the skill's cloud block; a CI run
   without that proof fails instead of skipping.
 
+### Changed (2026-11-25, review-gate diffs and finds helpers by exact name)
+
+- review-gate 1.20.3 `--all` diffs, and picks its tier, against `origin/main` (else
+  the branch `main`) by exact ref name. Before, it used whatever `main` resolved to,
+  so a local `main` ahead of `origin/main` no longer hides commits.
+- In every mode the gate ends with `GATE: FAIL` when git cannot compute the diff (no
+  base branch, no common history, no commit yet, a path outside the repository);
+  before, that read as "Nothing to review".
+- `adversary-host.sh` resolves its directory once when it is sourced, so `gates.py`
+  and `model_requests.py` are found from any working directory, also in zsh.
+
+### Changed (2026-11-24, review-gate takes its runtime from the base tip)
+
+- review-gate 1.20.2 loads its helpers from the tip of `origin/main` (else the
+  local `main`) instead of the merge-base. A branch that has not been rebased now
+  gets main's current helpers; fetch first if `origin/main` is stale. `origin` must
+  be the repository the change merges into, with a protected `main`. If that tip has
+  no FFS runtime, the gate uses the user-scope install (`bash setup.sh --scope user`)
+  and is blocked without one, even when the fork point had a runtime.
+
+### Changed (2026-11-24, the ship seam is described as advisory)
+
+- gsd-core 1.15 runs `workflow.code_review_command` after the PR exists and
+  continues whatever it returns. feature-implement 2.23.2, `docs/commands.md` and
+  the seam's comments no longer say that it walls ship; feature-implement checks
+  the `ship:gsd` grant itself, like every other operator-gated action.
+
+### Changed (2026-11-24, review-gate stops when the evidence store is refused)
+
+- review-gate 1.20.1 ends with `GATE: FAIL` when `gates.py` refuses the evidence
+  store, instead of trying another runtime or continuing without the skip-list,
+  review meter and intent check. A runtime without `findings-queue` still falls
+  back. The queue is listed once instead of twice.
+
 ### Changed (2026-11-21, review-gate keeps the reviewed branch out of its own runtime)
 
 - review-gate 1.20.0 reuses one base-ref runtime snapshot per commit, kept under
@@ -98,7 +132,12 @@ all skills.
   the diff skips textconv and external diff drivers. `review-tier.sh` never picks the
   light tier when a changed file is binary.
 - `gates.py` refuses a default evidence store that is tracked by git, including a
-  committed symlink or a case variant of `.feature-fix-swarm`.
+  committed symlink or a case variant of `.feature-fix-swarm`. The manifest and `vendor/`
+  files a project-scope install commits there are allowed.
+- The tracked-store check also covers Unicode spellings of the directory, checkouts whose
+  git dir is not named `.git` (bare-repository worktree, submodule, `--separate-git-dir`)
+  and inherited `GIT_DIR`-style variables. It stops when git cannot answer inside a
+  checkout, and its message no longer suggests `git rm --cached`, which kept the file.
 - `clean_code_metrics.py` runs `crapper` and `dryer` only from absolute paths
   outside the reviewed checkout.
 

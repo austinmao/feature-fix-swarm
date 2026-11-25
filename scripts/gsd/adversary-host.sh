@@ -23,29 +23,35 @@
 # not exist at the repo root. Measured under zsh:
 #   scripts/gsd/adversary-host.sh:.:20: no such file or directory: ./run-bounded.sh
 # `run_bounded` then stayed undefined and every bounded reviewer call failed.
-# Resolved zsh-safely: $0 is the SOURCED FILE's path in zsh (verified), while
-# bash populates BASH_SOURCE, so this one expression carries the right
-# provenance in both -- and needs no zsh-only syntax such as ${(%):-%x}, which
-# bash cannot even PARSE (so it cannot sit in an elif branch). Deliberately NOT
+# zsh names the sourced file in %x; $0 does not hold it when the file is found
+# on PATH or FUNCTION_ARGZERO is off, and inside a zsh function $0 is the function
+# name, so the functions below use this directory too. The eval keeps the zsh-only
+# syntax from bash's parser. No cd: CDPATH, a cd function, a chpwd hook or a
+# symlink in the path cannot change the result. Deliberately NOT
 # falling back to the CWD's git root: sourcing one checkout's copy from another
 # would silently load THAT checkout's run-bounded.sh, so a reviewer could run a
 # run_bounded from a different revision than the branch under review, unwarned.
-_ah_dir="$(dirname "${BASH_SOURCE[0]:-$0}")"
-if [ ! -f "${_ah_dir}/run-bounded.sh" ]; then
-  echo "adversary-host: FATAL: cannot locate run-bounded.sh next to adversary-host.sh (looked in '${_ah_dir}')" >&2
-  unset _ah_dir
+_ah_self="${BASH_SOURCE[0]:-}"
+[ -n "$_ah_self" ] || [ -z "${ZSH_VERSION:-}" ] || eval '_ah_self="${(%):-%x}"'
+case "$_ah_self" in
+  /*) ;;
+  ?*) _ah_self="$PWD/$_ah_self" ;;
+  *) _ah_self=/dev/null/unknown ;; # not sourced from a file: refused below
+esac
+ADVERSARY_HOST_DIR="$(dirname "$_ah_self")"
+unset _ah_self
+if [ ! -f "${ADVERSARY_HOST_DIR}/run-bounded.sh" ]; then
+  echo "adversary-host: FATAL: cannot locate run-bounded.sh next to adversary-host.sh (looked in '${ADVERSARY_HOST_DIR}')" >&2
   return 1 2>/dev/null || exit 1
 fi
-. "${_ah_dir}/run-bounded.sh"
-# Do not leak scaffolding into the caller's shell.
-unset _ah_dir
+. "${ADVERSARY_HOST_DIR}/run-bounded.sh"
 
 adversary_model_request_helper() {
   local candidate
   for candidate in \
-    "$(dirname "${BASH_SOURCE[0]:-$0}")/../../lib/model_requests.py" \
-    "$(dirname "${BASH_SOURCE[0]:-$0}")/../../packages/feature-fix-swarm/lib/model_requests.py" \
-    "$(dirname "${BASH_SOURCE[0]:-$0}")/../../model_requests.py"; do
+    "${ADVERSARY_HOST_DIR}/../../lib/model_requests.py" \
+    "${ADVERSARY_HOST_DIR}/../../packages/feature-fix-swarm/lib/model_requests.py" \
+    "${ADVERSARY_HOST_DIR}/../../model_requests.py"; do
     if [ -f "$candidate" ]; then
       printf '%s\n' "$candidate"
       return 0
@@ -60,7 +66,7 @@ adversary_model_request_helper() {
 adversary_gates() {
   local candidate
   # The last candidate is the user-scope install layout (lib/ files sit at its root).
-  for candidate in "$(dirname "${BASH_SOURCE[0]:-$0}")/../../lib/gates.py" "$(dirname "${BASH_SOURCE[0]:-$0}")/../../packages/feature-fix-swarm/lib/gates.py" "$(dirname "${BASH_SOURCE[0]:-$0}")/../../gates.py"; do
+  for candidate in "${ADVERSARY_HOST_DIR}/../../lib/gates.py" "${ADVERSARY_HOST_DIR}/../../packages/feature-fix-swarm/lib/gates.py" "${ADVERSARY_HOST_DIR}/../../gates.py"; do
     [ -f "$candidate" ] && { printf '%s\n' "$candidate"; return 0; }
   done
   echo "adversary-host: gates.py unavailable" >&2

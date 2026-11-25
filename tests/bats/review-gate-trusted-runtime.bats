@@ -1,7 +1,7 @@
 #!/usr/bin/env bats
 # review-gate-trusted-runtime.bats — the review gate must never execute FFS
 # helper code from the tree it reviews. Each skill fence loads helpers from a
-# snapshot of the base ref (merge-base with main), so a branch that edits
+# snapshot of the base tip (origin/main, else main), so a branch that edits
 # gates.py, review-tier.sh, adversary-host.sh or clean_code_metrics.py cannot
 # change how its own review runs. Every fence runs in a fresh bash process,
 # because hosts may run fences in separate shells.
@@ -53,6 +53,21 @@ make_fixture() {
   git -C "$FIX" add -A && git -C "$FIX" -c user.name=t -c user.email=t@t commit -qm evil
   echo 'x = 2' > "$FIX/src/app.py"
   git -C "$FIX" add src/app.py
+}
+
+# advance_base — main moves past the branch's fork point with newer helpers.
+# The branch can choose its fork point, so the gate must not run the fork's copies.
+advance_base() {
+  local wt="$BATS_TEST_TMPDIR/main-wt" rt
+  git -C "$FIX" worktree add -q "$wt" main
+  rt="$wt/$1"
+  printf '#!/usr/bin/env bash\necho "light tip-tier"\n' > "$rt/scripts/gsd/review-tier.sh"
+  printf 'detect_orchestrator_host() { echo claude; }\nadversary_kind_for_host() { echo tip; }\n' \
+    > "$rt/scripts/gsd/adversary-host.sh"
+  printf 'print("COMPLEXITY tip-helper")\n' > "$rt/lib/clean_code_metrics.py"
+  printf 'import sys\nsys.exit("evidence store x is tracked by git")\n' > "$rt/lib/gates.py"
+  git -C "$wt" -c user.name=t -c user.email=t@t commit -qam tip
+  git -C "$FIX" worktree remove --force "$wt"
 }
 
 # fake_install — a user-scope FFS install under the sandboxed HOME.
@@ -139,6 +154,81 @@ $3"
   [[ "$output" == *"gates="*"/lib/gates.py"* ]]
   [[ "$output" != *"gates=$FIX/"* || "$output" == *"gates=$FIX/.git/ffs-trusted/"* ]]
   [[ "$output" != *"gates=$HOME/"* ]]
+  [ ! -e "$CANARY" ]
+}
+
+@test "every fence uses the base tip, not the branch's fork point" {
+  make_fixture .
+  advance_base .
+  run_fence '### Pre-check — choose the opposite CLI' '' 'echo "kind=$REVIEW_KIND"'
+  [[ "$output" == *"kind=tip"* ]] || false
+  run_fence '### Tier selection (v1.4.0)' 'DIFF_TARGET=--staged' 'echo "reason=$TIER_REASON"'
+  [[ "$output" == *"reason=tip-tier"* ]] || false
+  run_fence '### Capture diff' '' ''
+  [[ "$output" == *"COMPLEXITY tip-helper"* ]] || false
+  run_fence '### Findings queue: capability probe + resolved-sig consult' '' 'echo reached'
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"GATE: FAIL"* ]] || false
+  [ ! -e "$CANARY" ]
+  # the remaining fences carry the same loader line
+  [ "$(grep -c 'ffs_trusted_runtime "$FFS_REF"' "$SKILL")" -eq 6 ]
+  [ "$(grep 'ffs_trusted_runtime "$FFS_REF"' "$SKILL" | sed 's/^ *//' | sort -u | wc -l)" -eq 1 ]
+}
+
+@test "the base tip is origin/main before a local main (packaged layout)" {
+  make_fixture packages/feature-fix-swarm
+  git -C "$FIX" update-ref refs/remotes/origin/main main
+  advance_base packages/feature-fix-swarm
+  run_fence '### Pre-check — choose the opposite CLI' '' 'echo "kind=$REVIEW_KIND"'
+  [[ "$output" == *"kind=codex"* ]] || false
+  git -C "$FIX" update-ref refs/remotes/origin/main main
+  run_fence '### Pre-check — choose the opposite CLI' '' 'echo "kind=$REVIEW_KIND"'
+  [[ "$output" == *"kind=tip"* ]] || false
+  [ ! -e "$CANARY" ]
+}
+
+@test "a branch with no history in common with main still gets main's runtime" {
+  make_fixture .
+  git -C "$FIX" checkout -q --orphan 124-orphan
+  git -C "$FIX" -c user.name=t -c user.email=t@t commit -qm orphan
+  run_fence '### Pre-check — choose the opposite CLI' '' 'echo "kind=$REVIEW_KIND"'
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"kind=codex"* ]] || false
+  [ ! -e "$CANARY" ]
+}
+
+@test "a branch or tag named like a base ref does not replace it" {
+  make_fixture .
+  advance_base .
+  for name in main origin/main refs/heads/main refs/remotes/origin/main; do
+    git -C "$FIX" update-ref "refs/tags/$name" 123-branch
+    [ "$name" = main ] || git -C "$FIX" update-ref "refs/heads/$name" 123-branch
+  done
+  # no origin/main: the local main answers
+  run_fence '### Pre-check — choose the opposite CLI' '' 'echo "kind=$REVIEW_KIND"'
+  [[ "$output" == *"kind=tip"* ]] || false
+  [ ! -e "$CANARY" ]
+  # origin/main only
+  git -C "$FIX" update-ref refs/remotes/origin/main refs/heads/main
+  git -C "$FIX" update-ref -d refs/heads/main
+  run_fence '### Pre-check — choose the opposite CLI' '' 'echo "kind=$REVIEW_KIND"'
+  [[ "$output" == *"kind=tip"* ]] || false
+  [ ! -e "$CANARY" ]
+  # neither: no look-alike is used
+  git -C "$FIX" update-ref -d refs/remotes/origin/main
+  fake_install
+  run_fence '### Pre-check — choose the opposite CLI' '' 'echo "kind=$REVIEW_KIND"'
+  [[ "$output" == *"kind=installed"* ]] || false
+  [ ! -e "$CANARY" ]
+}
+
+@test "an origin/main without its object falls back to the local main" {
+  make_fixture .
+  mkdir -p "$FIX/.git/refs/remotes/origin"
+  printf '%040d\n' 1 > "$FIX/.git/refs/remotes/origin/main"
+  run_fence '### Pre-check — choose the opposite CLI' '' 'echo "kind=$REVIEW_KIND"'
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"kind=codex"* ]] || false
   [ ! -e "$CANARY" ]
 }
 
@@ -246,4 +336,117 @@ PY
   [[ "$output" == *"gates="*"/lib/gates.py"* ]]
   [[ "$output" != *"gates=$HOME/"* ]]
   [ ! -e "$CANARY" ]
+}
+
+@test "--all diffs against the main branch, not a tag named main" {
+  make_fixture .
+  git -C "$FIX" tag main 123-branch
+  run_fence '### Capture diff' 'ARGUMENTS=--all' 'printf "%s\n" "$DIFF"'
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"light evil"* ]] || false
+  [[ "$output" != *"Nothing to review"* ]] || false
+}
+
+@test "--all diffs against origin/main first, then a local main, and fails without either" {
+  make_fixture .
+  git -C "$FIX" update-ref refs/remotes/origin/main refs/heads/main
+  git -C "$FIX" branch -qf main 123-branch
+  run_fence '### Capture diff' 'ARGUMENTS=--all' 'printf "%s\n" "$DIFF"'
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"light evil"* ]] || false
+  git -C "$FIX" branch -qf main refs/remotes/origin/main
+  git -C "$FIX" update-ref -d refs/remotes/origin/main
+  run_fence '### Capture diff' 'ARGUMENTS=--all' 'printf "%s\n" "$DIFF"'
+  [[ "$output" == *"light evil"* ]] || false
+  git -C "$FIX" branch -qD main
+  git -C "$FIX" tag main 123-branch
+  run_fence '### Capture diff' 'ARGUMENTS=--all' ''
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"GATE: FAIL"* ]] || false
+}
+
+@test "a diff that git cannot compute fails the gate instead of reading as empty" {
+  make_fixture .
+  git -C "$FIX" checkout -q --orphan 124-orphan
+  git -C "$FIX" -c user.name=t -c user.email=t@t commit -qm orphan
+  for prelude in 'ARGUMENTS=--all' 'set -e; ARGUMENTS=--all'; do
+    run_fence '### Capture diff' "$prelude" ''
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"GATE: FAIL"* ]] || false
+    [[ "$output" != *"Nothing to review"* ]] || false
+  done
+}
+
+@test "the --all tier call resolves the same base by exact name in a fresh shell" {
+  NO_RUNTIME=1 make_fixture .
+  fake_install
+  local tier="$HOME/.claude/lib/feature-fix-swarm/scripts/gsd/review-tier.sh" base name
+  printf '#!/usr/bin/env bash\necho "light base=$REVIEW_TIER_BASE"\n' > "$tier"
+  chmod +x "$tier"
+  base="$(git -C "$FIX" rev-parse main)"
+  for name in main origin/main refs/heads/main refs/remotes/origin/main; do
+    git -C "$FIX" update-ref "refs/tags/$name" 123-branch
+  done
+  run_fence '### Tier selection (v1.4.0)' 'DIFF_TARGET=main' 'echo "reason=$TIER_REASON"'
+  [[ "$output" == *"reason=base=$base"* ]] || false
+  git -C "$FIX" update-ref refs/remotes/origin/main "$base"
+  git -C "$FIX" update-ref refs/heads/main 123-branch
+  run_fence '### Tier selection (v1.4.0)' 'DIFF_TARGET=main' 'echo "reason=$TIER_REASON"'
+  [[ "$output" == *"reason=base=$base"* ]] || false
+  git -C "$FIX" update-ref -d refs/heads/main
+  run_fence '### Tier selection (v1.4.0)' 'DIFF_TARGET=main' 'echo "reason=$TIER_REASON"'
+  [[ "$output" == *"reason=base=$base"* ]] || false
+  # no base: never light
+  git -C "$FIX" update-ref -d refs/remotes/origin/main
+  run_fence '### Tier selection (v1.4.0)' 'DIFF_TARGET=main' 'echo "tier=$TIER"'
+  [[ "$output" == *"tier=standard"* ]] || false
+}
+
+@test "review helpers are found next to adversary-host.sh from any directory, in bash and zsh" {
+  NO_RUNTIME=1 make_fixture .
+  real_install
+  cp "$FIX/lib/gates.py" "$FIX/lib/model_requests.py"
+  mkdir -p "$FIX/a/b"
+  local sh lib="$HOME/.claude/lib/feature-fix-swarm"
+  for sh in bash zsh; do
+    command -v "$sh" >/dev/null || continue
+    FENCE_SHELL="$sh" FENCE_CWD="$FIX/a/b" run_fence '### Pre-check — choose the opposite CLI' 'export FFS_HOST=claude' \
+      'echo "g=$(adversary_gates)"; echo "m=$(adversary_model_request_helper)"'
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"g=$lib/scripts/gsd/../../gates.py"* ]] || false
+    [[ "$output" == *"m=$lib/scripts/gsd/../../model_requests.py"* ]] || false
+  done
+}
+
+@test "adversary-host.sh finds its own directory however it is sourced" {
+  real_install
+  local sh lib="$HOME/.claude/lib/feature-fix-swarm" evil="$BATS_TEST_TMPDIR/evil" other="$BATS_TEST_TMPDIR/other" src
+  mkdir -p "$evil/scripts/gsd" "$other"
+  printf 'touch %q\n' "$CANARY" | tee "$evil/run-bounded.sh" > "$evil/scripts/gsd/run-bounded.sh"
+  : > "$evil/gates.py"
+  cp -R "$lib" "$other/lib"
+  ln -s "$other/lib/scripts" "$evil/linked"
+  for sh in bash zsh; do
+    command -v "$sh" >/dev/null || continue
+    # absolute, with a cd that prints and a zsh hook that prints
+    for src in 'cd() { builtin cd "$@" && echo noise; }' 'chpwd() { echo noise; }' 'if [ -n "${ZSH_VERSION:-}" ]; then setopt posixargzero; fi' \
+        'CDPATH="$2"; export CDPATH'; do
+      run "$sh" -c "builtin cd \"\$2\"; $src; . \"\$1/scripts/gsd/adversary-host.sh\" && adversary_gates" _ "$lib" "$evil"
+      [ "$status" -eq 0 ]
+      [ "$output" = "$lib/scripts/gsd/../../gates.py" ]
+    done
+    # relative, then the caller moves
+    run "$sh" -c 'CDPATH="$2"; builtin cd "$1"; . ./scripts/gsd/adversary-host.sh && builtin cd "$2" && adversary_gates' _ "$lib" "$evil"
+    [ "$status" -eq 0 ]
+    [ "$(cd "$(dirname "$output")" && pwd -P)" = "$(cd "$lib" && pwd -P)" ]
+    # found on PATH
+    run "$sh" -c 'builtin cd "$2"; PATH="$1/scripts/gsd:$PATH"; . adversary-host.sh && adversary_gates' _ "$lib" "$evil"
+    [ "$status" -eq 0 ]
+    [ "$output" = "$lib/scripts/gsd/../../gates.py" ]
+    # through a symlink into another checkout: that checkout's helpers
+    run "$sh" -c 'builtin cd "$1"; . ./linked/../scripts/gsd/adversary-host.sh && adversary_gates' _ "$evil"
+    [ "$status" -eq 0 ]
+    [ "$(cd -P "$(dirname "$output")" && pwd -P)" = "$(cd "$other/lib" && pwd -P)" ]
+    [ ! -e "$CANARY" ]
+  done
 }
