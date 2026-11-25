@@ -247,14 +247,14 @@ EOF
   python3 "$HOME/.claude/lib/feature-fix-swarm/gates.py" grant spec-000 \
     --action ship:gsd --reason test >/dev/null
   ADD_OUT="$(python3 "$HOME/.claude/lib/feature-fix-swarm/gates.py" findings-queue add \
-    lib/foo.py "idempotency key missing" --severity HIGH --source wall \
+    lib/foo.py "clé idempotente manquante ☃" --severity HIGH --source wall \
     --plan 01-01-PLAN.md)"
   SIG="$(printf '%s' "$ADD_OUT" | python3 -c 'import json,sys; print(json.load(sys.stdin)["sig"])')"
   SIG12="${SIG:0:12}"
   mkdir -p "$CWD/.planning/phases/01-degradation"
   cat > "$CWD/.planning/phases/01-degradation/WALL-RESIDUALS.md" <<EOF
 # Wall residuals — 01-degradation
-- $SIG12 HIGH lib/foo.py — idempotency key missing (plan: 01-01-PLAN.md)
+- $SIG12 HIGH lib/foo.py — clé idempotente manquante ☃ (plan: 01-01-PLAN.md)
 EOF
   run env HOME="$HOME" GATES_STORE="$GATES_STORE" FFS_HOST=claude GSD_RUN_ID=spec-000 \
     ADVERSARY_BIN_CODEX=fake-codex ADVERSARY_BIN_CLAUDE=fake-claude \
@@ -267,6 +267,120 @@ EOF
   ALL="$(python3 "$HOME/.claude/lib/feature-fix-swarm/gates.py" findings-queue list --source wall)"
   [[ "$ALL" == *"$SIG"* ]]
   [[ "$ALL" == *'"disposition": "fix"'* || "$ALL" == *'"disposition":"fix"'* ]]
+}
+
+@test "wall policy (c): residual already resolved by an operator is never overwritten" {
+  GP="$HOME/.claude/lib/feature-fix-swarm/gates.py"
+  ADD_OUT="$(python3 "$GP" findings-queue add lib/foo.py "idempotency key missing" \
+    --severity HIGH --source wall --plan 01-01-PLAN.md)"
+  SIG="$(printf '%s' "$ADD_OUT" | python3 -c 'import json,sys; print(json.load(sys.stdin)["sig"])')"
+  python3 "$GP" findings-queue resolve "$SIG" --disposition refute --reason "operator adjudication" >/dev/null
+  mkdir -p "$CWD/.planning/phases/01-degradation"
+  echo "- ${SIG:0:12} HIGH lib/foo.py — idempotency key missing (plan: 01-01-PLAN.md)" \
+    > "$CWD/.planning/phases/01-degradation/WALL-RESIDUALS.md"
+  run env HOME="$HOME" GATES_STORE="$GATES_STORE" FFS_HOST=claude GSD_RUN_ID=spec-000 \
+    ADVERSARY_BIN_CODEX=fake-codex ADVERSARY_BIN_CLAUDE=fake-claude \
+    bash -c "cd '$CWD' && printf 'diff --git a/a b/a\n' | bash '$SCRIPT'"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'"verdict":"APPROVED"'* ]]
+  python3 - "$GATES_STORE" "$SIG" <<'PY'
+import json,sys
+row=next(r for r in json.load(open(sys.argv[1]))["findings"] if r["sig"]==sys.argv[2])
+assert row["disposition"]=="refute" and row["reason"]=="operator adjudication", row
+assert not row.get("history"), row
+PY
+}
+
+@test "wall policy (c): residual record changed between read and resolve is not auto-closed" {
+  GP="$HOME/.claude/lib/feature-fix-swarm/gates.py"
+  REAL_PY="$(command -v python3)"
+  ADD_OUT="$(python3 "$GP" findings-queue add lib/foo.py "idempotency key missing" \
+    --severity HIGH --source wall --plan 01-01-PLAN.md)"
+  SIG="$(printf '%s' "$ADD_OUT" | python3 -c 'import json,sys; print(json.load(sys.stdin)["sig"])')"
+  mkdir -p "$CWD/.planning/phases/01-degradation"
+  echo "- ${SIG:0:12} HIGH lib/foo.py — idempotency key missing (plan: 01-01-PLAN.md)" \
+    > "$CWD/.planning/phases/01-degradation/WALL-RESIDUALS.md"
+  # python3 shim: just before the script's resolve call, another actor refutes
+  # then reopens the finding (still unresolved, record content changed).
+  cat > "$STUB_DIR/python3" <<EOF
+#!/usr/bin/env bash
+case " \$* " in
+  *" findings-queue resolve "*)
+    if [ ! -f "$BATS_TEST_TMPDIR/raced" ]; then
+      : > "$BATS_TEST_TMPDIR/raced"
+      "$REAL_PY" "$GP" findings-queue resolve "$SIG" --disposition refute --reason "raced adjudication" >/dev/null
+      "$REAL_PY" "$GP" findings-queue add lib/foo.py "idempotency key missing" --severity HIGH --source wall --plan 01-01-PLAN.md >/dev/null
+    fi ;;
+esac
+exec "$REAL_PY" "\$@"
+EOF
+  chmod +x "$STUB_DIR/python3"
+  run env HOME="$HOME" GATES_STORE="$GATES_STORE" FFS_HOST=claude GSD_RUN_ID=spec-000 \
+    ADVERSARY_BIN_CODEX=fake-codex ADVERSARY_BIN_CLAUDE=fake-claude \
+    bash -c "cd '$CWD' && printf 'diff --git a/a b/a\n' | bash '$SCRIPT' 2>&1"
+  [ "$status" -eq 0 ]
+  [ -f "$BATS_TEST_TMPDIR/raced" ]
+  [[ "$output" == *'"verdict":"APPROVED"'* ]]
+  [[ "$output" == *'resolve skipped'* ]]
+  python3 - "$GATES_STORE" "$SIG" <<'PY'
+import json,sys
+row=next(r for r in json.load(open(sys.argv[1]))["findings"] if r["sig"]==sys.argv[2])
+assert row["resolved"] is False, row
+assert row["history"][-1]["reason"]=="raced adjudication", row
+PY
+}
+
+@test "wall policy (c): record changed by the reviewer itself is not auto-closed" {
+  GP="$HOME/.claude/lib/feature-fix-swarm/gates.py"
+  ADD_OUT="$(python3 "$GP" findings-queue add lib/foo.py "idempotency key missing" \
+    --severity HIGH --source wall --plan 01-01-PLAN.md)"
+  SIG="$(printf '%s' "$ADD_OUT" | python3 -c 'import json,sys; print(json.load(sys.stdin)["sig"])')"
+  mkdir -p "$CWD/.planning/phases/01-degradation"
+  echo "- ${SIG:0:12} HIGH lib/foo.py — idempotency key missing (plan: 01-01-PLAN.md)" \
+    > "$CWD/.planning/phases/01-degradation/WALL-RESIDUALS.md"
+  # the reviewer itself refutes + re-adds the finding as CRITICAL, then passes
+  cat > "$STUB_DIR/fake-codex" <<EOF
+#!/usr/bin/env bash
+python3 "$GP" findings-queue resolve "$SIG" --disposition refute --reason "reviewer refuted" >/dev/null
+python3 "$GP" findings-queue add lib/foo.py "idempotency key missing" --severity CRITICAL --source wall --plan 01-01-PLAN.md >/dev/null
+echo 'VERDICT: PASS'
+EOF
+  chmod +x "$STUB_DIR/fake-codex"
+  run env HOME="$HOME" GATES_STORE="$GATES_STORE" FFS_HOST=claude GSD_RUN_ID=spec-000 \
+    ADVERSARY_BIN_CODEX=fake-codex ADVERSARY_BIN_CLAUDE=fake-claude \
+    bash -c "cd '$CWD' && printf 'diff --git a/a b/a\n' | bash '$SCRIPT' 2>&1"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'"verdict":"APPROVED"'* ]]
+  [[ "$output" == *'resolve skipped'* ]]
+  python3 - "$GATES_STORE" "$SIG" <<'PY'
+import json,sys
+row=next(r for r in json.load(open(sys.argv[1]))["findings"] if r["sig"]==sys.argv[2])
+assert row["resolved"] is False, row
+PY
+}
+
+@test "wall policy (c): gates.py without the record-guard support skips all auto-closes" {
+  GP="$HOME/.claude/lib/feature-fix-swarm/gates.py"
+  ADD_OUT="$(python3 "$GP" findings-queue add lib/foo.py "idempotency key missing" \
+    --severity HIGH --source wall --plan 01-01-PLAN.md)"
+  SIG="$(printf '%s' "$ADD_OUT" | python3 -c 'import json,sys; print(json.load(sys.stdin)["sig"])')"
+  # a working gates.py whose source lacks the guard marker token
+  sed 's/EXPECTED_RECORD_SHA256_MISMATCH/EXPECTED_RECORD_GUARD_RENAMED/g' "$GP" > "$GP.new"
+  mv "$GP.new" "$GP"
+  mkdir -p "$CWD/.planning/phases/01-degradation"
+  echo "- ${SIG:0:12} HIGH lib/foo.py — idempotency key missing (plan: 01-01-PLAN.md)" \
+    > "$CWD/.planning/phases/01-degradation/WALL-RESIDUALS.md"
+  run env HOME="$HOME" GATES_STORE="$GATES_STORE" FFS_HOST=claude GSD_RUN_ID=spec-000 \
+    ADVERSARY_BIN_CODEX=fake-codex ADVERSARY_BIN_CLAUDE=fake-claude \
+    bash -c "cd '$CWD' && printf 'diff --git a/a b/a\n' | bash '$SCRIPT' 2>&1"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'"verdict":"APPROVED"'* ]]
+  [[ "$output" == *'lacks record-guard support'* ]]
+  python3 - "$GATES_STORE" "$SIG" <<'PY'
+import json,sys
+row=next(r for r in json.load(open(sys.argv[1]))["findings"] if r["sig"]==sys.argv[2])
+assert row["resolved"] is False, row
+PY
 }
 
 @test "wall policy (c): needs-requirement residual stays unresolved and is named on stderr" {

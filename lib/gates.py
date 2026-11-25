@@ -2830,7 +2830,18 @@ def findings_list(store: Path, unresolved: bool = False, *, severity: str | None
     return result
 
 
-def findings_resolve(store: Path, sig: str, *, disposition: str, reason: str) -> bool:
+def findings_record_sha256(record: dict) -> str:
+    """Full finding-record CAS digest: sorted-key compact JSON, unescaped
+    Unicode, UTF-8 bytes, SHA-256 lowercase hex. Covers every field,
+    including history and resolution timestamps."""
+    return hashlib.sha256(json.dumps(
+        record, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode("utf-8")).hexdigest()
+
+
+def findings_resolve(store: Path, sig: str, *, disposition: str, reason: str,
+                     if_unresolved: bool = False,
+                     expected_record_sha256: str | None = None) -> bool:
     """Marks the matching signature resolved. False when sig unknown — no
     write happens on a miss (adversary F4).
 
@@ -2847,17 +2858,32 @@ def findings_resolve(store: Path, sig: str, *, disposition: str, reason: str) ->
     disposition/reason/resolved_at to `history` before overwriting — same
     provenance-preserving pattern `findings_add`'s reopen path already uses.
     Without this, a double-resolve silently discarded the earlier
-    adjudication with no trace (spec-004 fix round finding 11)."""
+    adjudication with no trace (spec-004 fix round finding 11).
+
+    Opt-in guards for automatic closers, both checked under the store lock
+    before any write: `if_unresolved` refuses an already-resolved record
+    (FINDING_ALREADY_RESOLVED) instead of overwriting its adjudication;
+    `expected_record_sha256` refuses (EXPECTED_RECORD_SHA256_MISMATCH) when
+    the stored record no longer matches the digest the caller read, or the
+    sig is missing."""
     if disposition not in _VALID_DISPOSITIONS:
         raise ValueError("--disposition must be one of "
                           f"{sorted(_VALID_DISPOSITIONS)}, got {disposition!r}")
     if not reason or not reason.strip():
         raise ValueError("--reason is required and must be non-empty")
+    if expected_record_sha256 is not None and not re.fullmatch(
+            r"[0-9a-f]{64}", expected_record_sha256):
+        raise ValueError("EXPECTED_RECORD_SHA256_INVALID")
     with _StoreLock(store):
         data = _load_store(store)
         findings = _findings_ns(data)
         for f in findings:
             if f["sig"] == sig:
+                if (expected_record_sha256 is not None
+                        and findings_record_sha256(f) != expected_record_sha256):
+                    raise ValueError("EXPECTED_RECORD_SHA256_MISMATCH")
+                if if_unresolved and f.get("resolved"):
+                    raise ValueError("FINDING_ALREADY_RESOLVED")
                 if (disposition in _NO_REOPEN and f.get("security")
                         and (f.get("severity") or "").upper() in ("HIGH", "CRITICAL")):
                     raise ValueError(f"{disposition} is refused for a HIGH/CRITICAL "
@@ -2880,6 +2906,8 @@ def findings_resolve(store: Path, sig: str, *, disposition: str, reason: str) ->
                 f["resolved_at"] = _now()
                 _save_store(store, data)
                 return True
+        if expected_record_sha256 is not None:
+            raise ValueError("EXPECTED_RECORD_SHA256_MISMATCH")
     return False
 
 
@@ -4245,7 +4273,8 @@ def _parse_gate_timeout(raw: str) -> int | None:
 
 
 def _extract_flags(
-    args: list[str], names: set[str], num_positional: int = 0
+    args: list[str], names: set[str], num_positional: int = 0,
+    *, switches: set[str] | None = None
 ) -> tuple[list[str], dict[str, str]]:
     """Split `args` into (positionals, {flag: value}) for `--name value` pairs
     matching `names`, wherever they appear after the fixed positional prefix
@@ -4272,6 +4301,10 @@ def _extract_flags(
         i += 1
     while i < len(args):
         a = args[i]
+        if switches and a in switches:
+            values[a] = "true"
+            i += 1
+            continue
         if a in names:
             if i + 1 >= len(args):
                 raise ValueError(f"{a} requires a value")
@@ -5327,26 +5360,33 @@ def main(argv: list[str]) -> int:
                 # by-position rationale as `add` above.
                 try:
                     positionals, flags = _extract_flags(
-                        rest, {"--disposition", "--reason"}, num_positional=1)
+                        rest, {"--disposition", "--reason", "--expected-record-sha256"},
+                        num_positional=1, switches={"--if-unresolved"})
                 except ValueError as e:
                     print(f"usage: findings-queue resolve <sig> "
-                          f"--disposition refute|fix|waive|issue|descope --reason <text> ({e})",
+                          f"--disposition refute|fix|waive|issue|descope --reason <text> "
+                          f"[--if-unresolved] [--expected-record-sha256 HEX] ({e})",
                           file=sys.stderr)
                     return 2
-                if not positionals:
+                if len(positionals) != 1:
                     print("usage: findings-queue resolve <sig> "
-                          "--disposition refute|fix|waive|issue|descope --reason <text>", file=sys.stderr)
+                          "--disposition refute|fix|waive|issue|descope --reason <text> "
+                          "[--if-unresolved] [--expected-record-sha256 HEX]", file=sys.stderr)
                     return 2
                 sig = positionals[0]
                 disposition = flags.get("--disposition")
                 reason = flags.get("--reason")
                 if not disposition or not reason:
                     print("usage: findings-queue resolve <sig> "
-                          "--disposition refute|fix|waive|issue|descope --reason <text>", file=sys.stderr)
+                          "--disposition refute|fix|waive|issue|descope --reason <text> "
+                          "[--if-unresolved] [--expected-record-sha256 HEX]", file=sys.stderr)
                     return 2
                 try:
                     resolved = findings_resolve(store, sig, disposition=disposition,
-                                                 reason=reason)
+                                                 reason=reason,
+                                                 if_unresolved="--if-unresolved" in flags,
+                                                 expected_record_sha256=flags.get(
+                                                     "--expected-record-sha256"))
                 except ValueError as e:
                     print(str(e), file=sys.stderr)
                     return 2
