@@ -2949,9 +2949,9 @@ def _store_path() -> Path:
     if probe is None or probe.returncode:
         cwd = Path.cwd()
         if (os.environ.get("GIT_DIR") or os.environ.get("GIT_WORK_TREE")
-                or any((parent / ".git").is_file() or os.path.lexists(parent / ".git" / "HEAD")
-                       for parent in (cwd, *cwd.parents))):
+                or any(map(_is_checkout, (cwd, *cwd.parents)))):
             _refuse_unproven_store(store, failure)
+        _refuse_tracked_store(store)
         return store
     common = Path(os.fsdecode(probe.stdout).rstrip("\n"))
     # main checkout returns ".git" (relative) — parent is "." so the
@@ -2970,7 +2970,8 @@ def _store_git(root: str | Path, *args: str) -> subprocess.CompletedProcess[byte
     env = {key: value for key, value in os.environ.items()
            if key not in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR")}
     return subprocess.run(["git", "-c", "safe.bareRepository=explicit", "-c", "core.fsmonitor=false",
-                           "-C", str(root), *args], capture_output=True, timeout=30, env=env)
+                           "-C", str(root), *args], capture_output=True, timeout=30,
+                          env={**env, "GIT_NO_LAZY_FETCH": "1", "LC_ALL": "C"})
 
 
 def _refuse_unproven_store(store: Path, reason: object) -> None:
@@ -2978,36 +2979,67 @@ def _refuse_unproven_store(store: Path, reason: object) -> None:
                      "repair the checkout or set GATES_STORE")
 
 
+def _is_checkout(path: Path) -> bool:
+    return (path / ".git").is_file() or os.path.lexists(path / ".git" / "HEAD")
+
+
 def _refuse_tracked_store(store: Path) -> None:
     """A committed store would let a branch plant grants or resolved findings.
-    A tracked top-level name counts as the store directory when it folds to the
-    same text (git's icase is ASCII-only, APFS folds Unicode) or is the same
-    directory on disk; that also catches a committed symlink in its place. A
-    project-scope install commits its manifest and vendor/ there; nothing else
-    may be tracked."""
-    root, name = store.parent.parent, store.parent.name
+    Any checkout around the directory can own it, as a nested checkout has its
+    own index, so every enclosing checkout is asked. A symlink would lead to a
+    place nobody asked about."""
+    here = Path(os.path.realpath(store.parent.parent)) / store.parent.name
+    for root in filter(_is_checkout, (here, *here.parents)):
+        planted = _tracked_under(store, root, here.relative_to(root).parts)
+        if planted:
+            raise SystemExit(f"evidence store {store} is tracked by git {planted[:3]} in {root}; a branch may have "
+                             "planted it: inspect it, then remove it with git rm, or set GATES_STORE")
+    if here.is_symlink() or store.is_symlink():
+        raise SystemExit(f"evidence store {store} is reached through a symlink; inspect and remove it, "
+                         "or set GATES_STORE")
+
+
+def _tracked_under(store: Path, root: Path, place: tuple[str, ...]) -> list[str]:
+    """Entries of the index of `root` in the directory `place`. A name matches when
+    it folds to the same text (git's icase is ASCII-only, APFS folds Unicode) or is
+    the same object on disk. A project-scope install commits its manifest and
+    vendor/ there; nothing else may be tracked."""
     try:
         tracked = _store_git(root, "ls-files", "-z")
     except (OSError, subprocess.SubprocessError) as exc:
-        return _refuse_unproven_store(store, exc)
-    if tracked.returncode != 0:
+        _refuse_unproven_store(store, exc)
+    # a sparse index that git cannot expand is an incomplete list with exit 0
+    if tracked.returncode != 0 or b"error: " in tracked.stderr:
         _refuse_unproven_store(store, os.fsdecode(tracked.stderr).strip())
-    paths = [path for path in os.fsdecode(tracked.stdout).split("\0") if path]
-    aliases = {top for top in {path.split("/", 1)[0] for path in paths} if _is_store_dir(root, top, name)}
-    planted = [path for path in paths if path.split("/", 1)[0] in aliases
-               and path != f"{name}/install-manifest.json" and not path.startswith(f"{name}/vendor/")]
-    if planted:
-        raise SystemExit(f"evidence store {store} is tracked by git {planted[:3]}; a branch may have planted "
-                         "it: inspect it, then remove it with git rm, or set GATES_STORE")
+    size, matched, planted = len(place), {}, []
+
+    def same(parts: tuple[str, ...]) -> bool:
+        if parts not in matched:
+            matched[parts] = _same_name(root, parts, place[:len(parts)])
+        return matched[parts]
+
+    for path in filter(None, os.fsdecode(tracked.stdout).split("\0")):
+        parts = tuple(path.split("/"))
+        if len(parts) < size or not all(same(parts[:depth]) for depth in range(1, size + 1)):
+            continue
+        rest = parts[size:]
+        install = rest == ("install-manifest.json",) or (rest[:1] == ("vendor",) and len(rest) > 1)
+        if not install or parts[:size][-1:] != place[-1:]:
+            planted.append(path)
+    return planted
 
 
-def _is_store_dir(root: Path, top: str, name: str) -> bool:
-    if unicodedata.normalize("NFKC", top).casefold() == name:
+def _same_name(root: Path, tracked: tuple[str, ...], place: tuple[str, ...]) -> bool:
+    if _fold(tracked[-1]) == _fold(place[-1]):
         return True
     try:
-        return os.path.samestat(os.lstat(root / top), os.lstat(root / name))
+        return os.path.samestat(os.lstat(root.joinpath(*tracked)), os.lstat(root.joinpath(*place)))
     except OSError:
         return False
+
+
+def _fold(name: str) -> str:
+    return unicodedata.normalize("NFKC", name).casefold()
 
 
 def _resolved_store_path() -> Path:

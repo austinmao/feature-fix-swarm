@@ -8,6 +8,19 @@ all skills.
 
 ## Unreleased
 
+### Changed (2026-11-25, the default evidence store is checked against every enclosing checkout)
+
+- `gates.py` refuses the default store when any checkout around it tracks something in
+  the store directory, also under a folded name, and when the store directory is itself
+  a checkout that tracks files. Before, only the innermost checkout was asked, so an
+  outer branch could write into a nested one.
+- A default store reached through a symlink (the directory or the file) is refused. To
+  keep the store elsewhere, set `GATES_STORE`.
+- The check no longer lets git fetch missing objects, and refuses an incomplete listing.
+- If git cannot list an enclosing checkout, the default store is refused. Repair that
+  checkout or set `GATES_STORE`.
+- The check reads the index only; `docs/configuration.md` names what it cannot see.
+
 ### Changed (2026-11-25, review-gate --file reviews exactly the named path)
 
 - review-gate 1.20.5 takes everything after `--file` as one path, spaces included, so
