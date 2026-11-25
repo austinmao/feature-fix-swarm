@@ -450,3 +450,93 @@ PY
     [ ! -e "$CANARY" ]
   done
 }
+
+@test "capture diff from a subdirectory covers the whole tree in every mode" {
+  local args
+  make_fixture .
+  mkdir -p "$FIX/docs" "$FIX/.planning"
+  echo text > "$FIX/docs/a.md"
+  echo plan-line > "$FIX/.planning/p.md"
+  git -C "$FIX" add docs .planning
+  git -C "$FIX" config diff.relative true
+  git -C "$FIX" config diff.noprefix false
+  for args in '' --all; do
+    [ -z "$args" ] || git -C "$FIX" -c user.name=t -c user.email=t@t commit -qm docs
+    FENCE_CWD="$FIX/docs" run_fence '### Capture diff' "ARGUMENTS=$args" 'printf "%s\n" "$DIFF"'
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"+x = 2"* ]] || false
+    [[ "$output" == *"+text"* ]] || false
+    [[ "$output" == *"+++ b/docs/a.md"* ]] || false
+    [[ "$output" != *plan-line* ]] || false
+  done
+  # a staged change outside the directory, gone from the work tree
+  echo 'x = 9' > "$FIX/src/app.py" && git -C "$FIX" add src && echo 'x = 2' > "$FIX/src/app.py"
+  FENCE_CWD="$FIX/docs" run_fence '### Capture diff' '' 'printf "%s\n" "$DIFF"'
+  [[ "$output" == *"+x = 9"* ]] || false
+  git -C "$FIX" reset -q
+  # unstaged only: the HEAD fallback
+  echo 'x = 3' > "$FIX/src/app.py"
+  FENCE_CWD="$FIX/docs" run_fence '### Capture diff' '' 'printf "%s\n" "$DIFF"'
+  [[ "$output" == *"+x = 3"* ]] || false
+}
+
+@test "capture diff excludes only the top-level run bookkeeping" {
+  make_fixture .
+  mkdir -p "$FIX/spike-results" "$FIX/docs/spike-results"
+  echo top-line > "$FIX/spike-results/s.md"
+  echo nested-line > "$FIX/docs/spike-results/s.md"
+  git -C "$FIX" add spike-results docs
+  for cwd in "$FIX" "$FIX/docs"; do
+    FENCE_CWD="$cwd" run_fence '### Capture diff' '' 'printf "%s\n" "$DIFF"'
+    [[ "$output" != *top-line* ]] || false
+    [[ "$output" == *nested-line* ]] || false
+  done
+}
+
+@test "a .gitmodules ignore setting cannot hide a submodule bump from the diff" {
+  local old new args
+  make_fixture .
+  git -C "$FIX" config diff.submodule short
+  old="$(git -C "$FIX" rev-parse HEAD~1)" new="$(git -C "$FIX" rev-parse HEAD)"
+  git -C "$FIX" checkout -q main
+  git -C "$FIX" update-index --add --cacheinfo "160000,$old,vendor/m"
+  printf '[submodule "m"]\n\tpath = vendor/m\n\turl = ./m\n\tignore = all\n' > "$FIX/.gitmodules"
+  git -C "$FIX" add .gitmodules
+  git -C "$FIX" -c user.name=t -c user.email=t@t commit -qm sub
+  git -C "$FIX" checkout -q -f -B 123-branch main
+  git -C "$FIX" update-index --cacheinfo "160000,$new,vendor/m"
+  [ -z "$(git -C "$FIX" diff --staged --name-only)" ]  # git itself hides it
+  for args in '' --file=vendor/m --all; do
+    [ "$args" != --all ] || git -C "$FIX" -c user.name=t -c user.email=t@t commit -qm bump
+    run_fence '### Capture diff' "ARGUMENTS=$args" 'printf "%s\n" "$DIFF"'
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"+Subproject commit $new"* ]] || { echo "args=$args: $output"; false; }
+  done
+}
+
+@test "a file named like a bookkeeping directory is still reviewed" {
+  make_fixture .
+  echo planning-file > "$FIX/.planning"
+  echo spike-file > "$FIX/spike-results"
+  git -C "$FIX" add .planning spike-results
+  run_fence '### Capture diff' '' 'printf "%s\n" "$DIFF"'
+  [[ "$output" == *planning-file* ]] || false
+  [[ "$output" == *spike-file* ]] || false
+}
+
+@test "inherited pathspec settings cannot empty the diff" {
+  local var
+  make_fixture .
+  for var in GIT_LITERAL_PATHSPECS GIT_ICASE_PATHSPECS; do
+    run_fence '### Capture diff' "export $var=1" 'printf "%s\n" "$DIFF"'
+    [[ "$output" == *"+x = 2"* ]] || { echo "$var: $output"; false; }
+  done
+  git -C "$FIX" reset -q --hard
+  printf '100644 %s\tSPIKE-RESULTS/x.py\0' "$(git -C "$FIX" hash-object -w "$FIX/src/app.py")" |
+    git -C "$FIX" update-index -z --index-info
+  run_fence '### Capture diff' 'export GIT_ICASE_PATHSPECS=1' 'printf "%s\n" "$DIFF"'
+  [[ "$output" == *"SPIKE-RESULTS/x.py"* ]] || false
+  git -C "$FIX" reset -q --hard
+  FENCE_CWD="$FIX/src" run_fence '### Capture diff' 'export GIT_LITERAL_PATHSPECS=1 ARGUMENTS=--all' 'printf "%s\n" "$DIFF"'
+  [[ "$output" == *"+++ "* ]] || false
+}
