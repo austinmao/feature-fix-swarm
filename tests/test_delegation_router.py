@@ -200,6 +200,8 @@ def test_an_invalid_needs_secret_entry_is_never_echoed(line):
 @pytest.mark.parametrize("raw, code", [
     ("do it [est: %s]" % PASSPHRASE, dr.ANNOTATION_INVALID),
     ({"prompt": "p", "tier": PASSPHRASE}, dr.TASK_INVALID),
+    ({"prompt": "p", "tier": PASSPHRASE, "model_request": {"kind": "tier", "name": "judgment"}}, dr.TASK_INVALID),
+    ({"prompt": "p", "tier": "volume", "model_request": {"kind": "tier", "name": "judgment"}}, dr.TASK_INVALID),
     ({"prompt": "p", "model_request": {"kind": "tier", "name": PASSPHRASE}}, dr.TASK_INVALID),
     ({"prompt": "p", "model_request": {"kind": PASSPHRASE}}, dr.TASK_INVALID),
 ])

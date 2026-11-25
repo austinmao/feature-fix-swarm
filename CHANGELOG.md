@@ -50,9 +50,9 @@ all skills.
   echoing it: the message gives the task id and the entry position only. It used to
   quote the whole entry, and a pasted value that the scanner has no pattern for
   reached stderr through `plan` and `start`. The `est` annotation error no longer
-  quotes its value either. The remaining messages quote only vetted values: the
-  `tier` errors fire only after both tier names validated, `model_request` errors
-  are fixed text, `owns` and `verify` have no echoing error, and a flagged task id is
+  quotes its value either, and neither do the two `tier` errors (a free-text `tier`
+  next to a valid `model_request` used to be quoted in the conflict message). The
+  remaining messages are fixed text: `model_request` errors, `owns` and `verify` have no echoing error, and a flagged task id is
   refused before any message is built.
 - Admission never moves an existing remote task branch. The admit push is leased to
   an absent ref (`--force-with-lease=<ref>:`), so when two clones reuse a run and task

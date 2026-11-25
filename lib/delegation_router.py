@@ -500,10 +500,10 @@ def _resolve_tier(fields: Mapping[str, Any]) -> Tuple[str, Dict[str, Any]]:
         raise RouteError(TASK_INVALID, "model_request: %s" % exc) from exc
     requested = request["name"] if request.get("kind") == "tier" else None
     if requested and tier and tier != requested:
-        raise RouteError(TASK_INVALID, "tier %r conflicts with model_request %r" % (tier, requested))
+        raise RouteError(TASK_INVALID, "tier conflicts with model_request (values withheld)")
     tier = tier or requested or DEFAULT_TIER
     if tier not in model_requests.TIERS:
-        raise RouteError(TASK_INVALID, "unknown tier %r" % (tier,))
+        raise RouteError(TASK_INVALID, "unknown tier (value withheld)")
     return str(tier), dict(request)
 
 
