@@ -42,7 +42,7 @@ The commands below use the path `scripts/gsd/cloud-dispatch.sh`, as the
 `/swarm` skill does. A user-scope install also keeps a copy under
 `~/.claude/lib/feature-fix-swarm/scripts/gsd/cloud-dispatch.sh`.
 
-Every verb takes `--root ABS`, the absolute path of the main worktree. The
+Every verb except `probe-claude` takes `--root ABS`, the absolute path of the main worktree. The
 default comes from the current directory when `--root` is not given at all; an
 explicit empty `--root` (for example an empty command substitution) is `BAD_ROOT`,
 never read as the current directory. For `env init`, put `--root` after `init`.
@@ -228,12 +228,13 @@ To grant by hand, use the same command `/swarm` runs. Use the run id that
 `--root` (the main worktree), because the dispatcher reads that repository's
 grant store (`.feature-fix-swarm/evidence.json` unless `GATES_STORE` says
 otherwise), never the directory you happen to be in. A grant recorded in another
-checkout is not seen. Use `gates.py` from an FFS checkout, or the copy in the
-managed lib directory:
+repository or clone is not seen (a linked worktree shares the main checkout's
+store). The command below uses the copy in the managed lib directory; in an FFS
+checkout or a reconciled consumer, `python3 lib/gates.py` works too:
 
 ```bash
 cd <root>   # the repository passed as --root
-python3 lib/gates.py grant <run> \
+python3 ~/.claude/lib/feature-fix-swarm/gates.py grant <run> \
   --action cloud-dispatch:claude \
   --action push:origin/ffs/cloud/<run> \
   --ttl-hours 24 --reason "first cloud run"

@@ -45,19 +45,21 @@ User installs are hash-managed copies in both `~/.agents/skills` and
 
 User installs also stage the managed lib runtime at
 `~/.claude/lib/feature-fix-swarm/`: the Python modules the shipped scripts
-import (`gates.py`, `runtime_proof.py`, `model_requests.py`,
-`host_capabilities.py`, `process_identity.py`, `run_context.py`, the
+import (`gates.py`, `clean_code_metrics.py`, `runtime_proof.py`, `model_requests.py`,
+`host_capabilities.py`, `process_identity.py`, `run_context.py`,
+`operator_guard_hook.py`, the
 `run_state/` package and the cloud-delegation modules), a few scripts
 (`scripts/gsd/socratic-slice.sh`, `fence-data.sh`, `cloud-dispatch.sh`,
-`cloud-review.sh`, `adversary-host.sh`, `run-bounded.sh` and
-`codex-runtime-observer.py`), `operator-only-guard.sh`, the supervised-dispatch
+`cloud-review.sh`, `adversary-host.sh`, `run-bounded.sh`, `review-tier.sh`,
+`security-surface.sh` and `codex-runtime-observer.py`), `operator-only-guard.sh`, the supervised-dispatch
 patch and `cloud-templates/`. `MANAGED_LIB_FILES` in `lib/ffs_installer.py` is
 the exact list. These are the paths the shipped scripts resolve when no
 repo-local copy shadows them. They are manifest-tracked like skills, so
 `--doctor` flags a drifted/stale copy and `--uninstall` removes them.
-`--reconcile-consumer` copies every `scripts/gsd/*.sh` and `*.py` into the
-consumer, plus the hook scripts, the `lib/` modules listed in
-`reconcile_consumer` and `schemas/review-finding.schema.json`, so vendored
+`--reconcile-consumer` copies every regular `scripts/gsd/*.sh` and `*.py` into the
+consumer, plus three hook scripts (`cli-hang-guard.sh`,
+`credential-output-guard.sh`, `operator-only-guard.sh`), the `lib/` modules listed in
+`reconcile_consumer`, `lib/cloud-templates/` and `schemas/review-finding.schema.json`, so vendored
 consumers stop running stale gate logic. A file named in the consumer's
 `scripts/gsd/fork-allowlist.txt` (first token of each non-comment line) is
 skipped when it already exists there. To check a consumer afterwards, see
@@ -73,8 +75,8 @@ A pre-existing hand-copied file at the managed path (the old workaround for
 this gap) is an unmanaged collision: the install blocks and preserves it
 unless you pass `--adopt-collisions`, which backs it up and stages the fresh
 bytes. Project-scope installs do not stage the home-path runtime — a machine
-using only project scope should also run `--scope user` (or
-`--reconcile-consumer`) once so the ladder's `~/.claude` rung resolves.
+using only project scope should also run `--scope user` once so the ladder's
+`~/.claude` rung resolves; `--reconcile-consumer` copies only into the consumer.
 
 For one transition release, `bash setup.sh` still means `--scope user` and
 prints a deprecation warning. Scripts and documentation should use the

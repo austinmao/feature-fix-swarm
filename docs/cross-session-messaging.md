@@ -54,7 +54,7 @@ A default store that git tracks is refused: a committed store would let a branch
 plant grants or resolved findings. The check is on the main checkout's top-level
 directory, including a case or Unicode spelling of `.feature-fix-swarm` and a
 committed symlink in its place; only `install-manifest.json` and `vendor/`, which a
-project-scope install commits there, may be tracked. When git cannot answer inside a
+project-scope install writes there for you to commit, may be tracked. When git cannot answer inside a
 checkout, `gates.py` stops too. Setting `$GATES_STORE` names another store and skips
 the check.
 

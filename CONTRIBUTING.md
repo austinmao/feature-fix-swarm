@@ -105,9 +105,10 @@ The macOS CI job also runs the sandbox-gated cloud tests
 `tests/test_cloud_dispatch.py`) with a junit report, then runs
 `scripts/ci/fail-on-sandbox-skips.py` on it. The step fails on any skipped test
 except four host conditions (no pasteboard, no `node`, no `/dev/ttys*` device,
-running as root), and when no test ran at all. A new `skip` in those three files
-needs its reason added to `ALLOWED_REASONS` in that script, and
-`tests/test_ci_sandbox_skip_guard.py` fails when the two lists differ.
+running as root), and when no test ran at all. A new skip for a host condition
+needs its literal reason added to `ALLOWED_REASONS` in that script. A new
+sandbox-gated skip must not be added there: the test pins the three sandbox
+reasons. `tests/test_ci_sandbox_skip_guard.py` fails when the lists differ.
 
 Tests that require provider credentials or live model calls must remain
 explicit and must never print or commit credential values.

@@ -116,7 +116,7 @@ references to either.
 
 | Var | Default | Consumer | Effect |
 |---|---|---|---|
-| `GATES_STORE` | `.feature-fix-swarm/evidence.json` | `lib/gates.py:2912` | Path to the evidence store all `gates.py` subcommands use. Unset, the default is pinned to the main checkout and refused (the command exits with `evidence store ... is tracked by git`) when git tracks anything in `.feature-fix-swarm/` other than `install-manifest.json` and `vendor/`, or cannot prove inside a checkout that it does not; an explicit `GATES_STORE` skips that check |
+| `GATES_STORE` | `.feature-fix-swarm/evidence.json` | `lib/gates.py:2912` | Path to the evidence store all `gates.py` subcommands use. Unset, the default is pinned to the main checkout and refused when git tracks anything in `.feature-fix-swarm/` other than `install-manifest.json` and `vendor/` (`evidence store ... is tracked by git`), or when git cannot answer inside a checkout (`cannot prove it is not tracked by git`); an explicit `GATES_STORE` skips that check |
 | `GATES_STRICT` | unset | `lib/gates.py:4642,4755,4920` | Rejects caller-asserted evidence; only runner-executed proof counts |
 | `GATES_BYPASS` | `0` | `scripts/hooks/gsd-phase-evidence-gate.sh:17` | Skips the checkbox-flip block. Manual operator corrections only |
 | `TRUTH_THRESHOLD` | `0.95` | `lib/gates.py:4757` | Minimum truth score `phase-score` requires |
@@ -128,8 +128,8 @@ references to either.
 
 | Var | Default | Consumer | Effect |
 |---|---|---|---|
-| `GSD_LEAD_MODEL` | `sonnet` | `scripts/gsd/gsd-run.sh:281` | Lead-tier alias the stateful drive launches with |
-| `GSD_LEAD_EFFORT` | tier's mapped effort, else `high` | `scripts/gsd/gsd-run.sh:1360` | Codex reasoning-effort override for the lead |
+| `GSD_LEAD_MODEL` | `sonnet` | `scripts/gsd/gsd-run.sh:261` | Lead-tier alias the stateful drive launches with |
+| `GSD_LEAD_EFFORT` | tier's mapped effort, else `high` | `scripts/gsd/gsd-run.sh:1348` | Codex reasoning-effort override for the lead |
 | `GSD_FALLBACK_CACHE` | `~/.cache/gsd-model-probe` | `scripts/gsd/model-probe-lib.sh:38` | Where 24h model-availability probe results cache |
 | `GSD_MODEL_PROBE_TIMEOUT` | `120` | `scripts/gsd/model-probe-lib.sh:40` | Wall-clock bound on availability probes |
 | `GSD_MODEL_PROBE_CMD` / `_CODEX` | unset | `scripts/gsd/model-probe-lib.sh:53,75` | Test-only probe command overrides |
@@ -142,7 +142,7 @@ references to either.
 |---|---|---|---|
 | `REVIEW_TIER` | auto-detect | `scripts/gsd/review-tier.sh:78` | Hard override of diff-risk tier (`light\|standard\|full`) |
 | `REVIEW_TIER_BASE` | `main` | `scripts/gsd/review-tier.sh:116` | Merge-base for `--all` diffs |
-| `GSD_REVIEW_TIMEOUT` | `600` | `scripts/gsd/review-gate-command.sh:179` | Budget for ship-time review, both hosts combined |
+| `GSD_REVIEW_TIMEOUT` | `600` | `scripts/gsd/review-gate-command.sh:179` | Budget for ship-time review, both hosts combined. gsd-core 1.15 stops the seam after 120 s whatever this is |
 | `GSD_REVIEW_MODEL_REQUEST` | `{"kind":"tier","name":"judgment"}` | `scripts/gsd/review-gate-command.sh` | Typed ship-review request; exact requests disable all fallback |
 | `PLAN_ADVERSARY` | on | `scripts/gsd/plan-adversary.sh:48` | `off` skips the cross-model plan review |
 | `PLAN_ADVERSARY_KEYWORDS` | `auth\|rls\|payment\|stripe\|crypto\|jwt\|...` | `scripts/gsd/plan-adversary.sh:58` | High-blast trigger set; a plan matching none skips the costly review |
@@ -233,18 +233,18 @@ content in an error — see the table row above.
 | Var | Default | Consumer | Effect |
 |---|---|---|---|
 | `GSD_RUN_ID` | derived from branch `spec-NNN` | `scripts/gsd/review-gate-command.sh:33` | Ledger key for the `ship:gsd` grant check. Underivable means fail-closed REVISE |
-| `TIMEOUT` | `900` | `scripts/gsd/gsd-run.sh:254` | Wall-clock bound on the whole drive |
-| `GSD_HOST_PROBE_TIMEOUT` | `45` | `scripts/gsd/gsd-run.sh:255` | Bound on the pre-launch host probe |
-| `GSD_RUN_STATE_DIR` | `<git-common-dir>/ffs/gsd-run` (shared by linked worktrees); `$REPO_ROOT/.planning/run-state` outside git | `scripts/gsd/gsd-run.sh:67-73,262` | Pidfile, status, heartbeat, reclaim mutex |
-| `GSD_MACHINE_ID` | hostname | `scripts/gsd/gsd-run.sh:270` | Identity for cross-machine run-ownership contention |
-| `GSD_HEARTBEAT_SECS` | `15` | `scripts/gsd/gsd-run.sh:771` | Heartbeat refresh interval |
-| `GSD_FOREIGN_LEASE_SECS` | `120` | `scripts/gsd/gsd-run.sh:762` | How long a foreign machine's lease is honored before reclaim |
-| `GSD_RECLAIM_LEASE_SECS` | `30` | `scripts/gsd/gsd-run.sh:762` | TTL of the reclaim mutex during stale-owner takeover |
+| `TIMEOUT` | `900` | `scripts/gsd/gsd-run.sh:183` | Wall-clock bound on the whole drive |
+| `GSD_HOST_PROBE_TIMEOUT` | `45` | `scripts/gsd/gsd-run.sh:184` | Bound on the pre-launch host probe |
+| `GSD_RUN_STATE_DIR` | `<git-common-dir>/ffs/gsd-run` (shared by linked worktrees); `$REPO_ROOT/.planning/run-state` outside git | `scripts/gsd/gsd-run.sh:98-101,191` | Pidfile, status, heartbeat, reclaim mutex |
+| `GSD_MACHINE_ID` | hostname | `scripts/gsd/gsd-run.sh:250` | Identity for cross-machine run-ownership contention |
+| `GSD_HEARTBEAT_SECS` | `15` | `scripts/gsd/gsd-run.sh:758` | Heartbeat refresh interval |
+| `GSD_FOREIGN_LEASE_SECS` | `120` | `scripts/gsd/gsd-run.sh:749` | How long a foreign machine's lease is honored before reclaim |
+| `GSD_RECLAIM_LEASE_SECS` | `30` | `scripts/gsd/gsd-run.sh:749` | TTL of the reclaim mutex during stale-owner takeover |
 | `LIVENESS_WINDOW_MIN` | `30` | `scripts/gsd/liveness-check.sh:42` | Freshness window for the mtime-liveness signal |
 | `RUN_BOUNDED_KILL_AFTER` | `2` | `scripts/gsd/run-bounded.sh:42` | SIGTERM→SIGKILL grace period |
-| `CODEX_BIN` / `CLAUDE_BIN` | `codex` / `claude` | `scripts/gsd/gsd-run.sh:1943,1949` | CLI executable overrides |
+| `CODEX_BIN` / `CLAUDE_BIN` | `codex` / `claude` | `scripts/gsd/gsd-run.sh:1939,1945` | CLI executable overrides |
 | `GSD_CODEX_CONFIG_ROOT` | `${CODEX_HOME:-$HOME/.codex}` | `scripts/gsd/codex-model-sync.sh:12` | Where generated Codex agent TOMLs land |
-| `GSD_CLAUDE_SKILLS_ROOT` | `$HOME/.claude/skills` | `scripts/gsd/gsd-run.sh:1532` | Where the Claude-side SKILL.md surface lives |
+| `GSD_CLAUDE_SKILLS_ROOT` | `$HOME/.claude/skills` | `scripts/gsd/gsd-run.sh:1528` | Where the Claude-side SKILL.md surface lives |
 | `GSD_PROJECT` | unset (root `.planning/`) | `scripts/gsd/planning-scope.sh`, `scripts/gsd/gsd-run.sh`, `scripts/gsd/requirement-ownership-gate.sh`, `scripts/gsd/plan-probe-gate.sh` | Selects the gsd project under `.planning/<project>/`. Must be one path segment. A value whose `ROADMAP.md` is missing fails closed and never falls back to the root project. `feature-implement` derives it from `.planning/<NNN>/` when unset |
 | `GSD_PLANNING_SYNC` | unset | `scripts/gsd/gsd-run.sh:check_planning_divergence` | Which side wins when `.planning/phases/<slug>` (`.planning/<project>/phases/<slug>` under `GSD_PROJECT`) has diverged between the repo and the run worktree. `repo` copies repo→worktree, `worktree` copies worktree→repo (and re-runs the plan wall, since it retires the reviewed repo copy). Unset fails closed with exit 78; any other value fails closed |
 | `GSD_EXTRA_WRITABLE_WORKTREE` | unset | `scripts/gsd/gsd-run.sh:891` | Colon-delimited list of absolute paths of existing sibling worktrees, added as extra writable roots of the Codex workspace-write sandbox. Each must be a registered worktree of the same repo, under `<primary-root>/.claude/worktrees`, not a symlink, not the run's own worktree, and not repeated; any violation, or an empty element, refuses with exit 78. The list is part of the resume tuple, so a changed list on resume counts as drift. Unset after validation, so the launched agent never inherits it |
