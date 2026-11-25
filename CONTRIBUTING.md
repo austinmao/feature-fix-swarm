@@ -100,6 +100,15 @@ On macOS, also keep the zsh parser contract green:
 zsh -n setup.sh scripts/gsd/gsd-run.sh scripts/install-prompt-master.sh scripts/install-socratic.sh
 ```
 
+The macOS CI job also runs the sandbox-gated cloud tests
+(`tests/test_cloud_sandbox.py`, `tests/test_cloud_collect.py` and
+`tests/test_cloud_dispatch.py`) with a junit report, then runs
+`scripts/ci/fail-on-sandbox-skips.py` on it. The step fails on any skipped test
+except four host conditions (no pasteboard, no `node`, no `/dev/ttys*` device,
+running as root), and when no test ran at all. A new `skip` in those three files
+needs its reason added to `ALLOWED_REASONS` in that script, and
+`tests/test_ci_sandbox_skip_guard.py` fails when the two lists differ.
+
 Tests that require provider credentials or live model calls must remain
 explicit and must never print or commit credential values.
 

@@ -50,6 +50,14 @@ path is pinned to the **main checkout** via `git rev-parse --git-common-dir`
 `evidence.json` files were live at audit time, one per worktree, each session
 happily reading its own decoy. `$GATES_STORE` still wins when set.
 
+A default store that git tracks is refused: a committed store would let a branch
+plant grants or resolved findings. The check is on the main checkout's top-level
+directory, including a case or Unicode spelling of `.feature-fix-swarm` and a
+committed symlink in its place; only `install-manifest.json` and `vendor/`, which a
+project-scope install commits there, may be tracked. When git cannot answer inside a
+checkout, `gates.py` stops too. Setting `$GATES_STORE` names another store and skips
+the check.
+
 One store also makes the lock mean something. `_StoreLock` takes an exclusive
 `flock` on the lock file beside the store (`evidence.lock`) around every read-modify-write, and `_save_store`
 writes a same-directory tempfile then `os.replace`s it, so a concurrent reader

@@ -43,8 +43,9 @@ The commands below use the path `scripts/gsd/cloud-dispatch.sh`, as the
 `~/.claude/lib/feature-fix-swarm/scripts/gsd/cloud-dispatch.sh`.
 
 Every verb takes `--root ABS`, the absolute path of the main worktree. The
-default comes from the current directory. For `env init`, put `--root` after
-`init`.
+default comes from the current directory when `--root` is not given at all; an
+explicit empty `--root` (for example an empty command substitution) is `BAD_ROOT`,
+never read as the current directory. For `env init`, put `--root` after `init`.
 
 ## Steps
 
@@ -223,10 +224,15 @@ is missing.
 
 To grant by hand, use the same command `/swarm` runs. Use the run id that
 `/swarm` reports, or pick one yourself that matches
-`^[A-Za-z0-9][A-Za-z0-9_.-]{0,39}$`. Run it from an FFS checkout, or use
-`gates.py` in the managed lib directory:
+`^[A-Za-z0-9][A-Za-z0-9_.-]{0,39}$`. Run it from the repository you pass as
+`--root` (the main worktree), because the dispatcher reads that repository's
+grant store (`.feature-fix-swarm/evidence.json` unless `GATES_STORE` says
+otherwise), never the directory you happen to be in. A grant recorded in another
+checkout is not seen. Use `gates.py` from an FFS checkout, or the copy in the
+managed lib directory:
 
 ```bash
+cd <root>   # the repository passed as --root
 python3 lib/gates.py grant <run> \
   --action cloud-dispatch:claude \
   --action push:origin/ffs/cloud/<run> \
@@ -367,7 +373,7 @@ Refusals (`CLOUD-REFUSED`, exit 3):
 | Code | Meaning and fix |
 |---|---|
 | `NOT_A_REPO` | There is no git worktree at the root. Run from your repository. |
-| `NOT_MAIN_WORKTREE` | You are in a linked worktree, or `--root` is not the top level. Use the main worktree. |
+| `NOT_MAIN_WORKTREE` | You are in a linked worktree, or `--root` is not the top level. Use the main worktree. From a linked worktree `/swarm` passes its own top level as `--root` to `plan` and `start`, so they are refused here, and its `status` calls read the main worktree's ledger (`LEDGER_MISSING` for a first run, which then goes local under `auto` and `prefer`). |
 | `NO_ORIGIN` | The repository has no `origin` remote. Add one. |
 | `ORIGIN_HAS_CREDENTIALS` | The `origin` URL embeds a user and password or token. Use a credential helper or SSH. |
 | `ORIGIN_URL_INVALID` | The `origin` URL is not usable. |
@@ -401,7 +407,8 @@ Refusals (`CLOUD-REFUSED`, exit 3):
 Usage errors (`CLOUD-ERROR` or argparse text on stderr, exit 2):
 `BAD_RUN_ID`, `BAD_TASKS_FILE` (the tasks file must be a non-empty JSON list),
 `BAD_POLICY`, `BAD_PROVIDER`, `BAD_ADOPT` (pass exactly one of `--oid` and
-`--remote-id`), `BAD_OID`, `BAD_REMOTE_ID`, `BAD_ROOT`.
+`--remote-id`), `BAD_OID`, `BAD_REMOTE_ID`, `BAD_ROOT` (`--root` is empty or not
+an absolute path).
 
 Store and internal errors (`CLOUD-ERROR`, exit 78) include `TEMPLATES_MISSING`
 (no templates next to the library; reinstall), `SETTINGS_INVALID` (`.claude/settings.json`

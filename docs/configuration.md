@@ -116,10 +116,10 @@ references to either.
 
 | Var | Default | Consumer | Effect |
 |---|---|---|---|
-| `GATES_STORE` | `.feature-fix-swarm/evidence.json` | `lib/gates.py:2557` | Path to the evidence store all `gates.py` subcommands use |
-| `GATES_STRICT` | unset | `lib/gates.py:4168,4267,4420` | Rejects caller-asserted evidence; only runner-executed proof counts |
+| `GATES_STORE` | `.feature-fix-swarm/evidence.json` | `lib/gates.py:2912` | Path to the evidence store all `gates.py` subcommands use. Unset, the default is pinned to the main checkout and refused (the command exits with `evidence store ... is tracked by git`) when git tracks anything in `.feature-fix-swarm/` other than `install-manifest.json` and `vendor/`, or cannot prove inside a checkout that it does not; an explicit `GATES_STORE` skips that check |
+| `GATES_STRICT` | unset | `lib/gates.py:4642,4755,4920` | Rejects caller-asserted evidence; only runner-executed proof counts |
 | `GATES_BYPASS` | `0` | `scripts/hooks/gsd-phase-evidence-gate.sh:17` | Skips the checkbox-flip block. Manual operator corrections only |
-| `TRUTH_THRESHOLD` | `0.95` | `lib/gates.py:4269` | Minimum truth score `phase-score` requires |
+| `TRUTH_THRESHOLD` | `0.95` | `lib/gates.py:4757` | Minimum truth score `phase-score` requires |
 | `RUNTIME_PROOF_STRICT` | unset | `lib/runtime_proof.py:628` | Rejects `driver=agent` proofs |
 | `GSD_PHASE_ID` | `gsd-phase` | `scripts/gsd/gates-test-command.sh:7` | Phase id used to key evidence |
 | `GSD_TEST_CMD` | falls back to `.planning/gsd-test-command`, then `python3 -m pytest lib/tests -q` | `scripts/gsd/gates-test-command.sh:83-88` | The test command run and recorded as phase evidence |
@@ -133,7 +133,7 @@ references to either.
 | `GSD_FALLBACK_CACHE` | `~/.cache/gsd-model-probe` | `scripts/gsd/model-probe-lib.sh:38` | Where 24h model-availability probe results cache |
 | `GSD_MODEL_PROBE_TIMEOUT` | `120` | `scripts/gsd/model-probe-lib.sh:40` | Wall-clock bound on availability probes |
 | `GSD_MODEL_PROBE_CMD` / `_CODEX` | unset | `scripts/gsd/model-probe-lib.sh:53,75` | Test-only probe command overrides |
-| `GSD_MODEL_PROBE_FORCE` | `0` | `scripts/gsd/model-probe-lib.sh:49` | `setup.sh --doctor` sets it to `1` (`lib/ffs_installer.py:2652`) so its probe ignores the 24h cache. Normally not set by hand: `1` skips the cache check |
+| `GSD_MODEL_PROBE_FORCE` | `0` | `scripts/gsd/model-probe-lib.sh:49` | `setup.sh --doctor` sets it to `1` (`lib/ffs_installer.py:2666`) so its probe ignores the 24h cache. Normally not set by hand: `1` skips the cache check |
 | `GSD_MODEL_CONFIG` | `$PWD/.planning/config.json`, then the template | `scripts/gsd/codex-model-sync.sh:14-20` | Model-override source when no project config exists |
 
 ### Review and adversary
@@ -142,7 +142,7 @@ references to either.
 |---|---|---|---|
 | `REVIEW_TIER` | auto-detect | `scripts/gsd/review-tier.sh:78` | Hard override of diff-risk tier (`light\|standard\|full`) |
 | `REVIEW_TIER_BASE` | `main` | `scripts/gsd/review-tier.sh:116` | Merge-base for `--all` diffs |
-| `GSD_REVIEW_TIMEOUT` | `600` | `scripts/gsd/review-gate-command.sh:151` | Budget for ship-time review, both hosts combined |
+| `GSD_REVIEW_TIMEOUT` | `600` | `scripts/gsd/review-gate-command.sh:179` | Budget for ship-time review, both hosts combined |
 | `GSD_REVIEW_MODEL_REQUEST` | `{"kind":"tier","name":"judgment"}` | `scripts/gsd/review-gate-command.sh` | Typed ship-review request; exact requests disable all fallback |
 | `PLAN_ADVERSARY` | on | `scripts/gsd/plan-adversary.sh:48` | `off` skips the cross-model plan review |
 | `PLAN_ADVERSARY_KEYWORDS` | `auth\|rls\|payment\|stripe\|crypto\|jwt\|...` | `scripts/gsd/plan-adversary.sh:58` | High-blast trigger set; a plan matching none skips the costly review |
@@ -150,15 +150,15 @@ references to either.
 | `PLAN_ADVERSARY_TIMEOUT` | `480` | `scripts/gsd/plan-adversary.sh` | Wall-clock cap |
 | `QA_COVERAGE` | on | `scripts/gsd/qa-coverage-adversary.sh:39` | `off` skips the advisory QA-coverage critique |
 | `QA_COVERAGE_MODEL_REQUEST` / `_TIMEOUT` | `{"kind":"tier","name":"execution"}` / `300` | `scripts/gsd/qa-coverage-adversary.sh` | Typed QA-coverage adversary request and budget |
-| `FFS_HOST` | auto-detect | `scripts/gsd/adversary-host.sh:176` | Forces which vendor counts as the orchestrating harness (`codex\|claude`) |
-| `FFS_CROSS_VENDOR_FALLBACK` | on | `scripts/gsd/adversary-host.sh:231` | `0`/`off` disables the one-shot cross-vendor fallback. Also read by the plan wall's diversity-invariant reviewer selection — its state is stamped into the wall record |
-| `FFS_ADVERSARY_MODEL_PROBE` | on | `scripts/gsd/adversary-host.sh:372` | `off` skips the cheap pre-review availability probe |
-| `FFS_ADVERSARY_MODEL_PROBE_TIMEOUT` | `60` | `scripts/gsd/adversary-host.sh:376` | Seconds. Cap on the pre-review availability probe of one model rung. A value that is empty, `0` or non-numeric falls back to the default. All the `FFS_ADVERSARY_*_TIMEOUT` caps are ceilings: they are always clamped to the call's overall deadline |
-| `FFS_ADVERSARY_REVIEW_ATTEMPT_TIMEOUT` | `180` | `scripts/gsd/adversary-host.sh:378` | Seconds. Cap on one review attempt after its probe succeeds, for callers that pass no review cap of their own (for example the plan wall). Invalid values fall back to `180` |
-| `FFS_ADVERSARY_ATTEMPT_TIMEOUT` | `120` | `scripts/gsd/adversary-host.sh:370` | Seconds. Cap on one review attempt, applied only when `FFS_ADVERSARY_MODEL_PROBE=off` (with the probe on, the review cap above bounds the attempt). Invalid values fall back to `120` |
-| `FFS_ADVERSARY_PREFERRED_REVIEW_TIMEOUT` / `FFS_ADVERSARY_PREFERRED_ATTEMPT_TIMEOUT` | `480` / `120` | `scripts/gsd/adversary-host.sh:569-570` | Seconds. Review and attempt caps `adversary_invoke_with_fallback` hands the preferred rung, the independent opposite-vendor reviewer. The attempt cap applies only when the probe is off, as above |
-| `FFS_ADVERSARY_FALLBACK_REVIEW_TIMEOUT` / `FFS_ADVERSARY_FALLBACK_ATTEMPT_TIMEOUT` | `240` / `120` | `scripts/gsd/adversary-host.sh:571-572` | Seconds. The same two caps for the same-vendor fallback rung. The preferred rung gets the larger review default (480 against 240). The invariant `preferred >= fallback` holds for the DEFAULTS, asserted on both host directions in `tests/bats/adversary-host.bats`. An explicit env override stays authoritative and CAN invert it — adversary-host prints a `WARN ... BELOW ...` line naming both rungs' caps when it does, rather than clamping |
-| `ADVERSARY_BIN_CODEX` / `_CLAUDE` | `codex` / `claude` | `scripts/gsd/adversary-host.sh:270,321` | Executable overrides |
+| `FFS_HOST` | auto-detect | `scripts/gsd/adversary-host.sh:184` | Forces which vendor counts as the orchestrating harness (`codex\|claude`) |
+| `FFS_CROSS_VENDOR_FALLBACK` | on | `scripts/gsd/adversary-host.sh:239` | `0`/`off` disables the one-shot cross-vendor fallback. Also read by the plan wall's diversity-invariant reviewer selection — its state is stamped into the wall record |
+| `FFS_ADVERSARY_MODEL_PROBE` | on | `scripts/gsd/adversary-host.sh:387` | `off` skips the cheap pre-review availability probe |
+| `FFS_ADVERSARY_MODEL_PROBE_TIMEOUT` | `60` | `scripts/gsd/adversary-host.sh:391` | Seconds. Cap on the pre-review availability probe of one model rung. A value that is empty, `0` or non-numeric falls back to the default. All the `FFS_ADVERSARY_*_TIMEOUT` caps are ceilings: they are always clamped to the call's overall deadline |
+| `FFS_ADVERSARY_REVIEW_ATTEMPT_TIMEOUT` | `180` | `scripts/gsd/adversary-host.sh:393` | Seconds. Cap on one review attempt after its probe succeeds, for callers that pass no review cap of their own (for example the plan wall). Invalid values fall back to `180` |
+| `FFS_ADVERSARY_ATTEMPT_TIMEOUT` | `120` | `scripts/gsd/adversary-host.sh:385` | Seconds. Cap on one review attempt, applied only when `FFS_ADVERSARY_MODEL_PROBE=off` (with the probe on, the review cap above bounds the attempt). Invalid values fall back to `120` |
+| `FFS_ADVERSARY_PREFERRED_REVIEW_TIMEOUT` / `FFS_ADVERSARY_PREFERRED_ATTEMPT_TIMEOUT` | `480` / `120` | `scripts/gsd/adversary-host.sh:584-585` | Seconds. Review and attempt caps `adversary_invoke_with_fallback` hands the preferred rung, the independent opposite-vendor reviewer. The attempt cap applies only when the probe is off, as above |
+| `FFS_ADVERSARY_FALLBACK_REVIEW_TIMEOUT` / `FFS_ADVERSARY_FALLBACK_ATTEMPT_TIMEOUT` | `240` / `120` | `scripts/gsd/adversary-host.sh:586-587` | Seconds. The same two caps for the same-vendor fallback rung. The preferred rung gets the larger review default (480 against 240). The invariant `preferred >= fallback` holds for the DEFAULTS, asserted on both host directions in `tests/bats/adversary-host.bats`. An explicit env override stays authoritative and CAN invert it — adversary-host prints a `WARN ... BELOW ...` line naming both rungs' caps when it does, rather than clamping |
+| `ADVERSARY_BIN_CODEX` / `_CLAUDE` | `codex` / `claude` | `scripts/gsd/adversary-host.sh:278,331` | Executable overrides |
 | `ADVERSARY_LAST_TIER_DESCENT` | `0` | `scripts/gsd/adversary-host.sh` | Read-only signal, not an input. Set to `1` when the reviewer that answered sat on a LOWER rung than the one requested (e.g. a judgment-tier ask answered by `gpt-6.1-terra` medium). Such a review is recorded as **degraded** and prints `adversary-host: TIER-DESCENT kind=… requested=… answered=…` to stderr; in-process callers that source this lib can gate on the variable |
 | `ADVERSARY_LAST_REQUESTED_MODEL` / `ADVERSARY_LAST_ANSWERED_MODEL` | empty | `scripts/gsd/adversary-host.sh` | Read-only signals, not inputs. Set by `adversary_invoke_with_fallback` (and so by `adversary_invoke_typed_request` tier requests) in the CALLER's shell, so they are lost inside `$(...)`: the model asked for, and the model that answered (read from the ladder's out-of-band rung file, never from reviewer output; empty when unknown). `cloud-review.sh` reports both on its `CLOUD-REVIEW-MODEL:` line |
 | `PLAN_WALL` | on | `scripts/gsd/plan-wall.sh` | `off` skips the per-phase plan wall — only with a durable, recorded waiver; a skip that cannot record its waiver fails closed |
@@ -176,8 +176,8 @@ references to either.
 | `SPEC_PANEL_TIMEOUT` | `180` | `scripts/gsd/spec-panel.sh:67` | Seconds per draft or refute dispatch of the spec panel. See [`spec-panel.sh`](#spec-panelsh) |
 | `FFS_SPEC_ID` | unset | `lib/gates.py` (`spec_identity`) | Spec identity (`spec-NNN`) for the run, read ahead of the branch `NNN` prefix and `GSD_RUN_ID`. Disagreeing with the branch prefix fails closed (`SPEC-ID:mismatch`). `gsd-run.sh` and `drive.sh` export it |
 | `FFS_BASE` | default branch (`origin/HEAD`, else `main`/`master`) | `lib/gates.py` | Base ref for the production-candidate diff (merge-base to working tree) used by `intent-check` and the review token. An override must resolve to a point on the default branch, else `INTENT-FAIL` |
-| `FFS_ENV_REGISTRY` | unset | `lib/gates.py:3724` | Path to the environment registry, ahead of `config/environments.yaml` in the resolution order. See [Environment registry](environment-registry.md) |
-| `FFS_ENV_REGISTRY_REQUIRED` | unset | `lib/gates.py:3679` | `1` is the same hard mode as `--require-environments`: a registry becomes mandatory and a caller-supplied one is judged on its **HEAD** bytes, so a dirty registry can only refuse, never widen a gate |
+| `FFS_ENV_REGISTRY` | unset | `lib/gates.py:4127` | Path to the environment registry, ahead of `config/environments.yaml` in the resolution order. See [Environment registry](environment-registry.md) |
+| `FFS_ENV_REGISTRY_REQUIRED` | unset | `lib/gates.py:4082` | `1` is the same hard mode as `--require-environments`: a registry becomes mandatory and a caller-supplied one is judged on its **HEAD** bytes, so a dirty registry can only refuse, never widen a gate |
 
 `findings-queue` (`lib/gates.py`) resolutions now require a disposition:
 `gates.py findings-queue resolve --disposition refute|fix|waive|issue|descope --reason "…"`.
@@ -232,7 +232,7 @@ content in an error — see the table row above.
 
 | Var | Default | Consumer | Effect |
 |---|---|---|---|
-| `GSD_RUN_ID` | derived from branch `spec-NNN` | `scripts/gsd/review-gate-command.sh:37` | Ledger key for the `ship:gsd` grant check. Underivable means fail-closed REVISE |
+| `GSD_RUN_ID` | derived from branch `spec-NNN` | `scripts/gsd/review-gate-command.sh:33` | Ledger key for the `ship:gsd` grant check. Underivable means fail-closed REVISE |
 | `TIMEOUT` | `900` | `scripts/gsd/gsd-run.sh:254` | Wall-clock bound on the whole drive |
 | `GSD_HOST_PROBE_TIMEOUT` | `45` | `scripts/gsd/gsd-run.sh:255` | Bound on the pre-launch host probe |
 | `GSD_RUN_STATE_DIR` | `<git-common-dir>/ffs/gsd-run` (shared by linked worktrees); `$REPO_ROOT/.planning/run-state` outside git | `scripts/gsd/gsd-run.sh:67-73,262` | Pidfile, status, heartbeat, reclaim mutex |
@@ -241,7 +241,7 @@ content in an error — see the table row above.
 | `GSD_FOREIGN_LEASE_SECS` | `120` | `scripts/gsd/gsd-run.sh:762` | How long a foreign machine's lease is honored before reclaim |
 | `GSD_RECLAIM_LEASE_SECS` | `30` | `scripts/gsd/gsd-run.sh:762` | TTL of the reclaim mutex during stale-owner takeover |
 | `LIVENESS_WINDOW_MIN` | `30` | `scripts/gsd/liveness-check.sh:42` | Freshness window for the mtime-liveness signal |
-| `RUN_BOUNDED_KILL_AFTER` | `2` | `scripts/gsd/run-bounded.sh:32` | SIGTERM→SIGKILL grace period |
+| `RUN_BOUNDED_KILL_AFTER` | `2` | `scripts/gsd/run-bounded.sh:42` | SIGTERM→SIGKILL grace period |
 | `CODEX_BIN` / `CLAUDE_BIN` | `codex` / `claude` | `scripts/gsd/gsd-run.sh:1943,1949` | CLI executable overrides |
 | `GSD_CODEX_CONFIG_ROOT` | `${CODEX_HOME:-$HOME/.codex}` | `scripts/gsd/codex-model-sync.sh:12` | Where generated Codex agent TOMLs land |
 | `GSD_CLAUDE_SKILLS_ROOT` | `$HOME/.claude/skills` | `scripts/gsd/gsd-run.sh:1532` | Where the Claude-side SKILL.md surface lives |
@@ -627,7 +627,7 @@ All default to on. Set to `off` to disable.
 | `CLI_HANG_GUARD` | `scripts/hooks/cli-hang-guard.sh:22` | The block on unbounded `codex exec` / `claude -p` calls |
 | `CREDENTIAL_OUTPUT_GUARD` | `scripts/hooks/credential-output-guard.sh:13` | The block on commands that would print secret values |
 | `TDD_GATE_BYPASS=1` | `hooks/tdd-gate.sh:12` | The block on source edits with no paired test |
-| `FFS_HOST_PROCESS_DETECT` | `scripts/gsd/adversary-host.sh:195` | The PPID-walk host-detection fallback |
+| `FFS_HOST_PROCESS_DETECT` | `scripts/gsd/adversary-host.sh:203` | The PPID-walk host-detection fallback |
 | `GSD_PLANNING_GUARD` | `scripts/gsd/gsd-run.sh:check_planning_divergence` | The split-brain `.planning/phases/<slug>` check on `/gsd-plan-phase` and `/gsd-execute-phase` — `off` runs the phase against whatever each side happens to hold |
 | `FFS_RUN_FINALIZER` | `scripts/gsd/run-finalizer.sh:104` | The run-end estate cleanup `run-finalizer.sh` does after a verified merge (it prints a skip note and exits 0) |
 

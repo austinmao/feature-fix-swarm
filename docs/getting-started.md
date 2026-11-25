@@ -102,7 +102,9 @@ the one that wrote the code** — Codex reviewing Claude's work, or the reverse.
 Findings come back severity-tagged. HIGH and CRITICAL block the ship;
 anything that survives a refute-or-promote pass is real. If it prints
 `GATE: FAIL`, the run stops and tells you why. At the gsd ship seam the same
-stop appears as a `REVISE` verdict.
+stop appears as a `REVISE` verdict, which is advisory there: gsd runs that seam
+after the PR exists and continues whatever it returns, and `/feature-implement`
+checks the `ship:gsd` grant itself.
 
 If you only have one host CLI installed, you'll see `DEGRADED` — review ran,
 but within-vendor. A weaker guarantee than true cross-vendor review. Installing the
@@ -134,7 +136,8 @@ wasn't in the grant ledger. Grant it explicitly and resume, or re-run with
 
 **`/review-gate` fails (`GATE: FAIL`, or `REVISE` at the ship seam) with no
 real findings.** Usually the reviewer was unparseable or returned no
-line-anchored verdict, or both reviewers were unavailable. This fails closed on
+line-anchored verdict, both reviewers were unavailable, `gates.py` refused the
+evidence store, or git could not compute the diff (the output names which). This fails closed on
 purpose — no mandatory review fails open. Re-run it; if it persists, check
 that the opposite-host CLI is logged in.
 
