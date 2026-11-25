@@ -1,7 +1,7 @@
 ---
 name: review-gate
 description: "Host-neutral pre-merge review gate. Tries the opposite CLI first, allows one explicit read-only active-host fallback, and fails closed when mandatory review evidence is unavailable. Blocks shipping on HIGH/CRITICAL findings."
-version: "1.20.0"
+version: "1.20.1"
 ---
 
 # /review-gate
@@ -292,26 +292,28 @@ REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
 FFS_T="$HOME/.claude/lib/feature-fix-swarm"; FFS_REF="$(git merge-base HEAD refs/remotes/origin/main 2>/dev/null || git merge-base HEAD refs/heads/main 2>/dev/null)" && eval "$(git show "${FFS_REF}:scripts/gsd/trusted-runtime.sh" 2>/dev/null || git show "${FFS_REF}:packages/feature-fix-swarm/scripts/gsd/trusted-runtime.sh" 2>/dev/null || echo false)" && ffs_trusted_runtime "$FFS_REF" || true
 GATES_PY=""
 DEGRADED_PERSISTENCE=0
+RESOLVED_SIGS=""
+_fq_err="$(mktemp)" || { echo "GATE: FAIL — no temporary file for the evidence store check."; exit 1; }
 for candidate in "$FFS_T/lib/gates.py" "$HOME/.claude/lib/feature-fix-swarm/gates.py"; do
   [ -f "$candidate" ] || continue
-  if (cd "$REPO_ROOT" && python3 "$candidate" findings-queue list >/dev/null 2>&1); then
+  if _fq_list="$(cd "$REPO_ROOT" && python3 "$candidate" findings-queue list 2>|"$_fq_err")"; then
     GATES_PY="$candidate"
     break
   fi
+  # A refused store is an answer, not a missing capability: an older runtime may accept it.
+  if grep '^evidence store ' "$_fq_err" >&2; then
+    rm -f "$_fq_err"
+    echo "GATE: FAIL — evidence store refused (line above); inspect it before any review."
+    exit 1
+  fi
 done
+rm -f "$_fq_err"
 
-RESOLVED_SIGS=""
 if [ -z "$GATES_PY" ]; then
   echo "[review-gate] WARN: findings persistence unavailable — no gates.py candidate supports findings-queue." >&2
   DEGRADED_PERSISTENCE=1
 else
-  _fq_list="$(cd "$REPO_ROOT" && python3 "$GATES_PY" findings-queue list 2>/dev/null)"
-  if [ $? -ne 0 ]; then
-    echo "[review-gate] WARN: findings-queue list failed — proceeding without a resolved-sig skip-list." >&2
-    DEGRADED_PERSISTENCE=1
-  else
-    RESOLVED_SIGS="$(printf '%s' "$_fq_list" | python3 -I -c 'import json,sys; print(" ".join(f["sig"] for f in json.load(sys.stdin) if f.get("resolved")))' 2>/dev/null)"
-  fi
+  RESOLVED_SIGS="$(printf '%s' "$_fq_list" | python3 -I -c 'import json,sys; print(" ".join(f["sig"] for f in json.load(sys.stdin) if f.get("resolved")))' 2>/dev/null)"
 fi
 ```
 
@@ -320,7 +322,9 @@ RESOLVED_SIGS is built from the FULL queue (`findings-queue list`), never
 needs. A finding whose recorded sig lands in RESOLVED_SIGS is dropped after recording
 below (see "### Record findings") — resolved findings never re-enter ranking, no
 re-litigation. Capability-probe + best-effort: an unresolved/broken GATES_PY WARNs, sets
-`DEGRADED_PERSISTENCE=1`, and proceeds — recording NEVER blocks the verdict.
+`DEGRADED_PERSISTENCE=1`, and proceeds — recording NEVER blocks the verdict. Only a refused
+evidence store (or no temporary file to check for one) stops the gate: without it there is
+no trusted skip-list, meter or intent check.
 
 ```bash
 if [ "$DRY_RUN" -eq 1 ]; then
@@ -694,7 +698,7 @@ Invariants:
 - Capability-probe + best-effort: unresolved/broken GATES_PY → WARN, `DEGRADED_PERSISTENCE=1`,
   proceed. Every add/list/resolve nonzero exit gets its own stderr warn + sets
   `DEGRADED_PERSISTENCE=1` — recording is NEVER a block condition beyond the existing
-  CRITICAL/HIGH + honest-verifier logic.
+  CRITICAL/HIGH + honest-verifier logic and the refused-store stop in the probe.
 - `deduped: N` counts RESOLVED-SIG skips ONLY. `findings-queue add` also reports
   `deduped:true` for an existing UNRESOLVED sig (add-idempotent — one entry, never
   re-appended) but an unresolved re-add is NOT counted in `deduped: N`; only a

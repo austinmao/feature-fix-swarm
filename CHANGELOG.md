@@ -8,6 +8,20 @@ all skills.
 
 ## Unreleased
 
+### Changed (2026-11-24, the ship seam is described as advisory)
+
+- gsd-core 1.15 runs `workflow.code_review_command` after the PR exists and
+  continues whatever it returns. feature-implement 2.23.2, `docs/commands.md` and
+  the seam's comments no longer say that it walls ship; feature-implement checks
+  the `ship:gsd` grant itself, like every other operator-gated action.
+
+### Changed (2026-11-24, review-gate stops when the evidence store is refused)
+
+- review-gate 1.20.1 ends with `GATE: FAIL` when `gates.py` refuses the evidence
+  store, instead of trying another runtime or continuing without the skip-list,
+  review meter and intent check. A runtime without `findings-queue` still falls
+  back. The queue is listed once instead of twice.
+
 ### Changed (2026-11-21, review-gate keeps the reviewed branch out of its own runtime)
 
 - review-gate 1.20.0 reuses one base-ref runtime snapshot per commit, kept under
