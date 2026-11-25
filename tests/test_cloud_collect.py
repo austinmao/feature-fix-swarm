@@ -32,8 +32,19 @@ def git(repo: Path, *args: str, stdin: str = "", check: bool = True) -> str:
     env = dict(os.environ)
     env.update(GIT_ENV)
     proc = subprocess.run(["git", "-C", str(repo)] + list(args), input=stdin, capture_output=True,
-                          text=True, env=env, check=check)
+                          text=True, env=env)
+    if check and proc.returncode:
+        raise AssertionError("git %s failed (rc=%d): %s" % (" ".join(args[:6]), proc.returncode, proc.stderr.strip()))
     return proc.stdout.strip()
+
+
+def test_the_git_helper_failure_carries_git_stderr(tmp_path):
+    """check=True with captured output raises a CalledProcessError whose text has no stderr; the cause of a rare git
+    failure (a full disk, no process) must be readable from the test report."""
+    with pytest.raises(AssertionError) as info:
+        git(tmp_path, "rev-parse", "--verify", "no-such-ref")
+    assert "no-such-ref" in str(info.value) and "rc=" in str(info.value) and "fatal" in str(info.value).lower()
+    assert git(tmp_path, "rev-parse", "--verify", "no-such-ref", check=False) == ""
 
 
 def real_validate_manifest(raw, **kwargs):
