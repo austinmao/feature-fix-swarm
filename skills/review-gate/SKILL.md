@@ -1,7 +1,7 @@
 ---
 name: review-gate
 description: "Host-neutral pre-merge review gate. Tries the opposite CLI first, allows one explicit read-only active-host fallback, and fails closed when mandatory review evidence is unavailable. Blocks shipping on HIGH/CRITICAL findings."
-version: "1.20.3"
+version: "1.20.4"
 ---
 
 # /review-gate
@@ -138,18 +138,22 @@ done
 # diff: it is not production source, and on long spec branches it balloons the
 # review surface by hundreds of doc files (2026-07-30 estate audit). File mode
 # keeps the explicit path untouched.
-BOOKKEEPING_EXCLUDES=(":(exclude).planning" ":(exclude)spike-results")
+# Every mode except --file covers the whole tree from any directory. --ignore-submodules=untracked
+# is git's default; naming it overrides a reviewed .gitmodules that hides a bump.
+DIFF_SCOPE=(":(top)" ":(top,exclude).planning/" ":(top,exclude)spike-results/")
+[ "$DIFF_TARGET" = "file" ] || unset GIT_LITERAL_PATHSPECS GIT_ICASE_PATHSPECS
+DIFF_OPTS=(--no-relative --ignore-submodules=untracked)
 DIFF_BASE=HEAD
 if [ "$DIFF_TARGET" = "--staged" ]; then
-  DIFF_ARGS=(--staged -- . "${BOOKKEEPING_EXCLUDES[@]}")
-  git diff --quiet "${DIFF_ARGS[@]}" 2>/dev/null && DIFF_ARGS=(HEAD -- . "${BOOKKEEPING_EXCLUDES[@]}")
+  DIFF_ARGS=("${DIFF_OPTS[@]}" --staged -- "${DIFF_SCOPE[@]}")
+  git diff --quiet "${DIFF_ARGS[@]}" 2>/dev/null && DIFF_ARGS=("${DIFF_OPTS[@]}" HEAD -- "${DIFF_SCOPE[@]}")
 elif [ "$DIFF_TARGET" = "file" ]; then
-  DIFF_ARGS=(HEAD -- "$FILE_PATH")
+  DIFF_ARGS=("${DIFF_OPTS[@]}" HEAD -- "$FILE_PATH")
 else
   # exact refs: a tag named main must not become the base
   DIFF_REF="$(git show-ref --verify -s refs/remotes/origin/main 2>/dev/null || git show-ref --verify -s refs/heads/main 2>/dev/null)" ||
     { echo "GATE: FAIL — no origin/main or main branch to diff against."; exit 1; }
-  DIFF_ARGS=("$DIFF_REF"...HEAD -- . "${BOOKKEEPING_EXCLUDES[@]}")
+  DIFF_ARGS=("${DIFF_OPTS[@]}" "$DIFF_REF"...HEAD -- "${DIFF_SCOPE[@]}")
   DIFF_BASE="$(git merge-base "$DIFF_REF" HEAD)" ||
     { echo "GATE: FAIL — no history in common with main."; exit 1; }
 fi
