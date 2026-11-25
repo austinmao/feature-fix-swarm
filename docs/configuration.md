@@ -116,10 +116,10 @@ references to either.
 
 | Var | Default | Consumer | Effect |
 |---|---|---|---|
-| `GATES_STORE` | `.feature-fix-swarm/evidence.json` | `lib/gates.py:2912` | Path to the evidence store all `gates.py` subcommands use. Unset, the default is pinned to the main checkout and refused when git tracks anything in `.feature-fix-swarm/` other than `install-manifest.json` and `vendor/` (`evidence store ... is tracked by git`), or when git cannot answer inside a checkout (`cannot prove it is not tracked by git`); an explicit `GATES_STORE` skips that check |
-| `GATES_STRICT` | unset | `lib/gates.py:4642,4755,4920` | Rejects caller-asserted evidence; only runner-executed proof counts |
+| `GATES_STORE` | `.feature-fix-swarm/evidence.json` | `lib/gates.py:2940` | Path to the evidence store all `gates.py` subcommands use. Unset, the default is pinned to the main checkout and refused when git tracks anything in `.feature-fix-swarm/` other than `install-manifest.json` and `vendor/` (`evidence store ... is tracked by git`), or when git cannot answer inside a checkout (`cannot prove it is not tracked by git`); an explicit `GATES_STORE` skips that check |
+| `GATES_STRICT` | unset | `lib/gates.py:4675,4788,4953` | Rejects caller-asserted evidence; only runner-executed proof counts |
 | `GATES_BYPASS` | `0` | `scripts/hooks/gsd-phase-evidence-gate.sh:17` | Skips the checkbox-flip block. Manual operator corrections only |
-| `TRUTH_THRESHOLD` | `0.95` | `lib/gates.py:4757` | Minimum truth score `phase-score` requires |
+| `TRUTH_THRESHOLD` | `0.95` | `lib/gates.py:4790` | Minimum truth score `phase-score` requires |
 | `RUNTIME_PROOF_STRICT` | unset | `lib/runtime_proof.py:628` | Rejects `driver=agent` proofs |
 | `GSD_PHASE_ID` | `gsd-phase` | `scripts/gsd/gates-test-command.sh:7` | Phase id used to key evidence |
 | `GSD_TEST_CMD` | falls back to `.planning/gsd-test-command`, then `python3 -m pytest lib/tests -q` | `scripts/gsd/gates-test-command.sh:83-88` | The test command run and recorded as phase evidence |
@@ -142,7 +142,7 @@ references to either.
 |---|---|---|---|
 | `REVIEW_TIER` | auto-detect | `scripts/gsd/review-tier.sh:79` | Hard override of diff-risk tier (`light\|standard\|full`) |
 | `REVIEW_TIER_BASE` | `main` | `scripts/gsd/review-tier.sh:124` | Merge-base for `--all` diffs |
-| `GSD_REVIEW_TIMEOUT` | `600` | `scripts/gsd/review-gate-command.sh:179` | Budget for ship-time review, both hosts combined. gsd-core 1.15 stops the seam after 120 s whatever this is |
+| `GSD_REVIEW_TIMEOUT` | `600` | `scripts/gsd/review-gate-command.sh:184` | Budget for ship-time review, both hosts combined. gsd-core 1.15 stops the seam after 120 s whatever this is |
 | `GSD_REVIEW_MODEL_REQUEST` | `{"kind":"tier","name":"judgment"}` | `scripts/gsd/review-gate-command.sh` | Typed ship-review request; exact requests disable all fallback |
 | `PLAN_ADVERSARY` | on | `scripts/gsd/plan-adversary.sh:48` | `off` skips the cross-model plan review |
 | `PLAN_ADVERSARY_KEYWORDS` | `auth\|rls\|payment\|stripe\|crypto\|jwt\|...` | `scripts/gsd/plan-adversary.sh:58` | High-blast trigger set; a plan matching none skips the costly review |
@@ -176,8 +176,8 @@ references to either.
 | `SPEC_PANEL_TIMEOUT` | `180` | `scripts/gsd/spec-panel.sh:67` | Seconds per draft or refute dispatch of the spec panel. See [`spec-panel.sh`](#spec-panelsh) |
 | `FFS_SPEC_ID` | unset | `lib/gates.py` (`spec_identity`) | Spec identity (`spec-NNN`) for the run, read ahead of the branch `NNN` prefix and `GSD_RUN_ID`. Disagreeing with the branch prefix fails closed (`SPEC-ID:mismatch`). `gsd-run.sh` and `drive.sh` export it |
 | `FFS_BASE` | default branch (`origin/HEAD`, else `main`/`master`) | `lib/gates.py` | Base ref for the production-candidate diff (merge-base to working tree) used by `intent-check` and the review token. An override must resolve to a point on the default branch, else `INTENT-FAIL` |
-| `FFS_ENV_REGISTRY` | unset | `lib/gates.py:4127` | Path to the environment registry, ahead of `config/environments.yaml` in the resolution order. See [Environment registry](environment-registry.md) |
-| `FFS_ENV_REGISTRY_REQUIRED` | unset | `lib/gates.py:4082` | `1` is the same hard mode as `--require-environments`: a registry becomes mandatory and a caller-supplied one is judged on its **HEAD** bytes, so a dirty registry can only refuse, never widen a gate |
+| `FFS_ENV_REGISTRY` | unset | `lib/gates.py:4155` | Path to the environment registry, ahead of `config/environments.yaml` in the resolution order. See [Environment registry](environment-registry.md) |
+| `FFS_ENV_REGISTRY_REQUIRED` | unset | `lib/gates.py:4110` | `1` is the same hard mode as `--require-environments`: a registry becomes mandatory and a caller-supplied one is judged on its **HEAD** bytes, so a dirty registry can only refuse, never widen a gate |
 
 `findings-queue` (`lib/gates.py`) resolutions now require a disposition:
 `gates.py findings-queue resolve --disposition refute|fix|waive|issue|descope --reason "…" [--if-unresolved] [--expected-record-sha256 HEX]`.
