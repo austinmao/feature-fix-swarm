@@ -82,9 +82,9 @@ def _resolve_base(root: Path, ci: bool) -> str:
     was never on main). All merges in range are considered, newest first (a synthetic PR merge puts the branch's own
     merges off the first-parent chain); otherwise the pre-cloud commit stands. Nothing here reads any other ref.
 
-    With no cloud-adding commit in range the comparison retires, and only when the base tree itself carries the cloud
-    block (the dispatcher and the skill's block markers): then there is no pre-cloud text left to compare with. Without
-    that proof it is missing history, a skip on a developer machine and a failure in CI."""
+    The comparison retires, before anything else, when the base tree itself carries the cloud block (the dispatcher and
+    the skill's block markers): then there is no pre-cloud text left to compare with. With no cloud-adding commit in
+    range and without that proof it is missing history, a skip on a developer machine and a failure in CI."""
     def git(*args: str) -> str:
         return _git_in(root, ci, *args)
 
@@ -92,13 +92,17 @@ def _resolve_base(root: Path, ci: bool) -> str:
         return _git_ok_in(root, *args)
 
     merge_base = git("merge-base", "HEAD", MAIN_REF).strip()
+    # Checked before `adders`: a branch stacked on unsquashed history keeps its own adder commit in range after main has
+    # landed the work, and main's later edits to the skill would then be blamed on it.
+    # POST-LANDING: when this skip fires the four comparison items that use this resolver compare against text that no
+    # longer exists on the base. They are to be deleted after landing (the other tests of this file keep running).
+    if _base_carries_the_cloud_block(git, git_ok, merge_base):
+        pytest.skip("cloud work is already on the base; no pre-cloud baseline")
     adders = git(
         "log", "--diff-filter=A", "--format=%H", "--reverse",
         f"{merge_base}..HEAD", "--", "lib/cloud_dispatch.py",
     ).split()
     if not adders:
-        if _base_carries_the_cloud_block(git, git_ok, merge_base):
-            pytest.skip("cloud work is already on the base; no pre-cloud baseline")
         _unavailable(f"no commit adds lib/cloud_dispatch.py after {merge_base[:12]} and the base does not carry "
                      "the cloud block either", ci)
     pre = git("rev-parse", f"{adders[0]}^").strip()
@@ -426,6 +430,30 @@ def test_missing_history_skips_locally_and_fails_in_ci(tmp_path: Path) -> None:
 def test_cloud_work_already_on_the_base_is_a_skip_even_in_ci(tmp_path: Path) -> None:
     ids = _history(tmp_path, merge_main=False, merge_unrelated=False, cloud_on_main=True)
     repo = Path(ids["repo"])
+    for ci in (False, True):
+        with pytest.raises(pytest.skip.Exception) as skipped:
+            _resolve_base(repo, ci=ci)
+        assert "already on the base" in str(skipped.value)
+
+
+def test_a_branch_stacked_on_unsquashed_history_retires_once_main_carries_the_block(tmp_path: Path) -> None:
+    """Main lands the work as a squash commit and edits the skill outside the block; the branch (whose own adder commit is
+    still in range) merges main.  Its baseline must not be an older commit that would blame main's edit on the branch."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _g(repo, "init", "-q", "-b", "main")
+    plain = "line one\nline two\nline three\nline four\n"
+    with_block = f"line one\n{BEGIN}\ncloud block\n{END}\nline two\nline three\nline four\n"
+    pre = _commit(repo, {"skills/swarm/SKILL.md": plain}, "base")
+    _g(repo, "update-ref", "refs/remotes/origin/main", pre)
+    _g(repo, "checkout", "-q", "-b", "cloud")
+    _commit(repo, {"lib/cloud_dispatch.py": "# cloud\n", "skills/swarm/SKILL.md": with_block}, "add the dispatcher")
+    _g(repo, "checkout", "-q", "main")
+    landed = _commit(repo, {"lib/cloud_dispatch.py": "# cloud\n",
+                            "skills/swarm/SKILL.md": with_block.replace("four", "edited on main")}, "squash: cloud")
+    _g(repo, "update-ref", "refs/remotes/origin/main", landed)
+    _g(repo, "checkout", "-q", "cloud")
+    _g(repo, "merge", "-q", "--no-ff", "-m", "merge main", "main")
     for ci in (False, True):
         with pytest.raises(pytest.skip.Exception) as skipped:
             _resolve_base(repo, ci=ci)
