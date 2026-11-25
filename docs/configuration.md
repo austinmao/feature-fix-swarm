@@ -180,7 +180,8 @@ references to either.
 | `FFS_ENV_REGISTRY_REQUIRED` | unset | `lib/gates.py:4082` | `1` is the same hard mode as `--require-environments`: a registry becomes mandatory and a caller-supplied one is judged on its **HEAD** bytes, so a dirty registry can only refuse, never widen a gate |
 
 `findings-queue` (`lib/gates.py`) resolutions now require a disposition:
-`gates.py findings-queue resolve --disposition refute|fix|waive|issue|descope --reason "…"`.
+`gates.py findings-queue resolve --disposition refute|fix|waive|issue|descope --reason "…" [--if-unresolved] [--expected-record-sha256 HEX]`.
+`review-gate-command.sh` passes both optional guards: `--if-unresolved` refuses a finding that is already resolved, and `--expected-record-sha256` refuses when the stored record changed since it was read.
 `refute` and `fix` clear the finding; `waive` records it accepted-as-is. `issue` and `descope` are operator choices, refused for security HIGH/CRITICAL findings. Adding
 a finding whose signature matches a RESOLVED one reopens it (prior disposition
 kept in history) — a refuted-then-recurring finding blocks again rather than

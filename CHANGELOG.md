@@ -8,6 +8,15 @@ all skills.
 
 ## Unreleased
 
+### Changed (2026-11-25, review-gate never auto-closes a finding that changed)
+
+- `review-gate-command.sh` snapshots the findings queue before the review and closes a
+  residual only if its stored record still matches. Before, a finding re-opened,
+  re-tagged or adjudicated during the review was closed as `fix`. With a `gates.py`
+  that lacks the guards it warns and closes nothing.
+- `findings-queue resolve` gains `--if-unresolved` and `--expected-record-sha256`, and
+  refuses any extra positional, so a mistyped guard returns 2 instead of resolving.
+
 ### Changed (2026-11-25, review-gate covers the whole change)
 
 - review-gate 1.20.4 covers the whole repository from any directory, in every mode
