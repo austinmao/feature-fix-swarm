@@ -1,14 +1,14 @@
 ---
 name: spec-status
 description: "Status check for the current spec run: what's done, running, tested, blocked, and next. Fan out volume, execution, and judgment roles over git, .planning, gates, runner state, evidence, and hygiene; write a status report and host-native handoff."
-version: "1.2.1"
+version: "1.2.3"
 ---
 
 # /spec-status [NNN] [--continue-compact] [--no-handoff]
 
 ## Host dispatch contract
 
-- Codex: invoke skills as `$skill`; use Codex collaboration roles and GPT-5.6 model tiers.
+- Codex: invoke skills as `$skill`; use Codex collaboration roles and GPT-6 model tiers.
 - Claude: invoke skills as `/skill`; use Claude Agent/Skill tools and Claude model aliases.
 - Examples that name both hosts are routing contracts. Never send one host's command syntax to the other.
 - A bare `/skill` in this shared source denotes the Claude form; Codex dispatches the same named skill as `$skill`.
@@ -38,7 +38,11 @@ pid liveness — never trust shell rc or `state=completed` alone) · LEDGER
 HYGIENE (key-shaped strings in evidence/, filenames only) · COORD
 (cross-session claims + path leases from spec-009's `coord.py status`,
 uuid-redacted; a claim on this spec by another live session means DO NOT
-start implementing here) · DISK · TAKEOVER.
+start implementing here) · CLOUD (read-only: each `/swarm --cloud` run
+ledger under the main worktree's `.feature-fix-swarm/cloud/runs/` — run
+state and epoch, then per task state, provider, generation, blocker, URL;
+printed only when a cloud run ledger exists, so the `== CLOUD ==` header is
+absent otherwise) · DISK · TAKEOVER.
 
 The collector writes exactly two store-adjacent handoff artifacts:
 `<store>/takeover/spec-NNN.json` is the sole authority and its neighboring

@@ -156,7 +156,7 @@ if [[ "\$*" == *FFS_HOST_PROBE_READY* ]]; then
     bad_ack) echo 'probe responded without acknowledgement'; exit 0 ;;
     fail) echo 'native quota exhausted API_TOKEN=super-secret-value-123456789 api_key=xYz bearer tiny' >&2; exit 69 ;;
     sol_unavailable)
-      if [[ "\$*" == *gpt-6-sol* ]]; then
+      if [[ "\$*" == *gpt-6.2-sol* ]]; then
         echo 'requested Codex model unavailable' >&2
         exit 69
       fi
@@ -437,7 +437,7 @@ PY
   [ -f "$BATS_TEST_TMPDIR/codex.args" ]
   [ ! -f "$BATS_TEST_TMPDIR/claude.args" ]
   grep -Fx 'exec' "$BATS_TEST_TMPDIR/codex.args"
-  grep -F 'model="gpt-5.6-terra"' "$BATS_TEST_TMPDIR/codex.args"
+  grep -F 'model="gpt-6.1-terra"' "$BATS_TEST_TMPDIR/codex.args"
   grep -F 'model_reasoning_effort="medium"' "$BATS_TEST_TMPDIR/codex.args"
   grep -F '$gsd-quick fix the host leak' "$BATS_TEST_TMPDIR/codex.args"
   grep -F 'fully read the exact verified staged workflow' "$BATS_TEST_TMPDIR/codex.args"
@@ -463,10 +463,10 @@ PY
     run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick 'stay native'"
 
   [ "$status" -eq 0 ]
-  [[ "$output" == *"selected gpt-5.6-terra"* ]]
+  [[ "$output" == *"selected gpt-6.1-terra"* ]]
   [ -f "$BATS_TEST_TMPDIR/codex.args" ]
   [ ! -f "$BATS_TEST_TMPDIR/claude.args" ]
-  grep -F 'model="gpt-5.6-terra"' "$BATS_TEST_TMPDIR/codex.args"
+  grep -F 'model="gpt-6.1-terra"' "$BATS_TEST_TMPDIR/codex.args"
 }
 
 @test "Codex execution prompt forbids retrying a still-live yielded session" {
@@ -1031,12 +1031,10 @@ EOF
 @test "gsd-run.sh wires plan-wall.sh beside the ownership gate (spec-004 INT-001 grep-pin)" {
   gate_line="$(grep -n 'bash "$OWNERSHIP_GATE" "$2"' "$SCRIPT" | cut -d: -f1)"
   wall_line="$(grep -n 'PLAN_WALL_LEVER="$SCRIPT_DIR/plan-wall.sh"' "$SCRIPT" | cut -d: -f1)"
-  drift_line="$(grep -n 'DRIFT_GATE="$SCRIPT_DIR/scope-drift-gate.sh"' "$SCRIPT" | cut -d: -f1)"
   [ -n "$gate_line" ]
   [ -n "$wall_line" ]
-  [ -n "$drift_line" ]
   [ "$wall_line" -gt "$gate_line" ]
-  [ "$wall_line" -lt "$drift_line" ]
+  ! grep -q 'scope-drift-gate' "$SCRIPT"
 }
 
 @test "plan wall blocks execute-phase before any host probe (spec-004 PATH-011, real gsd-run.sh seam)" {
@@ -1815,7 +1813,7 @@ PY
   [ ! -f "$BATS_TEST_TMPDIR/claude.args" ]
 }
 
-@test "frontier tier resolves gpt-6-astra at xhigh on the Codex host" {
+@test "frontier tier resolves gpt-6.2-astra at xhigh on the Codex host" {
   FFS_HOST=codex GSD_MODEL_REQUEST='{"kind":"tier","name":"frontier"}' \
     CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
     run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
@@ -1823,11 +1821,11 @@ PY
   [ "$status" -eq 0 ]
   [ -f "$BATS_TEST_TMPDIR/codex.args" ]
   [ ! -f "$BATS_TEST_TMPDIR/claude.args" ]
-  grep -F 'model="gpt-6-astra"' "$BATS_TEST_TMPDIR/codex.args"
+  grep -F 'model="gpt-6.2-astra"' "$BATS_TEST_TMPDIR/codex.args"
   grep -F 'model_reasoning_effort="xhigh"' "$BATS_TEST_TMPDIR/codex.args"
 }
 
-@test "frontier tier resolves claude-fable-5-1 on the Claude host" {
+@test "frontier tier resolves claude-fable-5-2 on the Claude host" {
   FFS_HOST=claude GSD_MODEL_REQUEST='{"kind":"tier","name":"frontier"}' \
     CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
     run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
@@ -1836,10 +1834,10 @@ PY
   [ -f "$BATS_TEST_TMPDIR/claude.args" ]
   [ ! -f "$BATS_TEST_TMPDIR/codex.args" ]
   grep -Fx -- '--model' "$BATS_TEST_TMPDIR/claude.args"
-  grep -Fx 'claude-fable-5-1' "$BATS_TEST_TMPDIR/claude.args"
+  grep -Fx 'claude-fable-5-2' "$BATS_TEST_TMPDIR/claude.args"
 }
 
-@test "GSD_LEAD_MODEL=fable keeps exact claude-fable-5-1 semantics and requires network_mode=enabled" {
+@test "GSD_LEAD_MODEL=fable keeps exact claude-fable-5-2 semantics and requires network_mode=enabled" {
   FFS_HOST=claude GSD_LEAD_MODEL=fable GSD_NETWORK_MODE=none GSD_NETWORK_PURPOSE= \
     CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
     run bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
@@ -1858,7 +1856,7 @@ PY
   [ "$status" -eq 0 ]
   [ -f "$BATS_TEST_TMPDIR/claude.args" ]
   [ ! -f "$BATS_TEST_TMPDIR/codex.args" ]
-  grep -Fx 'claude-fable-5-1' "$BATS_TEST_TMPDIR/claude.args"
+  grep -Fx 'claude-fable-5-2' "$BATS_TEST_TMPDIR/claude.args"
 }
 
 @test "GSD_LEAD_MODEL=fable is incompatible with danger-full-access sandbox" {
@@ -1905,7 +1903,7 @@ PY
   DB="$BATS_TEST_TMPDIR/fresh-role-pin.sqlite"
   CONFIG_ONE="$BATS_TEST_TMPDIR/model-one.json"
   CONFIG_TWO="$BATS_TEST_TMPDIR/model-two.json"
-  printf '%s\n' '{"model_overrides":{"gsd-executor":"gpt-5.6-terra"}}' > "$CONFIG_ONE"
+  printf '%s\n' '{"model_overrides":{"gsd-executor":"gpt-6.1-terra"}}' > "$CONFIG_ONE"
   printf '%s\n' '{"model_overrides":{"gsd-executor":"gpt-5.6-sol"}}' > "$CONFIG_TWO"
 
   FFS_HOST=codex GSD_RUN_ID=spec-008 FAKE_CODEX_DRIVE_RC=42 \
@@ -1956,7 +1954,7 @@ PY
   RUN_STATE="$BATS_TEST_TMPDIR/fresh-role-pin-refusal-state"
   CONFIG_ONE="$BATS_TEST_TMPDIR/refusal-model-one.json"
   CONFIG_TWO="$BATS_TEST_TMPDIR/refusal-model-two.json"
-  printf '%s\n' '{"model_overrides":{"gsd-executor":"gpt-5.6-terra"}}' > "$CONFIG_ONE"
+  printf '%s\n' '{"model_overrides":{"gsd-executor":"gpt-6.1-terra"}}' > "$CONFIG_ONE"
   printf '%s\n' '{"model_overrides":{"gsd-executor":"gpt-5.6-sol"}}' > "$CONFIG_TWO"
 
   FFS_HOST=codex GSD_RESUME=0 GSD_FRESH_START_REASON=role-pin-compat-sync \
@@ -2086,7 +2084,7 @@ PY
   RUN_STATE="$BATS_TEST_TMPDIR/fresh-bundle-refusal-state"
   CONFIG_ONE="$BATS_TEST_TMPDIR/bundle-model-one.json"
   CONFIG_TWO="$BATS_TEST_TMPDIR/bundle-model-two.json"
-  printf '%s\n' '{"model_overrides":{"gsd-executor":"gpt-5.6-terra"}}' > "$CONFIG_ONE"
+  printf '%s\n' '{"model_overrides":{"gsd-executor":"gpt-6.1-terra"}}' > "$CONFIG_ONE"
   printf '%s\n' '{"model_overrides":{"gsd-executor":"gpt-5.6-sol"}}' > "$CONFIG_TWO"
 
   FFS_HOST=codex GSD_RUN_ID=spec-008 FAKE_CODEX_DRIVE_RC=42 GSD_RUN_STATE_DIR="$RUN_STATE" GSD_MODEL_CONFIG="$CONFIG_ONE" \
@@ -3661,64 +3659,23 @@ guard_wall_calls() {
   [ ! -f "$BATS_TEST_TMPDIR/claude.args" ]
 }
 
-# ── rc-3 wall auto-continue: END-TO-END through the real gsd-run.sh path ────
-# (P3-H1, deferred from PR #129 — the unit suite exercises the extracted
-# _gsd_run_wall_gate function; these prove the real /gsd-execute-phase entry
-# routes wall rc 3 through the gate: quarantine without a grant, one bounded
-# reset + re-run with one.)
+# ── wall auto-continue is gone (single review meter) ────────────────────────
+# rc 3 from the wall is terminal; gsd-run no longer resets or re-runs it, and
+# it pins the spec identity for every child it launches.
 
-wall_e2e_stub() { # rc-per-call queue, same shape as wall-auto-continue.bats
-  cat > "$HARNESS_ROOT/scripts/gsd/plan-wall.sh" <<STUB
-#!/usr/bin/env bash
-printf '%s\n' "\$1" >> "$BATS_TEST_TMPDIR/wall.calls"
-rc="\$(head -n1 "$BATS_TEST_TMPDIR/wall.rcs")"
-sed -i.bak '1d' "$BATS_TEST_TMPDIR/wall.rcs" 2>/dev/null || true
-exit "\${rc:-0}"
-STUB
-  chmod +x "$HARNESS_ROOT/scripts/gsd/plan-wall.sh"
+@test "gsd-run has no wall auto-continue gate: _gsd_run_wall_gate and WALL-AUTO-CONTINUE are absent" {
+  ! grep -q '_gsd_run_wall_gate' "$SCRIPT"
+  ! grep -q 'WALL-AUTO-CONTINUE' "$SCRIPT"
+  ! grep -q 'wall-autoreset' "$SCRIPT"
+  ! grep -q 'PLAN_WALL_AUTO_RESET_MAX' "$SCRIPT"
 }
 
-@test "e2e: rc-3 wall without a grant quarantines /gsd-execute-phase (exit 3, no drive)" {
-  wall_e2e_stub
-  guard_exec_skill
-  REPO="$BATS_TEST_TMPDIR/wall-e2e-nogrant"
-  guard_repo "$REPO"
-  mkdir -p "$REPO/lib"
-  cp "$HARNESS_ROOT/lib/gates.py" "$REPO/lib/gates.py"
-  printf '3\n' > "$BATS_TEST_TMPDIR/wall.rcs"
-  RID=wall-e2e-nogrant-1
-
-  GSD_RUN_ID="$RID" FFS_HOST=claude CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
-    GATES_STORE="$BATS_TEST_TMPDIR/wall-e2e-nogrant.json" \
-    run bash -c "cd '$REPO' && bash '$SCRIPT' /gsd-execute-phase 3"
-
-  [ "$status" -eq 3 ]
-  [[ "$output" == *"WALL-AUTO-CONTINUE skipped (no wall-reset:03-guard grant"* ]]
-  [ "$(guard_wall_calls)" -eq 1 ]
-  [ ! -f "$BATS_TEST_TMPDIR/claude.args" ]
-}
-
-@test "e2e: rc-3 wall with grant + clean queue auto-continues into the drive" {
-  wall_e2e_stub
-  guard_exec_skill
-  REPO="$BATS_TEST_TMPDIR/wall-e2e-grant"
-  guard_repo "$REPO"
-  mkdir -p "$REPO/lib"
-  cp "$HARNESS_ROOT/lib/gates.py" "$REPO/lib/gates.py"
-  printf '3\n0\n' > "$BATS_TEST_TMPDIR/wall.rcs"
-  RID=wall-e2e-grant-1
-  GATES_STORE="$BATS_TEST_TMPDIR/wall-e2e-grant.json" \
-    python3 "$HARNESS_ROOT/lib/gates.py" grant "$RID" \
-    --action wall-reset:03-guard --rollback "n/a"
-
-  GSD_RUN_ID="$RID" FFS_HOST=claude CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
-    GATES_STORE="$BATS_TEST_TMPDIR/wall-e2e-grant.json" \
-    run bash -c "cd '$REPO' && bash '$SCRIPT' /gsd-execute-phase 3"
-
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"WALL-AUTO-CONTINUE phase=03-guard"* ]]
-  [ "$(guard_wall_calls)" -eq 2 ]
-  [ -f "$BATS_TEST_TMPDIR/claude.args" ]
+@test "gsd-run exports FFS_SPEC_ID from the launching branch before creating the detached worktree" {
+  grep -q 'export FFS_SPEC_ID' "$SCRIPT"
+  exp_line="$(grep -n 'export FFS_SPEC_ID' "$SCRIPT" | head -1 | cut -d: -f1)"
+  wt_line="$(grep -n 'worktree add -b' "$SCRIPT" | head -1 | cut -d: -f1)"
+  [ -n "$wt_line" ]
+  [ "$exp_line" -lt "$wt_line" ]
 }
 
 # GSD_PROJECT planning isolation. gsd-core runs under .planning/<project>/
@@ -3800,4 +3757,24 @@ scoped_repo() { # $1 = repo path, $2 = project — phase 3 under the project, a 
   [ "$status" -eq 78 ]
   [[ "$output" == *"GSD-RUN:PLANNING-DIVERGENCE phase=03-guard newer=repo"* ]]
   [ ! -f "$BATS_TEST_TMPDIR/claude.args" ]
+}
+
+@test "the child host launched from an NNN branch sees FFS_SPEC_ID (behavioral, not a grep-pin)" {
+  REPO="$BATS_TEST_TMPDIR/spec-branch"
+  git -C "$BATS_TEST_TMPDIR" init -q -b 123-x spec-branch
+  git -C "$REPO" -c user.email=t@t -c user.name=t commit -q --allow-empty -m seed
+  cat > "$STUB_DIR/spec-codex" <<EOS
+#!/usr/bin/env bash
+if [ "\${1:-}" = --version ]; then echo 'codex-cli 0.146.1'; exit 0; fi
+if [[ "\$*" == *FFS_HOST_PROBE_READY* ]]; then echo FFS_HOST_PROBE_READY; exit 0; fi
+printf '%s\n' "\${FFS_SPEC_ID:-UNSET}" >> "$BATS_TEST_TMPDIR/spec.seen"
+echo DRIVE_OK
+EOS
+  chmod +x "$STUB_DIR/spec-codex"
+  run env -u GSD_ACTIVE_DRIVE -u FFS_SPEC_ID FFS_HOST=codex CODEX_BIN=spec-codex CLAUDE_BIN=fake-claude \
+    GSD_RUN_ID=drive-x-p1 RUN_STATE_DB="$BATS_TEST_TMPDIR/run-state.sqlite" \
+    GATES_STORE="$BATS_TEST_TMPDIR/evidence.json" \
+    bash -c "cd '$REPO' && bash '$SCRIPT' /gsd-quick probe"
+  [ -s "$BATS_TEST_TMPDIR/spec.seen" ]
+  ! grep -qv '^spec-123$' "$BATS_TEST_TMPDIR/spec.seen"
 }

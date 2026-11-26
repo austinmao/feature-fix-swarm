@@ -171,6 +171,34 @@ else
   echo "gates.py or GSD_RUN_ID unavailable"
 fi
 
+STORE_PATH="${GATES_STORE:-}"
+[ -n "$STORE_PATH" ] || [ -z "$GP" ] || STORE_PATH="$(python3 "$GP" store-path 2>/dev/null)"
+python3 - "$EXPECTED_RUN_ID" "$STORE_PATH" <<'PY'
+import glob, json, sys
+spec, store = sys.argv[1:3]
+runs = {}
+for f in sorted(glob.glob(".planning/run-state/drive-*.json")):
+    try:
+        d = json.load(open(f))
+    except (OSError, ValueError):
+        continue
+    if isinstance(d, dict) and d.get("spec") == spec:
+        runs[d.get("run_id") or f] = sum(s.get("launches", 0) for s in d.get("steps", []))
+try:
+    data = json.load(open(store))
+except (OSError, ValueError):
+    data = {}
+loops = (data.get("_loops") or {}).get(spec) or {}
+print("RUNS:")
+print(f"runs {len(runs)}")
+for rid, n in runs.items():
+    print(f"  {rid} launches {n}")
+for k in sorted(loops):
+    if k.endswith("#cap") and (k.startswith("review:spec") or k.startswith("review:wall:")):
+        print(f"  {k[:-4]} {loops[k].get('used')}/{loops[k].get('max')}")
+print(f"exhausted {len((data.get('_exhausted') or {}).get(spec, []))}")
+PY
+
 echo "== EVIDENCE =="
 # shellcheck disable=SC2012 # Human status wants newest-first metadata, not only paths.
 [ -n "$SPEC_DIR" ] && ls -lt "$SPEC_DIR/evidence/" 2>/dev/null | head -15 || echo "no spec dir for $SPEC"
@@ -193,6 +221,41 @@ if [ -f "$ROOT/scripts/coord/coord.py" ]; then
   echo "coord-scan-done"
 else
   echo "coord CLI absent (non-FFS repo)"
+fi
+
+# Read-only: cloud-delegation run ledgers (/swarm --cloud) under the MAIN
+# worktree's .feature-fix-swarm/cloud/runs/. The section is printed ONLY when at least one
+# run ledger exists, so a repo that never used --cloud sees no CLOUD header at all.
+CLOUD_MAIN="$(git worktree list --porcelain 2>/dev/null | sed -n '1s/^worktree //p')"
+[ -n "$CLOUD_MAIN" ] || CLOUD_MAIN="$ROOT"
+CLOUD_RUNS="$CLOUD_MAIN/.feature-fix-swarm/cloud/runs"
+CLOUD_HAS_RUNS=""
+if [ -d "$CLOUD_RUNS" ]; then
+  for _cloud_ledger in "$CLOUD_RUNS"/*.json; do
+    [ -f "$_cloud_ledger" ] && CLOUD_HAS_RUNS=1 && break
+  done
+fi
+if [ -n "$CLOUD_HAS_RUNS" ] && command -v python3 >/dev/null 2>&1; then
+  echo "== CLOUD =="
+  python3 - "$CLOUD_RUNS" <<'PY' || echo "cloud-scan-rc=$?"
+import glob, json, os, sys
+files = sorted(glob.glob(os.path.join(sys.argv[1], "*.json")))
+print(f"cloud runs {len(files)}")
+for path in files:
+    try:
+        run = json.load(open(path))
+    except (OSError, ValueError):
+        print(f"  {os.path.basename(path)} unreadable")
+        continue
+    if not isinstance(run, dict):
+        continue
+    print(f"  run {run.get('run', os.path.basename(path)[:-5])} state {run.get('state')} epoch {run.get('epoch')}")
+    tasks = run.get("tasks")
+    for tid in sorted(tasks if isinstance(tasks, dict) else {}):
+        t = tasks[tid] if isinstance(tasks[tid], dict) else {}
+        print(f"    task {tid} state {t.get('state')} provider {t.get('provider')} "
+              f"generation {t.get('generation')} blocker {t.get('blocker') or '-'} url {t.get('url') or '-'}")
+PY
 fi
 
 echo "== DISK =="

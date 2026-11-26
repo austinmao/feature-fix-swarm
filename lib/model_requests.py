@@ -21,13 +21,13 @@ class ModelRequestError(ValueError):
 CODEX_TIERS = {
     # Frontier is an explicitly requested planning capability.  It is never
     # part of the automatic ladder (which ends at judgment/Sol).
-    "frontier": ("gpt-6-astra", "xhigh"),
-    "judgment": ("gpt-6-sol", "xhigh"),
-    "execution": ("gpt-5.6-terra", "medium"),
-    "volume": ("gpt-5.6-luna", "low"),
+    "frontier": ("gpt-6.2-astra", "xhigh"),
+    "judgment": ("gpt-6.2-sol", "xhigh"),
+    "execution": ("gpt-6.1-terra", "medium"),
+    "volume": ("gpt-6-luna", "low"),
 }
 CLAUDE_TIERS = {
-    "frontier": ("claude-fable-5-1", None),
+    "frontier": ("claude-fable-5-2", None),
     "judgment": ("claude-opus-5-5", None),
     "execution": ("claude-sonnet-5-5", None),
     "volume": ("claude-haiku-5-5", None),

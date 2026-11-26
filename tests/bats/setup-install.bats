@@ -26,13 +26,14 @@ setup() {
   cmp -s scripts/gsd/consume-danger-grant.py "$target/scripts/gsd/consume-danger-grant.py"
   cmp -s scripts/gsd/plan-adversary.sh "$target/scripts/gsd/plan-adversary.sh"
   cmp -s scripts/gsd/qa-coverage-adversary.sh "$target/scripts/gsd/qa-coverage-adversary.sh"
-  cmp -s scripts/gsd/scope-drift-gate.sh "$target/scripts/gsd/scope-drift-gate.sh"
   cmp -s scripts/gsd/sync-drift-check.sh "$target/scripts/gsd/sync-drift-check.sh"
   cmp -s lib/model_requests.py "$target/lib/model_requests.py"
   cmp -s lib/host_capabilities.py "$target/lib/host_capabilities.py"
   cmp -s lib/process_identity.py "$target/lib/process_identity.py"
   cmp -s lib/gates.py "$target/lib/gates.py"
   cmp -s lib/runtime_proof.py "$target/lib/runtime_proof.py"
+  cmp -s lib/clean_code_metrics.py "$target/lib/clean_code_metrics.py"
+  cmp -s scripts/gsd/trusted-runtime.sh "$target/scripts/gsd/trusted-runtime.sh"
   cmp -s scripts/hooks/credential-output-guard.sh "$target/scripts/hooks/credential-output-guard.sh"
 }
 

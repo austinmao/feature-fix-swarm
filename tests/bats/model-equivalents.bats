@@ -8,28 +8,28 @@ setup() {
   source "$LIB"
 }
 
-@test "codex_equiv_model: fable alias -> gpt-6-astra" {
+@test "codex_equiv_model: fable alias -> gpt-6.2-astra" {
   run codex_equiv_model fable
   [ "$status" -eq 0 ]
-  [ "$output" = "gpt-6-astra" ]
+  [ "$output" = "gpt-6.2-astra" ]
 }
 
-@test "codex_equiv_model: opus alias -> gpt-6-sol" {
+@test "codex_equiv_model: opus alias -> gpt-6.2-sol" {
   run codex_equiv_model opus
   [ "$status" -eq 0 ]
-  [ "$output" = "gpt-6-sol" ]
+  [ "$output" = "gpt-6.2-sol" ]
 }
 
-@test "codex_equiv_model: sonnet alias -> gpt-5.6-terra" {
+@test "codex_equiv_model: sonnet alias -> gpt-6.1-terra" {
   run codex_equiv_model sonnet
   [ "$status" -eq 0 ]
-  [ "$output" = "gpt-5.6-terra" ]
+  [ "$output" = "gpt-6.1-terra" ]
 }
 
-@test "codex_equiv_model: haiku alias -> gpt-5.6-luna" {
+@test "codex_equiv_model: haiku alias -> gpt-6-luna" {
   run codex_equiv_model haiku
   [ "$status" -eq 0 ]
-  [ "$output" = "gpt-5.6-luna" ]
+  [ "$output" = "gpt-6-luna" ]
 }
 
 @test "codex_equiv_effort: fable -> xhigh, opus -> xhigh, sonnet -> medium, haiku -> low" {
@@ -45,13 +45,13 @@ setup() {
 
 @test "codex_equiv_model: accepts full Claude model IDs" {
   run codex_equiv_model claude-fable-5
-  [ "$output" = "gpt-6-astra" ]
+  [ "$output" = "gpt-6.2-astra" ]
   run codex_equiv_model claude-opus-5
-  [ "$output" = "gpt-6-sol" ]
+  [ "$output" = "gpt-6.2-sol" ]
   run codex_equiv_model claude-sonnet-5
-  [ "$output" = "gpt-5.6-terra" ]
+  [ "$output" = "gpt-6.1-terra" ]
   run codex_equiv_model claude-haiku-4-5-20251001
-  [ "$output" = "gpt-5.6-luna" ]
+  [ "$output" = "gpt-6-luna" ]
 }
 
 @test "claude_equiv_model: reverse map collapses sol -> opus, never fable" {
@@ -61,16 +61,16 @@ setup() {
   [ "$output" != "fable" ]
 }
 
-@test "claude_equiv_model: gpt-6-sol also collapses to opus" {
-  run claude_equiv_model gpt-6-sol
+@test "claude_equiv_model: gpt-6.2-sol also collapses to opus" {
+  run claude_equiv_model gpt-6.2-sol
   [ "$status" -eq 0 ]
   [ "$output" = "opus" ]
 }
 
 @test "claude_equiv_model: terra -> sonnet, luna -> haiku" {
-  run claude_equiv_model gpt-5.6-terra
+  run claude_equiv_model gpt-6.1-terra
   [ "$output" = "sonnet" ]
-  run claude_equiv_model gpt-5.6-luna
+  run claude_equiv_model gpt-6-luna
   [ "$output" = "haiku" ]
 }
 
@@ -86,4 +86,18 @@ setup() {
   run codex_equiv_effort definitely-unknown-model
   [ "$status" -eq 1 ]
   [ "$output" = "definitely-unknown-model" ]
+}
+
+@test "codex_equiv_model: previous tier ids are not tier aliases and are never rewritten" {
+  run codex_equiv_model gpt-6-astra;    [ "$status" -eq 1 ]; [ "$output" = "gpt-6-astra" ]
+  run codex_equiv_model gpt-6-sol;      [ "$status" -eq 1 ]; [ "$output" = "gpt-6-sol" ]
+  run codex_equiv_model gpt-5.6-terra;  [ "$status" -eq 1 ]; [ "$output" = "gpt-5.6-terra" ]
+  run codex_equiv_model gpt-5.6-luna;   [ "$status" -eq 1 ]; [ "$output" = "gpt-5.6-luna" ]
+  run codex_equiv_effort gpt-5.6-luna;  [ "$status" -eq 1 ]; [ "$output" = "gpt-5.6-luna" ]
+}
+
+@test "codex_equiv_model: current tier ids are accepted as-is" {
+  run codex_equiv_model gpt-6.2-astra;  [ "$output" = "gpt-6.2-astra" ]
+  run codex_equiv_model gpt-6.1-terra;  [ "$output" = "gpt-6.1-terra" ]
+  run codex_equiv_model gpt-6-luna;     [ "$output" = "gpt-6-luna" ]
 }

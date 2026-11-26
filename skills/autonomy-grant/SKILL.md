@@ -1,14 +1,14 @@
 ---
 name: autonomy-grant
 description: "Pre-approve the operator gates an unattended run will hit — prod push, deploy, merge, DNS — so the run proceeds through them without stopping. Use at plan approval, while the operator is present, to build the typed approval ledger that /feature-implement --autonomous checks mechanically."
-version: "1.4.0"
+version: "1.6.0"
 ---
 
 # /autonomy-grant
 
 ## Host dispatch contract
 
-- Codex: `$skill`, Codex collaboration roles, and GPT-5.6 tiers.
+- Codex: `$skill`, Codex collaboration roles, and GPT-6 tiers.
 - Claude: `/skill`, Agent/Skill tools, and Claude aliases.
 - A bare `/skill` in this shared source denotes the Claude form; Codex dispatches the same named skill as `$skill`.
 
@@ -40,8 +40,19 @@ unapproved external gates.
    | `flip` | `flip:HOLALUMINA_301_TO_GETGLANCE` |
    | `restart` | `restart:tenant-gateway` |
    | `secret-use` | `secret-use:RAILWAY_API_TOKEN` |
-   | `wall-reset` | `wall-reset:04-b3-specs` (target = phase-slug, `basename` of the phase dir; one grant per phase — no wildcards) |
    | `migrate` | `migrate:add-column-x` |
+   | `cloud-dispatch` | `cloud-dispatch:claude`, `cloud-dispatch:codex` |
+   | `push` (cloud) | `push:origin/ffs/cloud/<run_id>` |
+
+   **Cloud delegation (`/swarm --cloud`).** One `cloud-dispatch:<provider>`
+   grant per provider the run may submit to. `push:origin/ffs/cloud/<run_id>`
+   authorizes pushes only to refs under that run's own namespace
+   (`refs/heads/ffs/cloud/<run_id>/integration` and `/<task>-g<N>`); it never
+   covers any other ref, and it is separate from `push:origin/main`.
+   `secret-use:<NAME>` is required for EVERY secret name exposed to the
+   cloud environment, not only the names a task asks for: exposure is
+   whole-environment, so each name in the provider's attested exposure list
+   needs its own grant or the run refuses at start. Names only; never values.
 
 2. **Present the list to the operator** — one screen, one decision. Include
    the rollback for each action. Wait for explicit yes.

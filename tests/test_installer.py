@@ -2468,3 +2468,393 @@ def test_installer_override_refuses_the_stock_unpatched_gsd_installer(tmp_path, 
     with pytest.raises(ffs_installer.ActionableError, match="stock gsd-core installer"):
         ffs_installer.install_gsd_profiles(source, tmp_path / "staging")
     assert ran == []
+
+
+# --- operator-only guard hook registration (#253) ---
+
+GUARD = "operator-only-guard.sh"
+GUARD_DENY = {"tool_name": "Bash", "tool_input": {"command": "python3 lib/gates.py intent-check --spec s.md --repin"}}
+GUARD_ALLOW = {"tool_name": "Bash", "tool_input": {"command": "python3 lib/gates.py intent-check --spec s.md"}}
+FOREIGN_ENTRY = {"matcher": "Edit", "hooks": [{"type": "command", "command": "echo foreign"}]}
+FOREIGN_BASH_ENTRY = {"matcher": "Bash", "hooks": [{"type": "command", "command": "bash ./team-guard.sh"}]}
+
+
+def guard_entries(path: Path) -> list[dict]:
+    document = json.loads(path.read_text())
+    return [
+        entry for entry in document.get("hooks", {}).get("PreToolUse", [])
+        if any(GUARD in hook.get("command", "") for hook in entry.get("hooks", []))
+    ]
+
+
+def run_guard(command: str, payload: dict, *, cwd: Path, env: dict[str, str] | None = None) -> int:
+    return subprocess.run(
+        command, shell=True, cwd=cwd, input=json.dumps(payload) + "\n", text=True,
+        env={"PATH": "/usr/bin:/bin", **(env or {})},
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+    ).returncode
+
+
+def seed_hook_files(home: Path) -> tuple[Path, Path]:
+    settings, codex_hooks = home / ".claude/settings.json", home / ".codex/hooks.json"
+    settings.parent.mkdir(parents=True)
+    codex_hooks.parent.mkdir(parents=True)
+    # Deliberately unsorted keys: the merge must not reorder what it does not own.
+    settings.write_text(json.dumps({
+        "theme": "dark",
+        "hooks": {"PreToolUse": [FOREIGN_ENTRY, FOREIGN_BASH_ENTRY], "PostToolUse": [FOREIGN_ENTRY]},
+        "env": {"A": "1"},
+    }))
+    codex_hooks.write_text(json.dumps({"hooks": {"PreToolUse": [FOREIGN_ENTRY], "SessionStart": []}}))
+    settings.chmod(0o644)
+    return settings, codex_hooks
+
+
+def test_user_install_places_the_guard_for_both_runtimes(tmp_path: Path) -> None:
+    assert run_setup(tmp_path, "--scope", "user").returncode == 0
+    home = tmp_path / "home"
+    source = (ROOT / "scripts/hooks" / GUARD).read_bytes()
+    assert (home / ".claude/lib/feature-fix-swarm" / GUARD).read_bytes() == source
+    assert (home / ".codex/hooks" / GUARD).read_bytes() == source
+
+
+def test_user_install_merges_one_guard_entry_into_existing_hook_files(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    settings, codex_hooks = seed_hook_files(home)
+
+    result = run_setup(tmp_path, "--scope", "user")
+
+    assert result.returncode == 0, result.stderr
+    guard_command = ffs_installer.guard_hook_module().guard_command
+    claude_cmd = guard_command(home / ".claude/lib/feature-fix-swarm" / GUARD)
+    codex_cmd = guard_command(home / ".codex/hooks" / GUARD)
+    for path, command in ((settings, claude_cmd), (codex_hooks, codex_cmd)):
+        (entry,) = guard_entries(path)
+        assert entry == {"matcher": "Bash", "hooks": [{"type": "command", "command": command, "timeout": 10}]}
+    document = json.loads(settings.read_text())
+    assert list(document) == ["theme", "hooks", "env"]
+    assert document["hooks"]["PreToolUse"][:2] == [FOREIGN_ENTRY, FOREIGN_BASH_ENTRY]
+    assert document["hooks"]["PostToolUse"] == [FOREIGN_ENTRY] and document["env"] == {"A": "1"}
+    assert stat.S_IMODE(settings.stat().st_mode) == 0o644
+    assert json.loads(codex_hooks.read_text())["hooks"]["PreToolUse"][0] == FOREIGN_ENTRY
+    assert json.loads(codex_hooks.read_text())["hooks"]["SessionStart"] == []
+    manifest = json.loads((home / ".cache/feature-fix-swarm/install-manifest.json").read_text())
+    assert manifest["hooks"] == sorted(
+        [{"file": str(settings), "command": claude_cmd}, {"file": str(codex_hooks), "command": codex_cmd}],
+        key=lambda record: record["file"],
+    )
+    assert str(settings) not in manifest["paths"] and str(codex_hooks) not in manifest["paths"]
+
+
+def test_user_install_creates_missing_hook_files(tmp_path: Path) -> None:
+    assert run_setup(tmp_path, "--scope", "user").returncode == 0
+    home = tmp_path / "home"
+    for path in (home / ".claude/settings.json", home / ".codex/hooks.json"):
+        assert len(guard_entries(path)) == 1
+        assert list(json.loads(path.read_text())) == ["hooks"]
+
+
+def test_reinstall_keeps_exactly_one_guard_entry_and_uninstall_removes_only_it(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    settings, codex_hooks = seed_hook_files(home)
+    assert run_setup(tmp_path, "--scope", "user").returncode == 0
+    first = (settings.read_bytes(), codex_hooks.read_bytes())
+
+    assert run_setup(tmp_path, "--scope", "user").returncode == 0
+    assert (settings.read_bytes(), codex_hooks.read_bytes()) == first
+    assert len(guard_entries(settings)) == len(guard_entries(codex_hooks)) == 1
+
+    removed = run_setup(tmp_path, "--uninstall", "--scope", "user")
+    assert removed.returncode == 0, removed.stderr
+    document = json.loads(settings.read_text())
+    assert document["hooks"]["PreToolUse"] == [FOREIGN_ENTRY, FOREIGN_BASH_ENTRY]
+    assert document["hooks"]["PostToolUse"] == [FOREIGN_ENTRY] and document["theme"] == "dark"
+    assert json.loads(codex_hooks.read_text())["hooks"]["PreToolUse"] == [FOREIGN_ENTRY]
+    assert not (home / ".codex/hooks" / GUARD).exists()
+    assert not (home / ".claude/lib/feature-fix-swarm" / GUARD).exists()
+
+
+def test_user_install_rollback_restores_the_prior_hook_files(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    settings, codex_hooks = seed_hook_files(home)
+    before = (settings.read_bytes(), codex_hooks.read_bytes())
+    installed = run_setup(tmp_path, "--scope", "user")
+    backup_id = next(line.split("=", 1)[1] for line in installed.stdout.splitlines() if line.startswith("backup_id="))
+    assert (settings.read_bytes(), codex_hooks.read_bytes()) != before
+
+    rolled_back = run_setup(tmp_path, "--rollback", backup_id)
+
+    assert rolled_back.returncode == 0, rolled_back.stderr
+    assert (settings.read_bytes(), codex_hooks.read_bytes()) == before
+
+
+@pytest.mark.parametrize("kind", ["unparseable", "empty", "not-object", "symlink"])
+def test_user_install_skips_an_odd_hook_file_with_a_warning(tmp_path: Path, kind: str) -> None:
+    home = tmp_path / "home"
+    settings, codex_hooks = home / ".claude/settings.json", home / ".codex/hooks.json"
+    settings.parent.mkdir(parents=True)
+    real = settings
+    if kind == "symlink":
+        real = tmp_path / "dotfiles-settings.json"
+        real.write_text("{}")
+        settings.symlink_to(real)
+    else:
+        settings.write_text({"unparseable": "{not json", "empty": "", "not-object": "[]"}[kind])
+    before = real.read_bytes()
+
+    result = run_setup(tmp_path, "--scope", "user")
+
+    assert result.returncode == 0, result.stderr
+    (warning,) = [line for line in result.stderr.splitlines() if "WARN" in line and str(settings) in line]
+    assert "operator-only guard" in warning
+    assert real.read_bytes() == before and settings.is_symlink() == (kind == "symlink")
+    assert len(guard_entries(codex_hooks)) == 1
+    manifest = json.loads((home / ".cache/feature-fix-swarm/install-manifest.json").read_text())
+    assert [record["file"] for record in manifest["hooks"]] == [str(codex_hooks)]
+    removed = run_setup(tmp_path, "--uninstall", "--scope", "user")
+    assert removed.returncode == 0, removed.stderr
+    assert real.read_bytes() == before
+
+
+def test_guard_command_with_a_missing_script_is_a_no_op(tmp_path: Path) -> None:
+    command = ffs_installer.guard_hook_module().guard_command(tmp_path / "gone" / "with space" / GUARD)
+    assert run_guard(command, GUARD_DENY, cwd=tmp_path) == 0
+
+
+def test_project_install_registers_the_vendored_guard_and_uninstall_removes_only_it(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    init_repo(project)
+    claude, codex = project / ".claude/settings.json", project / ".codex/hooks.json"
+    claude.parent.mkdir()
+    codex.parent.mkdir()
+    claude.write_text(json.dumps({"permissions": {"allow": ["Read"]}, "hooks": {"PreToolUse": [FOREIGN_ENTRY]}}))
+    args = ("--scope", "project", "--project-dir", str(project))
+
+    for _ in range(2):
+        result = run_setup(tmp_path, *args)
+        assert result.returncode == 0, result.stderr
+
+    vendored = project / ".feature-fix-swarm/vendor/hooks" / GUARD
+    assert vendored.read_bytes() == (ROOT / "scripts/hooks" / GUARD).read_bytes()
+    (claude_entry,), (codex_entry,) = guard_entries(claude), guard_entries(codex)
+    claude_cmd = claude_entry["hooks"][0]["command"]
+    codex_cmd = codex_entry["hooks"][0]["command"]
+    assert claude_cmd.endswith(" \"$CLAUDE_PROJECT_DIR\"/.feature-fix-swarm/vendor/hooks/" + GUARD)
+    assert codex_cmd.endswith(" \"$(git rev-parse --show-toplevel)\"/.feature-fix-swarm/vendor/hooks/" + GUARD)
+    assert json.loads(claude.read_text())["permissions"] == {"allow": ["Read"]}
+    other = tmp_path / "elsewhere"
+    other.mkdir()
+    # Claude resolves the project via env from any cwd; Codex via git from inside the project.
+    assert run_guard(claude_cmd, GUARD_DENY, cwd=other, env={"CLAUDE_PROJECT_DIR": str(project)}) == 2
+    assert run_guard(claude_cmd, GUARD_ALLOW, cwd=other, env={"CLAUDE_PROJECT_DIR": str(project)}) == 0
+    assert run_guard(codex_cmd, {"tool_input": {"cmd": GUARD_DENY["tool_input"]["command"]}}, cwd=project) == 2
+    manifest = json.loads((project / ".feature-fix-swarm/install-manifest.json").read_text())
+    assert [record["file"] for record in manifest["hooks"]] == [".claude/settings.json", ".codex/hooks.json"]
+    assert ".feature-fix-swarm/vendor/hooks/" + GUARD in manifest["paths"]
+
+    removed = run_setup(tmp_path, "--uninstall", *args)
+    assert removed.returncode == 0, removed.stderr
+    assert json.loads(claude.read_text())["hooks"]["PreToolUse"] == [FOREIGN_ENTRY]
+    assert json.loads(codex.read_text())["hooks"]["PreToolUse"] == []
+    assert not vendored.exists()
+
+
+# --- /swarm --cloud runtime shipping (PR 1a, contract 14.10) ---------------------------------
+
+CLOUD_LIB_MODULES = (
+    "cloud_dispatch.py", "cloud_ledger.py", "cloud_host.py", "cloud_scan.py",
+    "cloud_sandbox.py", "cloud_collect.py", "delegation_router.py", "handoff_packet.py",
+)
+CLOUD_SCRIPTS = ("cloud-dispatch.sh", "cloud-review.sh")
+CLOUD_TEMPLATES = ("config.json", "env-check.sh", "session-start.sh", "setup.sh")
+
+
+def test_managed_lib_files_list_the_cloud_runtime() -> None:
+    mapping = dict(ffs_installer.MANAGED_LIB_FILES)
+    for name in CLOUD_LIB_MODULES + ("operator_guard_hook.py",):
+        assert mapping[f"lib/{name}"] == name
+    for name in CLOUD_SCRIPTS:
+        assert mapping[f"scripts/gsd/{name}"] == f"scripts/gsd/{name}"
+    for name in CLOUD_TEMPLATES:
+        assert mapping[f"templates/cloud/{name}"] == f"cloud-templates/{name}"
+    assert sorted(dict(ffs_installer.CLOUD_TEMPLATE_FILES)) == sorted(f"templates/cloud/{n}" for n in CLOUD_TEMPLATES)
+    # every template that exists in the repo is shipped
+    assert sorted(p.name for p in (ROOT / "templates/cloud").iterdir()) == sorted(CLOUD_TEMPLATES)
+
+
+def test_cloud_review_closure_is_shipped_in_the_user_scope_layout() -> None:
+    """I1: cloud-review.sh sources adversary-host.sh + fence-data.sh from its own dir, and
+    adversary-host.sh finds gates.py / model_requests.py flat at the managed root (its last candidate)."""
+    mapping = dict(ffs_installer.MANAGED_LIB_FILES)
+    dests = set(mapping.values())
+    for relative in ffs_installer.CLOUD_REVIEW_CLOSURE:
+        assert relative in dests, relative
+    for relative in ffs_installer.CLOUD_REVIEW_CLOSURE:
+        source = next(src for src, dest in ffs_installer.MANAGED_LIB_FILES if dest == relative)
+        assert (ROOT / source).is_file(), source
+    for module in ffs_installer.CLOUD_REVIEW_MODULES:
+        assert mapping[f"lib/{module}"] == module
+        assert f"lib/{module}" not in dests, "one copy only: no second lib/ copy of " + module
+
+
+def test_managed_lib_files_has_no_duplicate_entries() -> None:
+    files = ffs_installer.MANAGED_LIB_FILES
+    assert len(files) == len(set(files))
+    dests = [dest for _src, dest in files]
+    assert len(dests) == len(set(dests))
+
+
+def test_cloud_review_available_reports_missing_closure_members(tmp_path: Path) -> None:
+    assert ffs_installer.cloud_review_available(tmp_path) is False
+    for relative in ffs_installer.CLOUD_REVIEW_CLOSURE:
+        target = tmp_path / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("x")
+    # scripts alone are not enough: the two modules are still missing
+    assert ffs_installer.cloud_review_available(tmp_path) is False
+    for module in ffs_installer.CLOUD_REVIEW_MODULES:
+        (tmp_path / module).write_text("x")
+    assert ffs_installer.cloud_review_available(tmp_path) is True  # managed flat layout
+    assert ffs_installer.cloud_review_available(str(tmp_path)) is True
+    (tmp_path / "gates.py").unlink()
+    assert ffs_installer.cloud_review_available(str(tmp_path)) is False
+    (tmp_path / "scripts/gsd/fence-data.sh").unlink()
+    (tmp_path / "gates.py").write_text("x")
+    assert ffs_installer.cloud_review_available(tmp_path) is False
+
+
+def test_cloud_review_available_accepts_the_consumer_layout(tmp_path: Path) -> None:
+    for relative in ffs_installer.CLOUD_REVIEW_CLOSURE:
+        target = tmp_path / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("x")
+    (tmp_path / "lib").mkdir()
+    for module in ffs_installer.CLOUD_REVIEW_MODULES:
+        (tmp_path / "lib" / module).write_text("x")
+    assert ffs_installer.cloud_review_available(tmp_path) is True
+    (tmp_path / "lib/model_requests.py").unlink()
+    assert ffs_installer.cloud_review_available(tmp_path) is False
+
+
+def test_installed_cloud_review_finds_its_closure_from_the_staged_script(tmp_path: Path) -> None:
+    assert run_setup(tmp_path, "--scope", "user").returncode == 0
+    root = tmp_path / "home/.claude/lib/feature-fix-swarm"
+    assert ffs_installer.cloud_review_available(root)
+    script_dir = root / "scripts/gsd"
+    # adversary-host.sh's last lookup candidate in the managed layout; no second lib/ copy
+    assert (script_dir / "../../gates.py").resolve().is_file()
+    assert (script_dir / "../../model_requests.py").resolve().is_file()
+    assert not (root / "lib").exists()
+    assert (script_dir / "run-bounded.sh").is_file() and (script_dir / "fence-data.sh").is_file()
+
+
+def test_reconcile_explicit_lib_list_carries_the_cloud_modules() -> None:
+    body = function_source((ROOT / "lib/ffs_installer.py").read_text(), "reconcile_consumer")
+    for name in CLOUD_LIB_MODULES:
+        assert f'"lib/{name}"' in body, name
+    assert "CLOUD_TEMPLATE_FILES" in body
+
+
+def test_no_new_cloud_module_imports_an_unshipped_lib_module() -> None:
+    import ast
+
+    shipped = {source[len("lib/"):-3] for source, _ in ffs_installer.MANAGED_LIB_FILES
+               if source.startswith("lib/") and source.endswith(".py") and "/" not in source[len("lib/"):]}
+    for name in CLOUD_LIB_MODULES:
+        path = ROOT / "lib" / name
+        if not path.is_file():
+            continue
+        for node in ast.walk(ast.parse(path.read_text())):
+            names = [a.name for a in node.names] if isinstance(node, ast.Import) else (
+                [node.module] if isinstance(node, ast.ImportFrom) and node.module and node.level == 0 else [])
+            for module in names:
+                top = module.split(".")[0]
+                if (ROOT / "lib" / f"{top}.py").is_file():
+                    assert top in shipped, f"{name} imports unshipped lib/{top}.py"
+
+
+def test_user_install_ships_cloud_runtime_with_templates_beside_the_dispatcher(tmp_path: Path) -> None:
+    result = run_setup(tmp_path, "--scope", "user")
+    assert result.returncode == 0, result.stderr
+    home = tmp_path / "home"
+    root = home / ".claude/lib/feature-fix-swarm"
+    manifest = json.loads((home / ".cache/feature-fix-swarm/install-manifest.json").read_text())
+    for name in CLOUD_LIB_MODULES:
+        assert (root / name).read_bytes() == (ROOT / "lib" / name).read_bytes(), name
+        assert str(root / name) in manifest["paths"], name
+    for name in CLOUD_SCRIPTS:
+        staged = root / "scripts/gsd" / name
+        assert staged.read_bytes() == (ROOT / "scripts/gsd" / name).read_bytes(), name
+        assert staged.stat().st_mode & 0o100, name
+    # cloud_dispatch.py looks in <its directory>/cloud-templates/
+    templates = root / "cloud-templates"
+    for name in CLOUD_TEMPLATES:
+        staged = templates / name
+        source = ROOT / "templates/cloud" / name
+        assert staged.read_bytes() == source.read_bytes(), name
+        assert (staged.stat().st_mode & 0o111) == (source.stat().st_mode & 0o111), name
+        assert str(staged) in manifest["paths"], name
+    assert not (templates / "config.json").stat().st_mode & 0o111
+    assert (templates / "setup.sh").stat().st_mode & 0o100
+    # the installer never registers the SessionStart hook (only `env init --register-hook` does)
+    for hook_file in (home / ".claude/settings.json", home / ".codex/hooks.json"):
+        assert "session-start.sh" not in hook_file.read_text()
+        assert "SessionStart" not in json.loads(hook_file.read_text()).get("hooks", {})
+
+
+def test_uninstall_removes_the_cloud_runtime_it_installed(tmp_path: Path) -> None:
+    assert run_setup(tmp_path, "--scope", "user").returncode == 0
+    root = tmp_path / "home/.claude/lib/feature-fix-swarm"
+    assert (root / "cloud-templates/setup.sh").is_file()
+    result = run_setup(tmp_path, "--uninstall", "--scope", "user")
+    assert result.returncode == 0, result.stderr
+    for relative in (
+        *CLOUD_LIB_MODULES, *(f"scripts/gsd/{n}" for n in CLOUD_SCRIPTS),
+        *(f"cloud-templates/{n}" for n in CLOUD_TEMPLATES),
+    ):
+        assert not (root / relative).exists(), relative
+    manifest_path = tmp_path / "home/.cache/feature-fix-swarm/install-manifest.json"
+    assert not manifest_path.exists() or "cloud" not in manifest_path.read_text()
+
+
+def test_reconcile_consumer_ships_cloud_runtime_and_templates(tmp_path: Path) -> None:
+    target = tmp_path / "consumer"
+    target.mkdir()
+    result = run_setup(tmp_path, "--reconcile-consumer", str(target))
+    assert result.returncode == 0, result.stderr
+    for name in CLOUD_LIB_MODULES:
+        assert (target / "lib" / name).read_bytes() == (ROOT / "lib" / name).read_bytes(), name
+    for name in CLOUD_SCRIPTS:
+        staged = target / "scripts/gsd" / name
+        assert staged.is_file() and staged.stat().st_mode & 0o100, name
+    for name in CLOUD_TEMPLATES:
+        staged = target / "lib/cloud-templates" / name
+        source = ROOT / "templates/cloud" / name
+        assert staged.read_bytes() == source.read_bytes(), name
+        assert (staged.stat().st_mode & 0o111) == (source.stat().st_mode & 0o111), name
+    # wrapper lookup in this layout: <script>/../../lib is the consumer lib dir
+    assert (target / "scripts/gsd/../../lib/cloud_dispatch.py").is_file()
+    assert not (target / ".claude/settings.json").exists()
+
+
+def test_installed_operator_only_guard_denies_the_cloud_commands(tmp_path: Path) -> None:
+    assert run_setup(tmp_path, "--scope", "user").returncode == 0
+    guard = tmp_path / "home/.claude/lib/feature-fix-swarm" / GUARD
+
+    def run_guard(command: str) -> subprocess.CompletedProcess[str]:
+        payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": command}})
+        return subprocess.run(
+            ["bash", str(guard)], input=payload + "\n", text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30, check=False,
+        )
+
+    for denied in (
+        "claude --cloud x",
+        "codex cloud exec --env e q",
+        "bash scripts/gsd/cloud-dispatch.sh adopt --run r --task t --oid o",
+    ):
+        outcome = run_guard(denied)
+        assert outcome.returncode == 2, (denied, outcome.stderr)
+        assert "operator-only" in outcome.stderr
+    allowed = run_guard("git status")
+    assert allowed.returncode == 0, allowed.stderr

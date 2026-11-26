@@ -1,7 +1,7 @@
 ---
 name: plan-decompose
 description: "Create and decompose a lightweight plan with opposite-first review, one bounded read-only active-host fallback, and bounded self-repair; returns success or an evidence-backed terminal block."
-version: "1.8.0"
+version: "1.11.1"
 permissions:
   filesystem: write
   network: false
@@ -24,7 +24,7 @@ metadata:
 
 ## Host dispatch contract
 
-- Codex: `$skill`, Codex collaboration roles, and GPT-5.6 tiers.
+- Codex: `$skill`, Codex collaboration roles, and GPT-6 tiers.
 - Claude: `/skill`, Agent/Skill tools, and Claude aliases.
 - A bare `/skill` in this shared source denotes the Claude form; Codex dispatches the same named skill as `$skill`.
 
@@ -75,12 +75,11 @@ repair loops.
 - A timeout, missing model, or transport failure gets one bounded read-only
   active-host fallback. Both hosts unavailable is a terminal evidence-backed
   block; a parseable quality rejection is repaired.
-- Exhaustion writes `$SPEC_DIR/plan-decompose-blocked.md` and returns the
-  terminal marker; the durable counter makes a bare re-invocation re-emit
-  this block idempotently with ZERO reviewer dispatch. The only fresh-budget
-  lever is explicit and operator-visible:
-  `python3 lib/gates.py loop-round "spec-$SPEC_ID" plangate:plan --reset --max 1`
-  (include this line verbatim in the blocked artifact). Terminal marker:
+- Exhaustion writes `$SPEC_DIR/plan-decompose-blocked.md` with the surviving
+  findings and the contract `BUDGET-EXHAUSTED plangate:plan spec-<NNN>: stopped. Operator picks one: descope | stop. Recommended: amend spec — run /prompt-master (Codex: $prompt-master) with the findings below.`
+  and returns the terminal marker; the durable counter makes a bare
+  re-invocation re-emit this block idempotently with ZERO reviewer dispatch.
+  Terminal marker:
   `PLAN-DECOMPOSE-BLOCKED spec=<NNN> stage=<plan|tasks>
   findings=<path> resume="/plan-decompose <NNN>"` with exit 1.
 
@@ -178,7 +177,7 @@ LR_OUT="$(python3 lib/gates.py loop-round "spec-$SPEC_ID" "plangate:plan" \
 ```
 
 - `LR_RC=1` (LOOP-CAP): the budget is already spent — re-emit the terminal
-  `PLAN-DECOMPOSE-BLOCKED` block (with the reset recipe) WITHOUT dispatching
+  `PLAN-DECOMPOSE-BLOCKED` block (with the BUDGET-EXHAUSTED contract) WITHOUT dispatching
   a reviewer. This is the resume-idempotence path: a re-invocation after a
   terminal block costs zero dispatches.
 - Any other nonzero `LR_RC` (store unusable): WARN and proceed uncapped this
@@ -227,8 +226,8 @@ Embed the full content of `plan.md` verbatim in the prompt (the scope line
 prevents repo-wandering, the other major review-time multiplier):
 
 > "You are a brutally honest senior engineer. Review this engineering plan adversarially.
-> Find: logical gaps, unstated assumptions, missing error handling, overcomplexity,
-> missing edge cases, unclear ownership, contradictions. Score each finding:
+> Find: logical gaps, overcomplexity, scope beyond the goal, unclear ownership,
+> contradictions. Each finding names its smallest remedy (deleting a step is valid). Score each finding:
 > CRITICAL / HIGH / MEDIUM / LOW.
 > Do NOT read repository trees (.claude/, .codex/, skills/, agents/) or invoke
 > any review skill — review ONLY the plan text below.
@@ -452,10 +451,9 @@ plan-wall.sh's own diminishing-returns policy (b).
 If the final allowed review still returns REJECT or CRITICAL, write the terminal
 blocked artifact defined in the ownership contract and exit 1. Never emit a
 generic “mandatory plan gate” message without the surviving findings. The
-blocked artifact MUST carry the explicit fresh-budget recipe
-(`python3 lib/gates.py loop-round "spec-$SPEC_ID" plangate:plan --reset --max 1`)
-— the durable counter means a bare re-invocation re-emits this block with
-zero dispatch instead of silently minting rounds 4–6.
+blocked artifact MUST carry the `BUDGET-EXHAUSTED` contract — the durable
+counter means a bare re-invocation re-emits this block with zero dispatch
+instead of silently minting rounds 4–6.
 
 Log finding counts: `[plan-decompose] opposite-host plan review: C:{critical} H:{high} M:{medium} verdict:{verdict} NEW:{new} REPEAT:{repeat} RESOLVED:{resolved}`
 
@@ -490,6 +488,12 @@ Write minimal `$SPEC_DIR/spec.md` with this structure:
 ## Constraints
 
 - <tech stack constraints from plan.md>
+
+## Intent
+<!-- ffs:intent -->
+prod_delta: <negative | neutral | positive — from plan.md's goal; a slim, delete or consolidate plan is negative>
+prod_budget_lines: <from plan.md; 0 for a negative plan>
+delete_targets: <paths plan.md deletes or shrinks; omit the line if none>
 ```
 
 This satisfies spec-decompose's hard contract (`spec.md` required).

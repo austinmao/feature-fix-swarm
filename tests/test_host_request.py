@@ -16,7 +16,7 @@ def test_codex_host_request_resolves_tier_without_accepting_argv(tmp_path):
         sandbox="workspace-write", network_enabled=False,
         token_reservation=1000, timeout_seconds=600,
     )
-    assert request.model == "gpt-5.6-terra"
+    assert request.model == "gpt-6.1-terra"
     assert request.effort == "medium"
     assert set(request.material()) == {
         "host", "runtime_home", "binary", "model", "effort", "sandbox",

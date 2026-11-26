@@ -145,6 +145,40 @@ if [ -z "$RUN_ID" ]; then
   echo "plan-wall: RUN-ID-REQUIRED — resolve a durable run before review; resume cannot mint another allowance" >&2
   exit 78
 fi
+# Loop counters are keyed by spec identity so a renamed run mints no allowance.
+_pw_sid_err="$(mktemp)"
+SPEC_KEY="$(python3 "$GATES_PY" spec-id 2>"$_pw_sid_err")"; _pw_sid_rc=$?
+_pw_sid_msg="$(cat "$_pw_sid_err")"; rm -f "$_pw_sid_err"
+if [ "$_pw_sid_rc" -ne 0 ]; then
+  if [[ "$_pw_sid_msg" == *SPEC-ID:mismatch* ]]; then
+    echo "plan-wall: SPEC-ID:mismatch between FFS_SPEC_ID and the branch spec number — admission refused" >&2
+    exit 78
+  fi
+  if [ "$_pw_sid_rc" -eq 2 ]; then
+    echo "plan-wall: spec identity invalid (malformed FFS_SPEC_ID) — admission refused" >&2
+    exit 78
+  fi
+  SPEC_KEY="$RUN_ID"
+fi
+
+# Intent wall (plan): pin the spec's Intent block at admission, before any
+# round is spent or reviewer dispatched.
+if [[ "$SPEC_KEY" =~ ^spec-[0-9]{3}$ ]]; then
+  for _pw_spec in "$REPO_ROOT"/specs/"${SPEC_KEY#spec-}"-*/spec.md; do
+    [ -f "$_pw_spec" ] || continue
+    _pw_int_out="$(python3 "$GATES_PY" intent-check --spec "$_pw_spec" --stage plan 2>&1)"
+    _pw_int_rc=$?
+    if [ "$_pw_int_rc" -eq 0 ]; then
+      printf '%s\n' "$_pw_int_out" >&2
+    elif [ "$_pw_int_rc" -eq 2 ] && printf '%s\n' "$_pw_int_out" | grep -qxF 'unknown command: intent-check'; then
+      echo "plan-wall: WARN gates.py lacks intent-check (rollout skew); intent pin skipped" >&2
+    else
+      printf '%s\n' "$_pw_int_out"
+      exit 78
+    fi
+    break
+  done
+fi
 
 # ── run mode: wall every planned phase under one global round counter ─────
 # Each phase dir is delegated to a fresh self-invocation (full per-phase
@@ -155,12 +189,25 @@ fi
 if [ "$PW_RUN_MODE" -eq 1 ]; then
   # Default root honors GSD_PROJECT planning isolation (consumers namespace
   # planning as .planning/<project>/phases). An explicit root arg always wins;
-  # with GSD_PROJECT unset, or its dir absent, this is the plain path.
+  # GSD_PROJECT unset/blank is the plain path. A set GSD_PROJECT is fail-closed
+  # (same rule as gsd-run.sh): never fall back to the root project, or the wall
+  # would check one project while gsd-core runs another.
   RUN_ROOT="${TARGET:-}"
   if [ -z "$RUN_ROOT" ]; then
     RUN_ROOT="$PLANNING_DIR/phases"
-    if [ -n "${GSD_PROJECT:-}" ] && [ -d "$PLANNING_DIR/${GSD_PROJECT}/phases" ]; then
-      RUN_ROOT="$PLANNING_DIR/${GSD_PROJECT}/phases"
+    _pw_proj="${GSD_PROJECT:-}"
+    _pw_proj="${_pw_proj#"${_pw_proj%%[![:space:]]*}"}"
+    _pw_proj="${_pw_proj%"${_pw_proj##*[![:space:]]}"}"
+    if [ -n "$_pw_proj" ]; then
+      if ! [[ "$_pw_proj" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || [[ "$_pw_proj" == *..* ]]; then
+        echo "plan-wall: --run: GSD_PROJECT must be one path segment ([A-Za-z0-9._-], no '..')" >&2
+        exit 2
+      fi
+      RUN_ROOT="$PLANNING_DIR/$_pw_proj/phases"
+      if [ ! -d "$RUN_ROOT" ]; then
+        echo "plan-wall: --run: GSD_PROJECT=$_pw_proj but .planning/$_pw_proj/phases is missing — refusing to fall back to .planning/phases" >&2
+        exit 2
+      fi
     fi
   fi
   if [ ! -d "$RUN_ROOT" ]; then
@@ -186,7 +233,7 @@ if [ "$PW_RUN_MODE" -eq 1 ]; then
   [ "$PW_MAX_ROUNDS" -ge 1 ] || PW_MAX_ROUNDS=2
   PW_ROUND=""
   if [ "${PLAN_WALL:-on}" != off ]; then
-    _pw_lr_out="$(python3 "$GATES_PY" loop-round "$RUN_ID" "wall:run" \
+    _pw_lr_out="$(python3 "$GATES_PY" loop-round "$SPEC_KEY" "wall:run" \
         --max "$PW_MAX_ROUNDS" 2>&1)"
     _pw_lr_rc=$?
     printf '%s\n' "$_pw_lr_out" >&2
@@ -226,7 +273,7 @@ if [ "$PW_RUN_MODE" -eq 1 ]; then
     fi
   fi
   if [ "$RUN_RC" -eq 0 ] && [ "${PLAN_WALL:-on}" != off ]; then
-    python3 "$GATES_PY" loop-round "$RUN_ID" "wall:run" --reset >/dev/null 2>&1 \
+    python3 "$GATES_PY" loop-round "$SPEC_KEY" "wall:run" --reset >/dev/null 2>&1 \
       || echo "plan-wall: WARN: passing run-round counter reset failed (non-fatal)" >&2
   fi
   exit "$RUN_RC"
@@ -455,7 +502,7 @@ fi
 _pw_planner_alias() {
   # Default matches the shipped gsd-config template's gsd-planner override
   # (opus) — Anthropic's guidance is that most workloads start with Opus 5.5,
-  # with Fable 5.1 the frontier escalation tier (plan-checker seat), so the
+  # with Fable 5.2 the frontier escalation tier (plan-checker seat), so the
   # planner default is opus. A config that still pins "fable" is honoured.
   [ -f "$CONFIG" ] || { echo opus; return; }
   jq -r '.model_overrides["gsd-planner"] // "opus"' "$CONFIG" 2>/dev/null || echo opus
@@ -463,7 +510,7 @@ _pw_planner_alias() {
 
 _pw_resolve_claude_id() {
   case "$1" in
-    fable) echo claude-fable-5-1 ;;
+    fable) echo claude-fable-5-2 ;;
     opus) echo claude-opus-5-5 ;;
     sonnet) echo claude-sonnet-5-5 ;;
     haiku) echo claude-haiku-5-5 ;;
@@ -514,14 +561,14 @@ _pw_cross_vendor_fallback_state() {
 _pw_same_vendor_ordered_rungs() {
   local host="$1" planner="$2" model effort out=""
   if [ "$host" = codex ]; then
-    for pair in gpt-6-sol/xhigh gpt-5.6-terra/medium gpt-5.6-luna/low; do
+    for pair in gpt-6.2-sol/xhigh gpt-6.1-terra/medium gpt-6-luna/low; do
       model="${pair%/*}"; effort="${pair#*/}"
       [ "$model" = "$planner" ] && continue
       out="${out}${model}|${effort}
 "
     done
   else
-    for model in claude-fable-5-1 claude-opus-5-5 claude-sonnet-5-5 claude-haiku-5-5; do
+    for model in claude-fable-5-2 claude-opus-5-5 claude-sonnet-5-5 claude-haiku-5-5; do
       [ "$model" = "$planner" ] && continue
       out="${out}${model}|
 "
@@ -538,6 +585,8 @@ Output ONLY a JSON object (no prose, no markdown code fences) with a single "fin
 Every key shown above must be present on every element; use null for ones you have no value for.
 
 CRITICAL is reserved for a defect whose execution as planned causes irreversible loss, destructive or unrecoverable state, or a security breach, and the finding must cite the exact plan step where it occurs; every other defect is at most HIGH.
+
+Also flag plan steps the goal does not need, and steps that add a new path beside an old one without naming the old path it retires. Every claim names its smallest remedy; "delete the step" is a valid remedy. Prefix the claim with [needs-requirement] when its remedy needs a new requirement or acceptance criterion. Scope findings are at most HIGH.
 
 {"findings":[]} means you found nothing — that is a clean, successful review, not a failure.
 
@@ -716,7 +765,7 @@ _pw_select_and_review() {
   local opp_model opp_effort ordered first_model first_effort rung_file
 
   opposite="$(adversary_kind_for_host "$host")"
-  if [ "$opposite" = codex ]; then opp_model=gpt-6-sol; opp_effort=xhigh
+  if [ "$opposite" = codex ]; then opp_model=gpt-6.2-sol; opp_effort=xhigh
   else opp_model=claude-opus-5-5; opp_effort=""; fi
 
   trail_file="$(mktemp "${TMPDIR:-/tmp}/pw-trail.XXXXXX")"
@@ -972,7 +1021,7 @@ _pw_admit_review_round() {
     phase=unscoped
   fi
   key="review:wall:$phase"
-  out="$(python3 "$GATES_PY" loop-round "$RUN_ID" "$key" --durable --max 2 2>&1)"
+  out="$(python3 "$GATES_PY" loop-round "$SPEC_KEY" "$key" --durable --max 2 2>&1)"
   rc=$?
   printf '%s\n' "$out" >&2
   if [ "$rc" -ne 0 ]; then
@@ -1255,7 +1304,11 @@ _pw_dispatch_path() {
       fi
       issue="$claim"
       [ -n "$line" ] && issue="$issue (line $line)"
-      add_out="$(python3 "$GATES_PY" findings-queue add "$fpath" "$issue" \
+      _pw_nr=()
+      if [[ "$issue" == "[needs-requirement]"* ]]; then
+        issue="${issue#\[needs-requirement\]}"; issue="${issue# }"; _pw_nr=(--needs-requirement)
+      fi
+      add_out="$(python3 "$GATES_PY" findings-queue add "$fpath" "$issue" ${_pw_nr[@]+"${_pw_nr[@]}"} \
         --severity "$sev" --run-id "$RUN_ID" --source wall --plan "$source_plan" 2>&1)"
       add_rc=$?
       if [ "$add_rc" -ne 0 ]; then
@@ -1327,7 +1380,7 @@ case "$PW_MAX_ROUNDS" in *[!0-9]*|'') PW_MAX_ROUNDS=2 ;; esac
 [ "$PW_MAX_ROUNDS" -ge 1 ] || PW_MAX_ROUNDS=2
 PW_ROUND=""
 if [ "${PLAN_WALL:-on}" != off ] && [ "${PLAN_WALL_RUN_CHILD:-0}" != 1 ]; then
-  _pw_lr_out="$(python3 "$GATES_PY" loop-round "$RUN_ID" "wall:$PHASE_SLUG" \
+  _pw_lr_out="$(python3 "$GATES_PY" loop-round "$SPEC_KEY" "wall:$PHASE_SLUG" \
       --max "$PW_MAX_ROUNDS" 2>&1)"
   _pw_lr_rc=$?
   printf '%s\n' "$_pw_lr_out" >&2
@@ -1450,7 +1503,7 @@ fi
 # the sealed review:wall allowance, which is never reset here.
 # Reset failure is a WARN, never a verdict change.
 if [ "$OVERALL_RC" -eq 0 ] && [ "${PLAN_WALL:-on}" != off ]; then
-  python3 "$GATES_PY" loop-round "$RUN_ID" "wall:$PHASE_SLUG" --reset >/dev/null 2>&1 \
+  python3 "$GATES_PY" loop-round "$SPEC_KEY" "wall:$PHASE_SLUG" --reset >/dev/null 2>&1 \
     || echo "plan-wall: WARN: passing-round counter reset failed (non-fatal)" >&2
 fi
 

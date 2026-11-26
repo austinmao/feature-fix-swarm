@@ -1332,8 +1332,13 @@ STUB
 
   # 1. The bound is the literal 1200 and rc 124 maps only to ci-timeout.
   # The shim asserts 1200 and returns 124 IMMEDIATELY — no sleeping.
+  # run_bounded uses a timeout only when `--version` says GNU coreutils.
   cat > "$MOCK_BIN/timeout" <<'STUB'
 #!/usr/bin/env bash
+if [ "${1:-}" = "--version" ]; then
+  echo "timeout (GNU coreutils) 9.4"
+  exit
+fi
 secs="$3"; shift 3
 if [ "$1" = "gh" ] && [ "$2" = "pr" ] && [ "$3" = "checks" ]; then
   [ "$secs" = "1200" ] || { echo "CI-BOUND-NOT-1200:$secs" >&2; exit 64; }

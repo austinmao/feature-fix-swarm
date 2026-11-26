@@ -23,28 +23,35 @@
 # not exist at the repo root. Measured under zsh:
 #   scripts/gsd/adversary-host.sh:.:20: no such file or directory: ./run-bounded.sh
 # `run_bounded` then stayed undefined and every bounded reviewer call failed.
-# Resolved zsh-safely: $0 is the SOURCED FILE's path in zsh (verified), while
-# bash populates BASH_SOURCE, so this one expression carries the right
-# provenance in both -- and needs no zsh-only syntax such as ${(%):-%x}, which
-# bash cannot even PARSE (so it cannot sit in an elif branch). Deliberately NOT
+# zsh names the sourced file in %x; $0 does not hold it when the file is found
+# on PATH or FUNCTION_ARGZERO is off, and inside a zsh function $0 is the function
+# name, so the functions below use this directory too. The eval keeps the zsh-only
+# syntax from bash's parser. No cd: CDPATH, a cd function, a chpwd hook or a
+# symlink in the path cannot change the result. Deliberately NOT
 # falling back to the CWD's git root: sourcing one checkout's copy from another
 # would silently load THAT checkout's run-bounded.sh, so a reviewer could run a
 # run_bounded from a different revision than the branch under review, unwarned.
-_ah_dir="$(dirname "${BASH_SOURCE[0]:-$0}")"
-if [ ! -f "${_ah_dir}/run-bounded.sh" ]; then
-  echo "adversary-host: FATAL: cannot locate run-bounded.sh next to adversary-host.sh (looked in '${_ah_dir}')" >&2
-  unset _ah_dir
+_ah_self="${BASH_SOURCE[0]:-}"
+[ -n "$_ah_self" ] || [ -z "${ZSH_VERSION:-}" ] || eval '_ah_self="${(%):-%x}"'
+case "$_ah_self" in
+  /*) ;;
+  ?*) _ah_self="$PWD/$_ah_self" ;;
+  *) _ah_self=/dev/null/unknown ;; # not sourced from a file: refused below
+esac
+ADVERSARY_HOST_DIR="$(dirname "$_ah_self")"
+unset _ah_self
+if [ ! -f "${ADVERSARY_HOST_DIR}/run-bounded.sh" ]; then
+  echo "adversary-host: FATAL: cannot locate run-bounded.sh next to adversary-host.sh (looked in '${ADVERSARY_HOST_DIR}')" >&2
   return 1 2>/dev/null || exit 1
 fi
-. "${_ah_dir}/run-bounded.sh"
-# Do not leak scaffolding into the caller's shell.
-unset _ah_dir
+. "${ADVERSARY_HOST_DIR}/run-bounded.sh"
 
 adversary_model_request_helper() {
   local candidate
   for candidate in \
-    "$(dirname "${BASH_SOURCE[0]:-$0}")/../../lib/model_requests.py" \
-    "$(dirname "${BASH_SOURCE[0]:-$0}")/../../packages/feature-fix-swarm/lib/model_requests.py"; do
+    "${ADVERSARY_HOST_DIR}/../../lib/model_requests.py" \
+    "${ADVERSARY_HOST_DIR}/../../packages/feature-fix-swarm/lib/model_requests.py" \
+    "${ADVERSARY_HOST_DIR}/../../model_requests.py"; do
     if [ -f "$candidate" ]; then
       printf '%s\n' "$candidate"
       return 0
@@ -58,7 +65,8 @@ adversary_model_request_helper() {
 # context and cannot accidentally omit an attempt or invocation event.
 adversary_gates() {
   local candidate
-  for candidate in "$(dirname "${BASH_SOURCE[0]:-$0}")/../../lib/gates.py" "$(dirname "${BASH_SOURCE[0]:-$0}")/../../packages/feature-fix-swarm/lib/gates.py"; do
+  # The last candidate is the user-scope install layout (lib/ files sit at its root).
+  for candidate in "${ADVERSARY_HOST_DIR}/../../lib/gates.py" "${ADVERSARY_HOST_DIR}/../../packages/feature-fix-swarm/lib/gates.py" "${ADVERSARY_HOST_DIR}/../../gates.py"; do
     [ -f "$candidate" ] && { printf '%s\n' "$candidate"; return 0; }
   done
   echo "adversary-host: gates.py unavailable" >&2
@@ -109,7 +117,7 @@ adversary_resolve_model_request() {
   local host="$1" request="$2" helper resolved
   helper="$(adversary_model_request_helper)" || return $?
   resolved="$(/usr/bin/python3 "$helper" resolve "$request" --host "$host")" || return $?
-  printf '%s' "$resolved" | /usr/bin/python3 -c '
+  printf '%s' "$resolved" | /usr/bin/python3 -I -c '
 import json, re, sys
 r = json.load(sys.stdin)
 if r["kind"] == "exact" and not re.match(r"^(?:gpt-|o[1-9](?:-|$)|claude-)", r["model"]):
@@ -243,9 +251,9 @@ adversary_model_ladder() {
   local kind="$1" preferred="$2" preferred_effort="$3"
   printf '%s|%s\n' "$preferred" "$preferred_effort"
   if [ "$kind" = "codex" ]; then
-    case "$preferred" in *sol*) ;; *) printf '%s|%s\n' gpt-6-sol xhigh ;; esac
-    case "$preferred" in *terra*) ;; *) printf '%s|%s\n' gpt-5.6-terra medium ;; esac
-    case "$preferred" in *luna*) ;; *) printf '%s|%s\n' gpt-5.6-luna low ;; esac
+    case "$preferred" in *sol*) ;; *) printf '%s|%s\n' gpt-6.2-sol xhigh ;; esac
+    case "$preferred" in *terra*) ;; *) printf '%s|%s\n' gpt-6.1-terra medium ;; esac
+    case "$preferred" in *luna*) ;; *) printf '%s|%s\n' gpt-6-luna low ;; esac
   else
     case "$preferred" in *opus*) ;; *) printf '%s|\n' claude-opus-5-5 ;; esac
     case "$preferred" in *sonnet*) ;; *) printf '%s|\n' claude-sonnet-5-5 ;; esac
@@ -282,6 +290,8 @@ adversary_invoke() {
     }
     local -a schema_args=()
     [ -n "$schema_file" ] && schema_args=(--output-schema "$schema_file")
+    # Expanded below as ${schema_args[@]+"${schema_args[@]}"}: bash 3.2 (macOS
+    # /bin/bash) treats a bare "${empty[@]}" as unbound under the caller's set -u.
     # Codex has no Claude-style `--tools ''` flag. Disable every built-in
     # agentic tool family supported by the pinned CLI, run from a disposable
     # empty directory, and retain the read-only sandbox as defense in depth.
@@ -300,7 +310,7 @@ adversary_invoke() {
       --disable image_generation \
       -C "$data_dir" --skip-git-repo-check \
       --color never --output-last-message "$last_message" \
-      "${schema_args[@]}" \
+      ${schema_args[@]+"${schema_args[@]}"} \
       - >"$transcript" 2>&1
     rc="${PIPESTATUS[1]}"
     if [ "$rc" -eq 0 ] && [ -s "$last_message" ]; then
@@ -318,18 +328,23 @@ adversary_invoke() {
     rm -rf "$data_dir"
     return "$rc"
   else
-    local bin="${ADVERSARY_BIN_CLAUDE:-claude}"
+    local bin="${ADVERSARY_BIN_CLAUDE:-claude}" data_dir rc
     if ! command -v "$bin" >/dev/null 2>&1; then
       return 127
     fi
+    data_dir="$(mktemp -d "${TMPDIR:-/tmp}/ffs-claude-data-only.XXXXXX")" || return 1
     # A review is data-only. Keep Claude non-agentic, non-persistent, and off
-    # the consumer's ambient MCP/tool surface just as Codex is read-only.
-    printf '%s' "$prompt" | run_bounded "$timeout_s" env \
+    # the consumer's ambient MCP/tool surface just as Codex is read-only. Run it
+    # from an empty directory with user settings only, so the reviewed repo's
+    # .claude/settings.json hooks and CLAUDE.md never load.
+    printf '%s' "$prompt" | (cd "$data_dir" && run_bounded "$timeout_s" env \
       -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN \
       "$bin" --strict-mcp-config --mcp-config '{"mcpServers":{}}' \
+      --setting-sources user \
       --permission-mode plan --tools '' --no-session-persistence \
-      -p --model "$model"
+      -p --model "$model")
     rc="${PIPESTATUS[1]}"
+    rm -rf "$data_dir"
     return "$rc"
   fi
 }
@@ -608,6 +623,13 @@ adversary_invoke_with_fallback() {
   # 1 left by an EARLIER call would otherwise survive a clean one.
   # shellcheck disable=SC2034  # read by sourcing callers, not here
   ADVERSARY_LAST_TIER_DESCENT=0
+  # Out-of-band answer provenance for in-process callers: the model asked for
+  # and the model that actually answered (taken from the rung file, never from
+  # the reviewer's stream). Empty answered = no successful answer / unknown.
+  # shellcheck disable=SC2034  # read by sourcing callers, not here
+  ADVERSARY_LAST_REQUESTED_MODEL="$preferred_model"
+  # shellcheck disable=SC2034
+  ADVERSARY_LAST_ANSWERED_MODEL=""
   rung_file="$(_adversary_rung_file_new)" || return 78
 
   output="$(ADVERSARY_RUNG_FILE="$rung_file" adversary_invoke_model_ladder \
@@ -622,6 +644,8 @@ adversary_invoke_with_fallback() {
     # as a clean judgment-tier review.
     _ah_answered_model="$(IFS='|' read -r _ m _ < "$rung_file" 2>/dev/null && printf '%s' "$m")"
     _adversary_rung_file_rm "$rung_file"
+    # shellcheck disable=SC2034  # read by sourcing callers, not here
+    ADVERSARY_LAST_ANSWERED_MODEL="$_ah_answered_model"
     if [ "$_ah_answered_model" = "$preferred_model" ]; then
       adversary_record_invocation false || return $?
     else
@@ -655,6 +679,8 @@ adversary_invoke_with_fallback() {
     # This leg is already degraded (cross-vendor), but a descent WITHIN it is
     # separate information the flag must still carry for in-process callers.
     _ah_answered_model="$(IFS='|' read -r _ m _ < "$rung_file" 2>/dev/null && printf '%s' "$m")"
+    # shellcheck disable=SC2034  # read by sourcing callers, not here
+    ADVERSARY_LAST_ANSWERED_MODEL="$_ah_answered_model"
     if [ "$_ah_answered_model" != "$fallback_model" ]; then
       # shellcheck disable=SC2034  # read by sourcing callers, not here
       ADVERSARY_LAST_TIER_DESCENT=1

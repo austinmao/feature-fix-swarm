@@ -63,7 +63,11 @@ Usage (inline heredoc in SKILL.md):
                                                   # advisory (always exit 0):
                                                   # spawn-model histogram +
                                                   # UNPINNED-BUILD/INLINE-MECHANICAL
+    python3 lib/gates.py findings-queue retag SIG --in-spec
+                                                  # operator-only: clear needs-requirement
     python3 lib/gates.py analyze SPEC_FILE TASKS_FILE
+    python3 lib/gates.py intent-check --spec specs/NNN-x/spec.md \
+        --stage plan|finish [--repin]   # pinned intent block + finish line delta
 
 Evidence store path: $GATES_STORE (default .feature-fix-swarm/evidence.json).
 """
@@ -73,6 +77,7 @@ import argparse
 import base64
 import difflib
 import fcntl
+import fnmatch
 import hashlib
 import json
 import math
@@ -84,6 +89,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import unicodedata
 from pathlib import Path
 
 
@@ -231,17 +237,22 @@ def _save_store(store: Path, data: dict, *, durable: bool = False) -> None:
             os.unlink(tmp)
 
 
-def _lock_seam_hold(fd: int) -> None:
-    """Test-only event seam: publish the held lock identity, await release."""
-    seam = os.environ.get("GATES_TEST_HOLD_LOCK")
-    if not seam:
-        return
+def _publish_and_hold(seam: str, fd: int) -> None:
+    """Test-only: publish the held lock identity under ``seam``, poll for its release file."""
     st = os.fstat(fd)
     with open(os.path.join(seam, "held"), "w") as fh:
         fh.write("%d:%d" % (st.st_dev, st.st_ino))
     deadline = time.monotonic() + 30
     while not os.path.exists(os.path.join(seam, "release")) and time.monotonic() < deadline:
         time.sleep(0.05)
+
+
+def _lock_seam_hold(fd: int) -> None:
+    """Test-only event seam: publish the held lock identity, await release."""
+    seam = os.environ.get("GATES_TEST_HOLD_LOCK")
+    if not seam:
+        return
+    _publish_and_hold(seam, fd)
 
 
 class _StoreLock:
@@ -888,8 +899,278 @@ def _loops_ns(data: dict, run_id: str) -> dict:
     return run_entry
 
 
-def loop_round_durable(store: Path, run_id: str, loop_name: str, maximum: int) -> tuple[int, int]:
-    """Reserve a fixed protected allowance without spending past its cap."""
+def _git_out(cwd: str | Path | None, *argv: str) -> str:
+    return subprocess.run(["git", *argv], cwd=cwd, capture_output=True, text=True,
+                          check=True, timeout=60).stdout
+
+
+_SPEC_ID_RE = re.compile(r"spec-[0-9]{3}")
+
+
+def spec_identity() -> tuple[str | None, str | None]:
+    """(spec id, stderr note). Order: FFS_SPEC_ID -> branch NNN -> GSD_RUN_ID
+    (noted `SPEC-ID:unbound`). A None id is a failure. Raises ValueError on a
+    malformed FFS_SPEC_ID."""
+    env = os.environ.get("FFS_SPEC_ID")
+    if env and not _SPEC_ID_RE.fullmatch(env):
+        raise ValueError(f"FFS_SPEC_ID must match spec-NNN, got {env!r}")
+    try:
+        branch = _git_out(None, "branch", "--show-current").strip()
+    except (OSError, subprocess.SubprocessError):
+        branch = ""
+    num = re.match(r"[0-9]{3}", branch)
+    from_branch = f"spec-{num.group()}" if num else None
+    if env and from_branch and env != from_branch:
+        return None, f"SPEC-ID:mismatch FFS_SPEC_ID={env} branch={from_branch}"
+    if env or from_branch:
+        return env or from_branch, None
+    return os.environ.get("GSD_RUN_ID") or None, "SPEC-ID:unbound"
+
+
+_NON_PROD_DIRS = {"tests", "test", "__tests__", "fixtures"}
+_NON_PROD_NAMES = ("*.bats", "test_*.py", "*_test.*", "*.test.*", "*.spec.*")
+_NON_PROD_PREFIXES = ("docs/", "specs/", ".planning/")
+
+
+def _is_production(relpath: str) -> bool:
+    """False for tests, fixtures, docs, specs, planning artifacts, README and
+    CHANGELOG files; True for everything else (skills/**/*.md included)."""
+    parts = relpath.split("/")
+    base = parts[-1]
+    return not (_NON_PROD_DIRS.intersection(parts)
+                or any(fnmatch.fnmatch(base, g) for g in _NON_PROD_NAMES)
+                or relpath.startswith(_NON_PROD_PREFIXES)
+                or base.startswith(("README", "CHANGELOG")))
+
+
+def _default_ref(top: str) -> str | None:
+    """Default-branch ref: origin/HEAD, then local main/master; `origin/<b>` when that
+    ref exists. No env override: the run must not choose the base it is measured on."""
+    def git(*argv: str) -> subprocess.CompletedProcess:
+        return subprocess.run(["git", *argv], cwd=top, capture_output=True, text=True,
+                              timeout=60)
+    name = git(
+        "symbolic-ref", "-q", "refs/remotes/origin/HEAD").stdout.strip().removeprefix(
+        "refs/remotes/origin/") or next((b for b in ("main", "master") if git(
+            "show-ref", "-q", "--verify", f"refs/heads/{b}").returncode == 0), None)
+    if name and git("show-ref", "-q", "--verify", f"refs/remotes/origin/{name}").returncode == 0:
+        return f"origin/{name}"
+    return name
+
+
+def _changed_vs_base(cwd: str | Path | None) -> tuple[str, str, list[str]]:
+    """(toplevel, merge-base, sorted changed paths) vs the merge-base with
+    ${FFS_BASE:-<default branch>}: staged, unstaged, committed and untracked.
+    FFS_BASE must resolve to a point on the default branch. Raises ValueError
+    when no base can be resolved."""
+    top = _git_out(cwd, "rev-parse", "--show-toplevel").strip()
+    default = _default_ref(top)
+    ref = os.environ.get("FFS_BASE") or default
+    try:
+        base = _git_out(top, "merge-base", ref or "", "HEAD").strip()
+        if (ref != default and default and subprocess.run(
+                ["git", "merge-base", "--is-ancestor", base, default], cwd=top,
+                capture_output=True, timeout=60).returncode != 0):
+            raise ValueError(f"FFS_BASE={ref} is not on {default}")
+    except (subprocess.SubprocessError, OSError) as exc:
+        raise ValueError("no base ref: set FFS_BASE") from exc
+    changed = (_git_out(top, "diff", "--name-only", "--no-renames", "-z", base)
+               + _git_out(top, "ls-files", "--others", "--exclude-standard", "-z"))
+    return top, base, sorted({r for r in changed.split("\0") if r})
+
+
+def candidate_hash(cwd: str | Path | None) -> str:
+    """Content hash of the production files changed vs the merge-base.
+    A docs-only change or a commit of unchanged content leaves it unchanged."""
+    top, base, changed = _changed_vs_base(cwd)
+    digest = hashlib.sha256(base.encode())
+    for rel in filter(_is_production, changed):
+        path = Path(top) / rel
+        body = hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else "<deleted>"
+        digest.update(json.dumps([rel, body]).encode())
+    return digest.hexdigest()
+
+
+_INTENT_MARKER = "<!-- ffs:intent -->"
+_INTENT_SIGNS = ("negative", "neutral", "positive")
+_INTENT_KEYS = {"prod_delta", "prod_budget_lines", "delete_targets", "inherit"}
+
+
+def _parse_intent(text: str) -> tuple[str, dict] | None:
+    """(sha256 of the block, fields) for the `<!-- ffs:intent -->` block, None
+    if absent. The block is the marker plus the consecutive `key: value` lines
+    after it. Raises ValueError on an invalid block."""
+    lines = [ln.strip() for ln in text.splitlines()]
+    if _INTENT_MARKER not in lines:
+        return None
+    block = [_INTENT_MARKER]
+    for ln in lines[lines.index(_INTENT_MARKER) + 1:]:
+        if not re.fullmatch(r"[a-z_]+:.*", ln):
+            break
+        block.append(ln)
+    fields = {k: v.strip() for k, v in (ln.split(":", 1) for ln in block[1:])}
+    if set(fields) - _INTENT_KEYS:
+        raise ValueError(f"unknown intent keys {sorted(set(fields) - _INTENT_KEYS)}")
+    if fields.get("prod_delta") not in _INTENT_SIGNS:
+        raise ValueError("prod_delta must be negative, neutral or positive")
+    if not re.fullmatch(r"[0-9]+", fields.get("prod_budget_lines", "")):
+        raise ValueError("prod_budget_lines must be an integer >= 0")
+    fields["prod_budget_lines"] = int(fields["prod_budget_lines"])
+    return hashlib.sha256("\n".join(block).encode()).hexdigest(), fields
+
+
+def _loosens(fields: dict, ref: dict) -> bool:
+    """True when `fields` has a looser sign or a higher budget than `ref`."""
+    return (_INTENT_SIGNS.index(fields["prod_delta"]) > _INTENT_SIGNS.index(ref["prod_delta"])
+            or fields["prod_budget_lines"] > ref["prod_budget_lines"])
+
+
+def _check_inherit(top: str, fields: dict) -> None:
+    """A child intent may not loosen its parent's sign or raise its budget."""
+    rel = fields.get("inherit")
+    if not rel:
+        return
+    if Path(rel).is_absolute() or ".." in Path(rel).parts:
+        raise ValueError(f"inherit must be a repo-relative path, got {rel}")
+    path = Path(top) / rel
+    parent = _parse_intent(path.read_text()) if path.is_file() else None
+    if parent is None:
+        raise ValueError(f"inherit {rel}: no intent block found")
+    if _loosens(fields, parent[1]):
+        raise ValueError(f"intent loosens its parent {rel}")
+
+
+def _intent_pin(store: Path, spec_id: str, digest: str | None, stage: str,
+                repin: bool, fields: dict | None = None) -> str | None:
+    """Compare the block hash with the pin; None when it holds, else the
+    failure. The plan stage pins on first sight; `repin` re-pins at rev+1."""
+    with _StoreLock(store):
+        data = _load_store(store)
+        pins = data.setdefault("_intent", {})
+        pin = pins.get(spec_id)
+        if digest is None:
+            return f"pinned intent block (rev {pin['rev']}) was removed" if pin else None
+        if pin and pin["sha256"] == digest:
+            return None
+        if pin and not repin:
+            return f"intent block differs from the pinned rev {pin['rev']}"
+        if pin is None and stage != "plan":
+            return None
+        # Legacy pins without fields default to the strictest intent.
+        if pin and _loosens(fields, {"prod_delta": pin.get("prod_delta", "negative"),
+                                     "prod_budget_lines": pin.get("prod_budget_lines", 0)}):
+            return "repin may only narrow; write a follow-up spec"
+        history = ([*pin.get("history", []), {k: pin[k] for k in ("sha256", "rev", "at")}]
+                   if pin else [])
+        pins[spec_id] = {"sha256": digest, "rev": pin["rev"] + 1 if pin else 1,
+                         "at": _now(), "history": history,
+                         "prod_delta": fields["prod_delta"],
+                         "prod_budget_lines": fields["prod_budget_lines"]}
+        _save_store(store, data)
+        return None
+
+
+def _production_delta(cwd: str | Path | None) -> tuple[str, dict[str, tuple[int, int]]]:
+    """(toplevel, {production path: (added, removed)}) vs the merge-base;
+    untracked files count all their lines as added."""
+    top, base, changed = _changed_vs_base(cwd)
+    tracked = {}
+    for rec in _git_out(top, "diff", "--numstat", "--no-renames", "-z", base).split("\0"):
+        if rec:
+            added, removed, path = rec.split("\t", 2)
+            tracked[path] = (int(added) if added.isdigit() else 0,
+                             int(removed) if removed.isdigit() else 0)
+    delta = {}
+    for rel in filter(_is_production, changed):
+        delta[rel] = tracked.get(rel) or (
+            len((Path(top) / rel).read_text(errors="replace").splitlines()), 0)
+    return top, delta
+
+
+def _stale_targets(top: str, targets: str, delta: dict) -> list[str]:
+    """Delete targets that still exist and have not shrunk."""
+    stale = []
+    for target in filter(None, (t.strip() for t in targets.split(","))):
+        root = target.rstrip("/")
+        net = sum(a - r for p, (a, r) in delta.items()
+                  if p == root or p.startswith(root + "/"))
+        if (Path(top) / root).exists() and net >= 0:
+            stale.append(target)
+    return stale
+
+
+def _intent_finish(spec_id: str, top: str, delta: dict, fields: dict) -> int:
+    added = sum(a for a, _ in delta.values())
+    removed = sum(r for _, r in delta.values())
+    net, sign, budget = added - removed, fields["prod_delta"], fields["prod_budget_lines"]
+    stale = _stale_targets(top, fields.get("delete_targets", ""), delta) \
+        if sign == "negative" else []
+    within = {"negative": net < 0, "neutral": abs(net) <= budget,
+              "positive": net <= budget}[sign]
+    ok = within and not stale
+    print(f"{'INTENT:ok' if ok else 'INTENT-FAIL'} {spec_id}: prod_delta={sign} "
+          f"net={net:+d} added={added} removed={removed} budget={budget}",
+          file=sys.stdout if ok else sys.stderr)
+    if stale:
+        print(f"delete target still present: {', '.join(stale)}", file=sys.stderr)
+    return 0 if ok else 1
+
+
+def _intent_check(args: list[str], store: Path) -> int:
+    parser = argparse.ArgumentParser(prog="gates.py intent-check", add_help=False,
+                                     allow_abbrev=False)
+    parser.add_argument("--spec", required=True)
+    parser.add_argument("--stage", required=True, choices=("plan", "finish"))
+    parser.add_argument("--repin", action="store_true")
+    try:
+        ns = parser.parse_args(args)
+    except SystemExit:
+        return 2
+    spec = Path(ns.spec)
+    num = re.match(r"([0-9]{3})-", spec.resolve().parent.name)
+    if not num or not spec.is_file() or (ns.repin and ns.stage != "plan"):
+        print("usage: gates.py intent-check --spec specs/NNN-*/spec.md "
+              "--stage plan|finish (--repin only with --stage plan)", file=sys.stderr)
+        return 2
+    spec_id = f"spec-{num.group(1)}"
+    top = _git_out(None, "rev-parse", "--show-toplevel").strip()
+    parsed = None
+    try:
+        parsed = _parse_intent(spec.read_text())
+        if parsed:
+            _check_inherit(top, parsed[1])
+        failure = _intent_pin(store, spec_id, parsed and parsed[0], ns.stage, ns.repin,
+                               parsed and parsed[1])
+    except ValueError as exc:
+        failure = str(exc)
+    if failure:
+        print(f"INTENT-FAIL {spec_id}: {failure}", file=sys.stderr)
+        return 1
+    if parsed is None:
+        print(f"INTENT:absent {spec_id}")
+        return 0
+    if ns.stage == "plan":
+        print(f"INTENT:ok {spec_id}: intent block valid and pinned")
+        return 0
+    try:
+        top, delta = _production_delta(None)
+    except ValueError as exc:
+        print(f"INTENT-FAIL {spec_id}: {exc}", file=sys.stderr)
+        return 1
+    return _intent_finish(spec_id, top, delta, parsed[1])
+
+
+def _token_sites(data: dict, run_id: str, loop_name: str, token: str) -> list:
+    """Sites recorded for a review token. Lives OUTSIDE the `#cap` meta."""
+    return (data.setdefault("_review_tokens", {}).setdefault(run_id, {})
+            .setdefault(loop_name, {}).setdefault(token, []))
+
+
+def loop_round_durable(store: Path, run_id: str, loop_name: str, maximum: int, *,
+                       token: str | None = None, site: str | None = None) -> tuple[int, int]:
+    """Reserve a fixed protected allowance without spending past its cap.
+    A token seen at exactly one site is continued free at a different site
+    (one review pass reaching its second site), once."""
     if isinstance(maximum, bool) or not isinstance(maximum, int) or maximum < 1:
         raise ValueError("durable loop maximum must be a positive integer")
     with _StoreLock(store):
@@ -910,9 +1191,16 @@ def loop_round_durable(store: Path, run_id: str, loop_name: str, maximum: int) -
             raise ValueError("durable loop metadata malformed")
         if meta["max"] != maximum:
             raise ValueError("durable loop maximum is sealed on first reservation")
-        if meta["used"] >= meta["max"]:
+        sites = _token_sites(data, run_id, loop_name, token) if token and site else None
+        free = (sites is not None and len(sites) == 1 and sites[0] != site
+                and not any(e.get("loop") == loop_name
+                            for e in data.get("_exhausted", {}).get(run_id, [])))
+        if meta["used"] >= meta["max"] and not free:
             return meta["used"] + 1, meta["max"]
-        meta["used"] += 1
+        if not free:
+            meta["used"] += 1
+        if sites is not None:
+            sites.append(site)
         _save_store(store, data, durable=True)
         return meta["used"], meta["max"]
 
@@ -2363,9 +2651,50 @@ def _findings_ns(data: dict) -> list:
     return findings
 
 
+# Dispositions that close a finding for good: a bare re-report must not reopen it.
+_NO_REOPEN = {"issue", "descope"}
+
+
+def _reopen(rec: dict, severity: str | None, run_id: str | None,
+            source: str | None, plan: str | None, hard: bool = False) -> bool:
+    """Reopen a resolved record on re-report, preserving the prior
+    adjudication in `history`. No-op for unresolved records, and for _NO_REOPEN
+    records unless re-reported as security HIGH/CRITICAL (`hard`)."""
+    if not rec.get("resolved") or (rec.get("disposition") in _NO_REOPEN and not hard):
+        return False
+    rec.setdefault("history", []).append({
+        "disposition": rec.get("disposition"),
+        "reason": rec.get("reason"),
+        "resolved_at": rec.get("resolved_at"),
+    })
+    rec["resolved"] = False
+    for key in ("disposition", "reason", "resolved_at"):
+        rec.pop(key, None)
+    for key, val in (("severity", severity), ("run_id", run_id),
+                     ("source", source), ("plan", plan)):
+        if val is not None:
+            rec[key] = val
+    return True
+
+
+def _merge_review_meta(rec: dict, security: bool, spec: str | None,
+                       needs_requirement: bool = False) -> bool:
+    """`security` and `needs_requirement` are sticky once any report set them;
+    `spec` keeps the first non-empty."""
+    changed = False
+    for key, val in (("security", security), ("needs_requirement", needs_requirement)):
+        if val and not rec.get(key):
+            rec[key], changed = True, True
+    if spec and not rec.get("spec"):
+        rec["spec"], changed = spec, True
+    return changed
+
+
 def findings_add(store: Path, file: str, issue: str, *, severity: str | None = None,
                   run_id: str | None = None, source: str | None = None,
-                  plan: str | None = None) -> tuple[str, bool, bool]:
+                  plan: str | None = None, security: bool = False,
+                  spec: str | None = None,
+                  needs_requirement: bool = False) -> tuple[str, bool, bool]:
     """Queue a review finding. Returns (sig, deduped, reopened) computed
     INSIDE the store lock — the dedup outcome is atomic with the write,
     never a racy pre-read (adversary F2). `file` is a free-text display/hash
@@ -2448,57 +2777,32 @@ def findings_add(store: Path, file: str, issue: str, *, severity: str | None = N
                 # this record (its own `issue`, or an alias already on
                 # file) is a no-op fold — no duplicate alias row, and no
                 # store write when nothing else changed either.
-                changed = False
+                rec, changed = best, False
                 if issue != best.get("issue") and issue not in best.get("aliases", []):
                     best.setdefault("aliases", []).append(issue)
                     changed = True
-                if best.get("resolved"):
-                    best.setdefault("history", []).append({
-                        "disposition": best.get("disposition"),
-                        "reason": best.get("reason"),
-                        "resolved_at": best.get("resolved_at"),
-                    })
-                    best["resolved"] = False
-                    best.pop("disposition", None)
-                    best.pop("reason", None)
-                    best.pop("resolved_at", None)
-                    for key, val in (("severity", severity), ("run_id", run_id),
-                                      ("source", source), ("plan", plan)):
-                        if val is not None:
-                            best[key] = val
-                    reopened = True
-                    changed = True
                 deduped = True
                 result_sig = best["sig"]
-                if changed:
-                    _save_store(store, data)
             else:
-                findings.append({
+                rec, changed = {
                     "sig": sig, "file": file, "issue": issue, "resolved": False,
                     "recorded_at": _now(), "severity": severity, "run_id": run_id,
                     "source": source, "plan": plan, "history": [],
-                })
-                _save_store(store, data)
-        elif existing.get("resolved"):
-            existing.setdefault("history", []).append({
-                "disposition": existing.get("disposition"),
-                "reason": existing.get("reason"),
-                "resolved_at": existing.get("resolved_at"),
-            })
-            existing["resolved"] = False
-            existing.pop("disposition", None)
-            existing.pop("reason", None)
-            existing.pop("resolved_at", None)
-            for key, val in (("severity", severity), ("run_id", run_id),
-                              ("source", source), ("plan", plan)):
-                if val is not None:
-                    existing[key] = val
-            reopened = True
+                }, True
+                findings.append(rec)
+        else:
+            rec, changed = existing, False
+        if _reopen(rec, severity, run_id, source, plan,
+                   security and (severity or "").upper() in ("HIGH", "CRITICAL")):
+            reopened = changed = True
+        if _merge_review_meta(rec, security, spec, needs_requirement):
+            changed = True
+        if changed:
             _save_store(store, data)
     return result_sig, deduped, reopened
 
 
-_VALID_DISPOSITIONS = {"refute", "fix", "waive"}
+_VALID_DISPOSITIONS = {"refute", "fix", "waive", "issue", "descope"}
 
 
 def findings_list(store: Path, unresolved: bool = False, *, severity: str | None = None,
@@ -2526,13 +2830,26 @@ def findings_list(store: Path, unresolved: bool = False, *, severity: str | None
     return result
 
 
-def findings_resolve(store: Path, sig: str, *, disposition: str, reason: str) -> bool:
+def findings_record_sha256(record: dict) -> str:
+    """Full finding-record CAS digest: sorted-key compact JSON, unescaped
+    Unicode, UTF-8 bytes, SHA-256 lowercase hex. Covers every field,
+    including history and resolution timestamps."""
+    return hashlib.sha256(json.dumps(
+        record, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode("utf-8")).hexdigest()
+
+
+def findings_resolve(store: Path, sig: str, *, disposition: str, reason: str,
+                     if_unresolved: bool = False,
+                     expected_record_sha256: str | None = None) -> bool:
     """Marks the matching signature resolved. False when sig unknown — no
     write happens on a miss (adversary F4).
 
-    v2 (AC-015): resolution now REQUIRES a disposition (`refute|fix|waive`)
+    v2 (AC-015): resolution now REQUIRES a disposition (`refute|fix|waive|issue|descope`)
     and a non-empty reason — "resolved" means adjudicated, not silenced.
-    Raises ValueError on an invalid/missing disposition or empty reason
+    Raises ValueError on an invalid/missing disposition or empty reason, or
+    for issue/descope on a HIGH/CRITICAL security finding, or for fix on a
+    non-security needs-requirement finding (operator scope decision first)
     (validated before touching the store, including on an unknown sig, so a
     malformed resolve never has a side effect either).
 
@@ -2541,17 +2858,42 @@ def findings_resolve(store: Path, sig: str, *, disposition: str, reason: str) ->
     disposition/reason/resolved_at to `history` before overwriting — same
     provenance-preserving pattern `findings_add`'s reopen path already uses.
     Without this, a double-resolve silently discarded the earlier
-    adjudication with no trace (spec-004 fix round finding 11)."""
+    adjudication with no trace (spec-004 fix round finding 11).
+
+    Opt-in guards for automatic closers, both checked under the store lock
+    before any write: `if_unresolved` refuses an already-resolved record
+    (FINDING_ALREADY_RESOLVED) instead of overwriting its adjudication;
+    `expected_record_sha256` refuses (EXPECTED_RECORD_SHA256_MISMATCH) when
+    the stored record no longer matches the digest the caller read, or the
+    sig is missing."""
     if disposition not in _VALID_DISPOSITIONS:
         raise ValueError("--disposition must be one of "
                           f"{sorted(_VALID_DISPOSITIONS)}, got {disposition!r}")
     if not reason or not reason.strip():
         raise ValueError("--reason is required and must be non-empty")
+    if expected_record_sha256 is not None and not re.fullmatch(
+            r"[0-9a-f]{64}", expected_record_sha256):
+        raise ValueError("EXPECTED_RECORD_SHA256_INVALID")
     with _StoreLock(store):
         data = _load_store(store)
         findings = _findings_ns(data)
         for f in findings:
             if f["sig"] == sig:
+                if (expected_record_sha256 is not None
+                        and findings_record_sha256(f) != expected_record_sha256):
+                    raise ValueError("EXPECTED_RECORD_SHA256_MISMATCH")
+                if if_unresolved and f.get("resolved"):
+                    raise ValueError("FINDING_ALREADY_RESOLVED")
+                if (disposition in _NO_REOPEN and f.get("security")
+                        and (f.get("severity") or "").upper() in ("HIGH", "CRITICAL")):
+                    raise ValueError(f"{disposition} is refused for a HIGH/CRITICAL "
+                                     "security finding; use fix, refute or waive")
+                if (disposition == "fix" and f.get("needs_requirement")
+                        and not f.get("security")):
+                    raise ValueError(
+                        "fix is refused for a needs-requirement finding: the operator "
+                        "amends the spec, then runs findings-queue retag <sig> "
+                        "--in-spec; or resolves it issue|descope")
                 if f.get("resolved"):
                     f.setdefault("history", []).append({
                         "disposition": f.get("disposition"),
@@ -2562,6 +2904,22 @@ def findings_resolve(store: Path, sig: str, *, disposition: str, reason: str) ->
                 f["disposition"] = disposition
                 f["reason"] = reason
                 f["resolved_at"] = _now()
+                _save_store(store, data)
+                return True
+        if expected_record_sha256 is not None:
+            raise ValueError("EXPECTED_RECORD_SHA256_MISMATCH")
+    return False
+
+
+def findings_retag(store: Path, sig: str) -> bool:
+    """Operator-only: clear `needs_requirement` after the spec was amended.
+    False (no write) when sig unknown."""
+    with _StoreLock(store):
+        data = _load_store(store)
+        for f in _findings_ns(data):
+            if f["sig"] == sig:
+                f.pop("needs_requirement", None)
+                f.setdefault("history", []).append({"retag": "in-spec", "at": _now()})
                 _save_store(store, data)
                 return True
     return False
@@ -2577,24 +2935,111 @@ def _store_path() -> Path:
     live at audit time — so grants/evidence recorded in one worktree are
     invisible to another, which stalls runs or lets them re-grant. One
     store also makes _StoreLock actually serialize parallel sessions.
-    Non-git cwd (or any probe failure) keeps today's relative default."""
+    Non-git cwd keeps the relative default; a probe failure inside a checkout
+    refuses, because the store cannot be proven untracked there."""
     env = os.environ.get("GATES_STORE")
     if env:
         return Path(env)
+    store = Path(".feature-fix-swarm/evidence.json")
     try:
-        probe = subprocess.run(["git", "rev-parse", "--git-common-dir"],
-                               capture_output=True, text=True, timeout=5)
-        if probe.returncode == 0:
-            common = Path(probe.stdout.strip())
-            # main checkout returns ".git" (relative) — parent is "." so the
-            # result equals the historic default; a linked worktree returns
-            # the ABSOLUTE main .git dir, which is the fix. Bare/odd layouts
-            # (name != .git) fall through to the historic default.
-            if common.name == ".git":
-                return common.parent / ".feature-fix-swarm" / "evidence.json"
-    except (OSError, subprocess.SubprocessError):
-        pass
-    return Path(".feature-fix-swarm/evidence.json")
+        probe = _store_git(".", "rev-parse", "--git-common-dir")
+        failure = os.fsdecode(probe.stderr).strip() if probe.returncode else ""
+    except (OSError, subprocess.SubprocessError) as exc:
+        probe, failure = None, str(exc)
+    if probe is None or probe.returncode:
+        cwd = Path.cwd()
+        if (os.environ.get("GIT_DIR") or os.environ.get("GIT_WORK_TREE")
+                or any(map(_is_checkout, (cwd, *cwd.parents)))):
+            _refuse_unproven_store(store, failure)
+        _refuse_tracked_store(store)
+        return store
+    common = Path(os.fsdecode(probe.stdout).rstrip("\n"))
+    # main checkout returns ".git" (relative) — parent is "." so the
+    # result equals the historic default; a linked worktree returns
+    # the ABSOLUTE main .git dir, which is the fix. Bare/odd layouts
+    # (name != .git) keep the historic cwd-relative default.
+    if common.name == ".git":
+        store = common.parent / store
+    _refuse_tracked_store(store)
+    return store
+
+
+def _store_git(root: str | Path, *args: str) -> subprocess.CompletedProcess[bytes]:
+    """git for the store: the checkout at `root`, not one named by the environment
+    or a bare directory the branch committed, and no program from its config."""
+    env = {key: value for key, value in os.environ.items()
+           if key not in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR")}
+    return subprocess.run(["git", "-c", "safe.bareRepository=explicit", "-c", "core.fsmonitor=false",
+                           "-C", str(root), *args], capture_output=True, timeout=30,
+                          env={**env, "GIT_NO_LAZY_FETCH": "1", "LC_ALL": "C"})
+
+
+def _refuse_unproven_store(store: Path, reason: object) -> None:
+    raise SystemExit(f"evidence store {store}: cannot prove it is not tracked by git ({str(reason)!r}); "
+                     "repair the checkout or set GATES_STORE")
+
+
+def _is_checkout(path: Path) -> bool:
+    return (path / ".git").is_file() or os.path.lexists(path / ".git" / "HEAD")
+
+
+def _refuse_tracked_store(store: Path) -> None:
+    """A committed store would let a branch plant grants or resolved findings.
+    Any checkout around the directory can own it, as a nested checkout has its
+    own index, so every enclosing checkout is asked. A symlink would lead to a
+    place nobody asked about."""
+    here = Path(os.path.realpath(store.parent.parent)) / store.parent.name
+    for root in filter(_is_checkout, (here, *here.parents)):
+        planted = _tracked_under(store, root, here.relative_to(root).parts)
+        if planted:
+            raise SystemExit(f"evidence store {store} is tracked by git {planted[:3]} in {root}; a branch may have "
+                             "planted it: inspect it, then remove it with git rm, or set GATES_STORE")
+    if here.is_symlink() or store.is_symlink():
+        raise SystemExit(f"evidence store {store} is reached through a symlink; inspect and remove it, "
+                         "or set GATES_STORE")
+
+
+def _tracked_under(store: Path, root: Path, place: tuple[str, ...]) -> list[str]:
+    """Entries of the index of `root` in the directory `place`. A name matches when
+    it folds to the same text (git's icase is ASCII-only, APFS folds Unicode) or is
+    the same object on disk. A project-scope install commits its manifest and
+    vendor/ there; nothing else may be tracked."""
+    try:
+        tracked = _store_git(root, "ls-files", "-z")
+    except (OSError, subprocess.SubprocessError) as exc:
+        _refuse_unproven_store(store, exc)
+    # a sparse index that git cannot expand is an incomplete list with exit 0
+    if tracked.returncode != 0 or b"error: " in tracked.stderr:
+        _refuse_unproven_store(store, os.fsdecode(tracked.stderr).strip())
+    size, matched, planted = len(place), {}, []
+
+    def same(parts: tuple[str, ...]) -> bool:
+        if parts not in matched:
+            matched[parts] = _same_name(root, parts, place[:len(parts)])
+        return matched[parts]
+
+    for path in filter(None, os.fsdecode(tracked.stdout).split("\0")):
+        parts = tuple(path.split("/"))
+        if len(parts) < size or not all(same(parts[:depth]) for depth in range(1, size + 1)):
+            continue
+        rest = parts[size:]
+        install = rest == ("install-manifest.json",) or (rest[:1] == ("vendor",) and len(rest) > 1)
+        if not install or parts[:size][-1:] != place[-1:]:
+            planted.append(path)
+    return planted
+
+
+def _same_name(root: Path, tracked: tuple[str, ...], place: tuple[str, ...]) -> bool:
+    if _fold(tracked[-1]) == _fold(place[-1]):
+        return True
+    try:
+        return os.path.samestat(os.lstat(root.joinpath(*tracked)), os.lstat(root.joinpath(*place)))
+    except OSError:
+        return False
+
+
+def _fold(name: str) -> str:
+    return unicodedata.normalize("NFKC", name).casefold()
 
 
 def _resolved_store_path() -> Path:
@@ -2765,12 +3210,7 @@ def _takeover_pause_locked(lock_fd: int) -> None:
     seam = os.environ.get("TAKEOVER_TEST_PAUSE_LOCKED")
     if not seam:
         return
-    st = os.fstat(lock_fd)
-    with open(os.path.join(seam, "held"), "w") as fh:
-        fh.write("%d:%d" % (st.st_dev, st.st_ino))
-    deadline = time.monotonic() + 30
-    while not os.path.exists(os.path.join(seam, "release")) and time.monotonic() < deadline:
-        time.sleep(0.05)
+    _publish_and_hold(seam, lock_fd)
 
 
 def _read_evidence_at(store_dir_fd: int) -> tuple[bytes, os.stat_result]:
@@ -3619,10 +4059,9 @@ def _main_checkout_root() -> Path | None:
     gate. Non-git cwd or any probe failure returns None (fail closed for the
     implicit steps — absent, never a fabricated resolution)."""
     try:
-        probe = subprocess.run(["git", "rev-parse", "--git-common-dir"],
-                               capture_output=True, text=True, timeout=5)
+        probe = _store_git(".", "rev-parse", "--git-common-dir")
         if probe.returncode == 0:
-            common = Path(probe.stdout.strip())
+            common = Path(os.fsdecode(probe.stdout).rstrip("\n"))
             if common.name == ".git":
                 return common.parent
     except (OSError, subprocess.SubprocessError):
@@ -3866,7 +4305,8 @@ def _parse_gate_timeout(raw: str) -> int | None:
 
 
 def _extract_flags(
-    args: list[str], names: set[str], num_positional: int = 0
+    args: list[str], names: set[str], num_positional: int = 0,
+    *, switches: set[str] | None = None
 ) -> tuple[list[str], dict[str, str]]:
     """Split `args` into (positionals, {flag: value}) for `--name value` pairs
     matching `names`, wherever they appear after the fixed positional prefix
@@ -3893,6 +4333,10 @@ def _extract_flags(
         i += 1
     while i < len(args):
         a = args[i]
+        if switches and a in switches:
+            values[a] = "true"
+            i += 1
+            continue
         if a in names:
             if i + 1 >= len(args):
                 raise ValueError(f"{a} requires a value")
@@ -3902,6 +4346,50 @@ def _extract_flags(
         positionals.append(a)
         i += 1
     return positionals, values
+
+
+def _exhaustion_contract(store: Path, loop: str, spec_id: str, used: int, maximum: int) -> str:
+    """Text printed and recorded when a review loop's budget is spent."""
+    findings = [f for f in _findings_ns(_load_store(store))
+                if not f.get("resolved") and f.get("spec") == spec_id]
+    follow_up = any(f.get("needs_requirement") for f in findings)
+    num = re.fullmatch(r"spec-([0-9]{3})", spec_id)
+    try:
+        top = Path(_git_out(None, "rev-parse", "--show-toplevel").strip())
+        specs = sorted(top.glob(f"specs/{num.group(1)}-*/spec.md")) if num else []
+        spec_path = str(specs[0].relative_to(top)) if specs else "(no spec file)"
+    except (OSError, subprocess.SubprocessError):
+        spec_path = "(no spec file)"
+    task = ("Write a follow-up spec that covers only the open findings above, with an "
+            "explicit Intent block." if follow_up else
+            f"Narrow {spec_id} so every open finding is either fixed inside the current "
+            f"Intent or recorded by the operator as issue or descope.")
+    lines = [f"BUDGET-EXHAUSTED {loop} {spec_id}: stopped. Operator picks one: "
+             "merge-with-issues | descope | stop. Recommended: "
+             f"{'follow-up spec' if follow_up else 'amend spec'} — run /prompt-master "
+             "(Codex: $prompt-master) with the prompt below.",
+             f"Spec: {spec_path}", f"Loop: {loop} {used}/{maximum}", "Open findings:"]
+    lines += [f"- [{f.get('severity') or '?'}] {f.get('file')}: {f.get('issue')}"
+              for f in findings] or ["- (none recorded)"]
+    return "\n".join([*lines, f"Task: {task}"])
+
+
+def _report_exhaustion(store: Path, loop: str, spec_id: str, maximum: int) -> None:
+    """Print and durably record the exhaustion contract for a `review:` loop.
+    Fail-soft: observability must not change the cap's exit code."""
+    if not loop.startswith("review:"):
+        return
+    try:
+        text = _exhaustion_contract(store, loop, spec_id, maximum, maximum)
+        with _StoreLock(store):
+            data = _load_store(store)
+            data.setdefault("_exhausted", {}).setdefault(spec_id, []).append(
+                {"loop": loop, "at": _now(), "text": text})
+            _save_store(store, data)
+    except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+        print(f"BUDGET-EXHAUSTED-UNRECORDED: {exc}", file=sys.stderr)
+        return
+    print(text)
 
 
 def main(argv: list[str]) -> int:
@@ -3918,6 +4406,17 @@ def main(argv: list[str]) -> int:
             return 2
         print(_resolved_store_path().parent)
         return 0
+    if cmd == "spec-id":
+        try:
+            spec_id, note = spec_identity()
+        except ValueError as exc:
+            print(f"usage: {exc}", file=sys.stderr)
+            return 2
+        if note:
+            print(note, file=sys.stderr)
+        if spec_id:
+            print(spec_id)
+        return 0 if spec_id else 1
     if cmd == "store-path":
         if args:
             print("usage: gates.py store-path", file=sys.stderr)
@@ -4346,6 +4845,8 @@ def main(argv: list[str]) -> int:
         print("NO-PROGRESS: failure signature already seen this run — stop and report"
               if stuck else "PROGRESS-OK")
         return 1 if stuck else 0
+    if cmd == "intent-check":
+        return _intent_check(args, store)
     if cmd == "loop-round":
         # loop-round <run_id> <loop_name> --max N   (increment-and-check)
         parser = argparse.ArgumentParser(prog="gates.py loop-round",
@@ -4357,6 +4858,8 @@ def main(argv: list[str]) -> int:
         parser.add_argument("--reset", action="store_true")
         parser.add_argument("--reset-all", action="store_true")
         parser.add_argument("--note-count", type=int)
+        parser.add_argument("--site", choices=("skill", "seam"))
+        parser.add_argument("--token")
         try:
             ns = parser.parse_args(args)
         except SystemExit:
@@ -4411,9 +4914,17 @@ def main(argv: list[str]) -> int:
             return 2
         try:
             if ns.durable:
-                n, sealed_max = loop_round_durable(store, ns.run_id, ns.loop_name, ns.max)
+                token = ns.token
+                if ns.site and not token:
+                    try:
+                        token = candidate_hash(None)
+                    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+                        print(f"LOOP-TOKEN-UNAVAILABLE: {exc}", file=sys.stderr)
+                n, sealed_max = loop_round_durable(store, ns.run_id, ns.loop_name, ns.max,
+                                                   token=token, site=ns.site)
                 if n > sealed_max:
                     print(f"LOOP-CAP: {ns.loop_name} round {n} exceeds sealed max {sealed_max} (run {ns.run_id})")
+                    _report_exhaustion(store, ns.loop_name, ns.run_id, sealed_max)
                     return 1
                 print(f"LOOP-ROUND: {ns.loop_name} round {n}/{sealed_max} (run {ns.run_id})")
                 return 0
@@ -4449,8 +4960,8 @@ def main(argv: list[str]) -> int:
             except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
                 print(f"LOOP-CAP-EVENT-UNRECORDED: {exc}", file=sys.stderr)
             print(f"LOOP-CAP: {ns.loop_name} round {n} exceeds max {ns.max} "
-                  f"(run {ns.run_id}) — quarantine this item and move on; "
-                  f"raise with --max or reset with --reset after operator review")
+                  f"(run {ns.run_id}) — quarantine this item and move on")
+            _report_exhaustion(store, ns.loop_name, ns.run_id, ns.max)
             return 1
         print(f"LOOP-ROUND: {ns.loop_name} round {n}/{ns.max} (run {ns.run_id})")
         return 0
@@ -4836,24 +5347,30 @@ def main(argv: list[str]) -> int:
                 # taken strictly by position (num_positional=2) so an
                 # adversary-controlled file/issue value that happens to equal
                 # a flag name can never hijack the parse.
+                security = "--security" in rest[2:]
+                needs_req = "--needs-requirement" in rest[2:]
+                rest = rest[:2] + [a for a in rest[2:]
+                                   if a not in ("--security", "--needs-requirement")]
                 try:
                     positionals, flags = _extract_flags(
-                        rest, {"--severity", "--run-id", "--source", "--plan"},
+                        rest, {"--severity", "--run-id", "--source", "--plan", "--spec"},
                         num_positional=2)
                 except ValueError as e:
                     print(f"usage: findings-queue add <file> <issue> "
                           f"[--severity S] [--run-id ID] [--source wall|review-gate] "
-                          f"[--plan PATH] ({e})", file=sys.stderr)
+                          f"[--plan PATH] [--spec ID] [--security] [--needs-requirement] ({e})", file=sys.stderr)
                     return 2
                 if len(positionals) != 2:
                     print("usage: findings-queue add <file> <issue> "
                           "[--severity S] [--run-id ID] [--source wall|review-gate] "
-                          "[--plan PATH]", file=sys.stderr)
+                          "[--plan PATH] [--spec ID] [--security] [--needs-requirement]", file=sys.stderr)
                     return 2
                 sig, deduped, reopened = findings_add(
                     store, positionals[0], positionals[1],
                     severity=flags.get("--severity"), run_id=flags.get("--run-id"),
-                    source=flags.get("--source"), plan=flags.get("--plan"))
+                    source=flags.get("--source"), plan=flags.get("--plan"),
+                    security=security, spec=flags.get("--spec"),
+                    needs_requirement=needs_req)
                 print(json.dumps({"sig": sig, "deduped": deduped, "reopened": reopened}))
                 return 0
             if sub == "list":
@@ -4875,26 +5392,33 @@ def main(argv: list[str]) -> int:
                 # by-position rationale as `add` above.
                 try:
                     positionals, flags = _extract_flags(
-                        rest, {"--disposition", "--reason"}, num_positional=1)
+                        rest, {"--disposition", "--reason", "--expected-record-sha256"},
+                        num_positional=1, switches={"--if-unresolved"})
                 except ValueError as e:
                     print(f"usage: findings-queue resolve <sig> "
-                          f"--disposition refute|fix|waive --reason <text> ({e})",
+                          f"--disposition refute|fix|waive|issue|descope --reason <text> "
+                          f"[--if-unresolved] [--expected-record-sha256 HEX] ({e})",
                           file=sys.stderr)
                     return 2
-                if not positionals:
+                if len(positionals) != 1:
                     print("usage: findings-queue resolve <sig> "
-                          "--disposition refute|fix|waive --reason <text>", file=sys.stderr)
+                          "--disposition refute|fix|waive|issue|descope --reason <text> "
+                          "[--if-unresolved] [--expected-record-sha256 HEX]", file=sys.stderr)
                     return 2
                 sig = positionals[0]
                 disposition = flags.get("--disposition")
                 reason = flags.get("--reason")
                 if not disposition or not reason:
                     print("usage: findings-queue resolve <sig> "
-                          "--disposition refute|fix|waive --reason <text>", file=sys.stderr)
+                          "--disposition refute|fix|waive|issue|descope --reason <text> "
+                          "[--if-unresolved] [--expected-record-sha256 HEX]", file=sys.stderr)
                     return 2
                 try:
                     resolved = findings_resolve(store, sig, disposition=disposition,
-                                                 reason=reason)
+                                                 reason=reason,
+                                                 if_unresolved="--if-unresolved" in flags,
+                                                 expected_record_sha256=flags.get(
+                                                     "--expected-record-sha256"))
                 except ValueError as e:
                     print(str(e), file=sys.stderr)
                     return 2
@@ -4904,7 +5428,18 @@ def main(argv: list[str]) -> int:
                     return 0
                 print(f"unknown signature: {sig}", file=sys.stderr)
                 return 1
-            print("usage: findings-queue add|list|resolve ...", file=sys.stderr)
+            if sub == "retag":
+                usage = "usage: findings-queue retag <sig> --in-spec"
+                if len(rest) != 2 or "--in-spec" not in rest:
+                    print(usage, file=sys.stderr)
+                    return 2
+                sig = next(a for a in rest if a != "--in-spec")
+                if findings_retag(store, sig):
+                    print(json.dumps({"sig": sig, "needs_requirement": False}))
+                    return 0
+                print(f"unknown signature: {sig}", file=sys.stderr)
+                return 1
+            print("usage: findings-queue add|list|resolve|retag ...", file=sys.stderr)
             return 2
         except SystemExit as e:
             print(str(e), file=sys.stderr)

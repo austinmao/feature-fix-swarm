@@ -46,6 +46,7 @@ setup() {
   export FFS_ADVERSARY_MODEL_PROBE=off
   export GATES_PY="$REPO/packages/feature-fix-swarm/lib/gates.py"
   export GSD_RUN_ID="fixture-plan-wall"
+  export GATES_STORE="$BATS_TEST_TMPDIR/gates.json"
   # Default the OTHER vendor's binary to a name that resolves nowhere, so a
   # claude-only test's rule-1 opposite-vendor ladder fails FAST (rc=127)
   # instead of shelling out to a REAL codex/claude CLI that may be installed
@@ -103,7 +104,7 @@ write_native_import() {
     --arg sha "$sha" --arg soc "$soc" --argjson findings "$findings" \
     '{schema:"ffs.native-plan-wall-import/v1",run_id:$run,phase:$phase,
       reviewer:{model:"gpt-5.6-sol",transport:"native-test"},
-      plans:[{path:".planning/phases/1-foo/PLAN.md",sha256:$sha,producer_model:"claude-fable-5-1",findings:$findings}],
+      plans:[{path:".planning/phases/1-foo/PLAN.md",sha256:$sha,producer_model:"claude-fable-5-2",findings:$findings}],
       socratic:{path:"specs/001-native/socratic.md",sha256:$soc}}' \
     > native-review.json
 }
@@ -164,7 +165,8 @@ write_native_import() {
   rm -rf .planning/run-state
   write_native_import '[]' native-import-soc
   printf 'changed evidence\n' >> specs/001-native/socratic.md
-  GSD_RUN_ID=native-import-soc PLAN_WALL_IMPORT_REPORT=native-review.json FFS_HOST=claude run bash "$LEVER" .planning/phases/1-foo
+  # allowances are keyed on the spec, not the run id: a fresh store is the sanctioned way to get another
+  GATES_STORE="$BATS_TEST_TMPDIR/gates-soc.json" GSD_RUN_ID=native-import-soc PLAN_WALL_IMPORT_REPORT=native-review.json FFS_HOST=claude run bash "$LEVER" .planning/phases/1-foo
   [ "$status" -eq 1 ]; [[ "$output" == *"Socratic provenance is missing or stale"* ]]
 }
 
@@ -203,8 +205,9 @@ write_native_import() {
   GSD_RUN_ID=native-import PLAN_WALL_IMPORT_REPORT=native-review.json FFS_HOST=claude run bash "$LEVER" .planning/phases/1-foo
   [ "$status" -eq 1 ]
   rm -rf .planning/run-state; write_native_import '[]' native-import-extra
-  jq '.plans += [{"path":"extra.md","sha256":"x","producer_model":"claude-fable-5-1","findings":[]}]' native-review.json > native-review.tmp && mv native-review.tmp native-review.json
-  GSD_RUN_ID=native-import-extra PLAN_WALL_IMPORT_REPORT=native-review.json FFS_HOST=claude run bash "$LEVER" .planning/phases/1-foo
+  jq '.plans += [{"path":"extra.md","sha256":"x","producer_model":"claude-fable-5-2","findings":[]}]' native-review.json > native-review.tmp && mv native-review.tmp native-review.json
+  # allowances are keyed on the spec, not the run id: a fresh store is the sanctioned way to get another
+  GATES_STORE="$BATS_TEST_TMPDIR/gates-extra.json" GSD_RUN_ID=native-import-extra PLAN_WALL_IMPORT_REPORT=native-review.json FFS_HOST=claude run bash "$LEVER" .planning/phases/1-foo
   [ "$status" -eq 1 ]
 }
 
@@ -214,7 +217,7 @@ write_native_import() {
   second_sha="$(shasum -a 256 .planning/phases/1-foo/02-PLAN.md | awk '{print $1}')"
   jq --arg sha "$second_sha" '
     .plans[0].findings = [{"severity":"HIGH","file":"one.py","claim":"one","line":1,"repro":null,"vendor":null,"confidence":0.9}]
-    | .plans += [{"findings":[{"severity":"MEDIUM","file":"two.py","claim":"two","line":1,"repro":null,"vendor":null,"confidence":0.9}],"producer_model":"claude-fable-5-1","sha256":$sha,"path":".planning/phases/1-foo/02-PLAN.md"}]
+    | .plans += [{"findings":[{"severity":"MEDIUM","file":"two.py","claim":"two","line":1,"repro":null,"vendor":null,"confidence":0.9}],"producer_model":"claude-fable-5-2","sha256":$sha,"path":".planning/phases/1-foo/02-PLAN.md"}]
     | .plans[0] = {"findings":.plans[0].findings,"producer_model":.plans[0].producer_model,"sha256":.plans[0].sha256,"path":.plans[0].path}
   ' native-review.json > native-review.tmp && mv native-review.tmp native-review.json
   MARKER="$BATS_TEST_TMPDIR/native-cli-ran"
@@ -256,6 +259,15 @@ EOF
   [[ "$output" == *"ADJUDICATED-PASS"* ]]
   [ ! -f "$MARKER" ]
   [ "$(jq -r '.verdict' "$record")" = "adjudicated-pass" ]
+}
+
+@test "F2: [needs-requirement] claim prefix is stripped and stored as the sticky flag" {
+  stub_claude_json '[{"severity":"HIGH","file":"a.py","claim":"[needs-requirement] add a retry policy","line":3}]'
+  FFS_HOST=claude ADVERSARY_BIN_CLAUDE=stub-claude run bash "$LEVER" .planning/phases/1-foo
+  rec="$(queue_list --source wall | jq -c '.[0]')"
+  [ "$(printf '%s' "$rec" | jq -r '.needs_requirement')" = "true" ]
+  [[ "$(printf '%s' "$rec" | jq -r '.issue')" != *"[needs-requirement]"* ]]
+  [[ "$(printf '%s' "$rec" | jq -r '.issue')" == "add a retry policy"* ]]
 }
 
 # ── PATH-002: MEDIUM/LOW-only findings advisory, exit 0 ─────────────────────
@@ -315,7 +327,7 @@ EOF
   record="$(record_for 1-foo plan)"
   [ "$(jq -r '.relation' "$record")" = "same-vendor" ]
   [ "$(jq -r '.reviewer_model' "$record")" = "claude-opus-5-5" ]
-  [ "$(jq -r '.planner_model' "$record")" = "claude-fable-5-1" ]
+  [ "$(jq -r '.planner_model' "$record")" = "claude-fable-5-2" ]
 }
 
 # ── PATH-014: fence case (planner opus) -> fable reviews; fable refusal -> sonnet ──
@@ -326,7 +338,7 @@ EOF
   FFS_HOST=claude ADVERSARY_BIN_CLAUDE=stub-claude run bash "$LEVER" .planning/phases/1-foo
   [ "$status" -eq 0 ]
   record="$(record_for 1-foo plan)"
-  [ "$(jq -r '.reviewer_model' "$record")" = "claude-fable-5-1" ]
+  [ "$(jq -r '.reviewer_model' "$record")" = "claude-fable-5-2" ]
   [ "$(jq -r '.relation' "$record")" = "same-vendor" ]
 }
 

@@ -7,7 +7,7 @@ description: "Create role-based instructions for a feature delivered by a spec, 
 
 ## Host dispatch contract
 
-- Codex: invoke skills as `$skill`; use Codex collaboration roles and GPT-5.6 model tiers.
+- Codex: invoke skills as `$skill`; use Codex collaboration roles and GPT-6 model tiers.
 - Claude: invoke skills as `/skill`; use Claude Agent/Skill tools and Claude model aliases.
 - A bare `/skill` in this shared source denotes the Claude form; Codex dispatches the same named skill as `$skill`.
 - Resolve `volume` to Codex Luna low / Claude Haiku, `execution` to Codex Terra medium / Claude Sonnet, and `judgment` to Codex Sol high / Claude Opus. (`frontier` — Codex Sol xhigh / Claude Fable — is the planning-only tier, not used by this verification fan-out.)

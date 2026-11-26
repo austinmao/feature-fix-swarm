@@ -1,14 +1,14 @@
 ---
 name: retro-triage
 description: "Render guarded, injection-safe maintainer briefs from validated FFS retro issue metadata."
-version: "1.0.0"
+version: "1.0.1"
 ---
 
 # /retro-triage
 
 ## Host dispatch contract
 
-- Codex: invoke skills as `$skill`; use Codex collaboration roles and GPT-5.6 model tiers.
+- Codex: invoke skills as `$skill`; use Codex collaboration roles and GPT-6 model tiers.
 - Claude: invoke skills as `/skill`; use Claude Agent/Skill tools and Claude model aliases.
 - A bare `/skill` in this shared source denotes the Claude form; Codex dispatches the same named skill as `$skill`.
 

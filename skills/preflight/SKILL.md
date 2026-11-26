@@ -1,14 +1,14 @@
 ---
 name: preflight
 description: "Prove every env var, secret, and service the run will need is present and reachable BEFORE starting an unattended or overnight run. Use at the planning stage — after decompose, before /feature-implement — so the run never stalls at 3am on a missing variable or dead endpoint."
-version: "2.0.0"
+version: "2.1.0"
 ---
 
 # /preflight
 
 ## Host dispatch contract
 
-- Codex: `$skill`, Codex collaboration roles, and GPT-5.6 tiers.
+- Codex: `$skill`, Codex collaboration roles, and GPT-6 tiers.
 - Claude: `/skill`, Agent/Skill tools, and Claude aliases.
 - A bare `/skill` in this shared source denotes the Claude form; Codex dispatches the same named skill as `$skill`.
 
@@ -89,6 +89,17 @@ never discovered at run time.
 3. **The loop verifies mechanically.** An unattended start requires
    `gates.py check-preflight "$RUN_ID"` → exit 0 (recorded PASS, < 24h old).
    No fresh pass, no unattended run.
+
+4. **Cloud runs only — doctor gate.** When the run will use
+   `/swarm --cloud` (or `FFS_CLOUD` is set), also run
+
+   ```bash
+   bash scripts/gsd/cloud-dispatch.sh doctor
+   ```
+
+   Any `FAIL` line (exit 3) is a blocker: fix it while the operator is
+   present, or drop `--cloud` for this run. `WARN` lines are advisory. Skip
+   this step entirely when the run is not cloud-bound.
 
 ### Harness audit (advisory)
 

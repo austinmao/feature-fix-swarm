@@ -53,7 +53,7 @@ EOF
 if [ -n "${FAKE_CODEX_ARGS_LOG:-}" ]; then
   printf '%s\n' "$*" >> "$FAKE_CODEX_ARGS_LOG"
 fi
-if [ "${FAKE_CODEX_MODEL_MODE:-}" = "sol_unavailable" ] && [[ "$*" == *gpt-6-sol* ]]; then
+if [ "${FAKE_CODEX_MODEL_MODE:-}" = "sol_unavailable" ] && [[ "$*" == *gpt-6.2-sol* ]]; then
   exit 69
 fi
 echo "echoing prompt: Tag each finding on its own line starting with CRITICAL:, HIGH:, or MEDIUM:."
@@ -138,7 +138,7 @@ JSON
   [ "$status" -eq 0 ]
   [[ "$output" == *"VERDICT: REVISE"* ]]
   [[ "$output" == *"2 finding(s) appended"* ]]
-  grep -q '^## Adversarial plan review (gpt-6-sol xhigh)$' "$HIGH"
+  grep -q '^## Adversarial plan review (gpt-6.2-sol xhigh)$' "$HIGH"
   grep -q '^HIGH: plan assumes withTenantRls' "$HIGH"
   # prompt-echo line (mid-line severity words) must NOT be captured
   refute_bre 'echoing prompt' "$HIGH"
@@ -194,9 +194,9 @@ EOF
     run bash "$SCRIPT" "$HIGH"
 
   [ "$status" -eq 0 ]
-  grep -q 'gpt-6-sol' "$ARGS_LOG"
-  grep -q 'gpt-5.6-terra' "$ARGS_LOG"
-  grep -q '^## Adversarial plan review (gpt-5.6-terra medium, model fallback)$' "$HIGH"
+  grep -q 'gpt-6.2-sol' "$ARGS_LOG"
+  grep -q 'gpt-6.1-terra' "$ARGS_LOG"
+  grep -q '^## Adversarial plan review (gpt-6.1-terra medium, model fallback)$' "$HIGH"
   [[ "$output" != *"DEGRADED"* ]]
 }
 
@@ -225,7 +225,7 @@ EOF
 input="\$(cat)"
 printf '%s\n' "\$*" >> "$ARGS_LOG"
 if [[ "\$input" == *FFS_ADVERSARY_MODEL_READY* ]]; then
-  if [[ "\$*" == *gpt-6-sol* ]]; then sleep 5; exit 69; fi
+  if [[ "\$*" == *gpt-6.2-sol* ]]; then sleep 5; exit 69; fi
   echo FFS_ADVERSARY_MODEL_READY
   exit 0
 fi
@@ -240,10 +240,10 @@ EOF
     run bash "$SCRIPT" "$HIGH"
 
   [ "$status" -eq 0 ]
-  grep -q 'gpt-6-sol' "$ARGS_LOG"
-  [ "$(grep -c 'gpt-6-sol' "$ARGS_LOG")" -eq 1 ]
-  [ "$(grep -c 'gpt-5.6-terra' "$ARGS_LOG")" -eq 2 ]
-  grep -q '^## Adversarial plan review (gpt-5.6-terra medium, model fallback)$' "$HIGH"
+  grep -q 'gpt-6.2-sol' "$ARGS_LOG"
+  [ "$(grep -c 'gpt-6.2-sol' "$ARGS_LOG")" -eq 1 ]
+  [ "$(grep -c 'gpt-6.1-terra' "$ARGS_LOG")" -eq 2 ]
+  grep -q '^## Adversarial plan review (gpt-6.1-terra medium, model fallback)$' "$HIGH"
 }
 
 @test "second run is idempotent" {
@@ -294,7 +294,7 @@ EOF
   [[ "$output" == *"adversary-host: orchestrator undetected — defaulting to claude host"* ]]
   # host defaulted to claude -> opposite adversary is codex (proves stdout
   # capture of detect_orchestrator_host wasn't polluted by the stderr note).
-  grep -q '^## Adversarial plan review (gpt-6-sol xhigh)$' "$HIGH"
+  grep -q '^## Adversarial plan review (gpt-6.2-sol xhigh)$' "$HIGH"
 }
 
 @test "second positional arg (PASSES=3) still yields exactly one section" {
@@ -373,7 +373,7 @@ EOF
   PATH="$NO_TIMEOUT_DIR" PLAN_ADVERSARY_BIN=fake-codex run bash "$SCRIPT" "$HIGH"
   [ "$status" -eq 0 ]
   [[ "$output" == *"VERDICT: REVISE"* ]]
-  grep -q '^## Adversarial plan review (gpt-6-sol xhigh)$' "$HIGH"
+  grep -q '^## Adversarial plan review (gpt-6.2-sol xhigh)$' "$HIGH"
 }
 
 @test "adversary_invoke stays bounded via python3 rung when neither timeout nor gtimeout is present (claude branch)" {
@@ -382,7 +382,7 @@ EOF
   # the python3 rung (fast stub completes normally, hung CLI would be reaped).
   NO_TIMEOUT_DIR="$BATS_TEST_TMPDIR/no-timeout-no-gtimeout-path"
   mkdir -p "$NO_TIMEOUT_DIR"
-  for bin in bash dirname grep cat wc head tail tr env python3; do
+  for bin in bash dirname grep cat wc head tail tr env python3 mktemp rm; do
     b="$(command -v "$bin" 2>/dev/null)"
     [ -n "$b" ] && ln -sf "$b" "$NO_TIMEOUT_DIR/$bin"
   done
@@ -483,4 +483,11 @@ JSON
   GSD_PROJECT=431 PLAN_ADVERSARY_BIN=fake-codex run bash "$ROOT/$SCRIPT" "$LOW"
   [ "$status" -eq 0 ]
   [[ "$output" == *"fable-fallback marker — low-blast skip disabled"* ]]
+}
+
+@test "F3 P2: hunt list targets scope beyond the goal and asks for the smallest remedy" {
+  grep -qF 'scope beyond the goal' "$SCRIPT"
+  grep -qF 'smallest remedy' "$SCRIPT"
+  refute_bre 'unstated assumptions' "$SCRIPT"
+  refute_bre 'missing or unfalsifiable acceptance criteria' "$SCRIPT"
 }

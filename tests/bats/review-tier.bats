@@ -137,15 +137,15 @@ touch_files() {
   [[ "$output" == full\ * ]]
 }
 
-@test "binary file in diff: counts toward file-count, 0 lines" {
+@test "binary file in diff: line count unknown, never light" {
   printf 'abc\000def' > bin.dat
   git add bin.dat
   git commit -q -m "add binary"
   printf 'xyz\000123456' > bin.dat
   run bash "$SCRIPT"
   [ "$status" -eq 0 ]
-  # 1 binary file changed, 0 lines contributed -> light
-  [[ "$output" == light\ * ]]
+  # numstat cannot count binary lines, so the tier is at least standard
+  [[ "$output" == standard\ * ]]
 }
 
 @test "REVIEW_TIER=light override -> light, reason contains override" {
@@ -272,4 +272,255 @@ EOF
   # shellcheck disable=SC1091
   . "$ROOT/scripts/gsd/security-surface.sh"
   [ "$KEYWORDS" = 'auth|rls|row[ _-]?level|payment|stripe|crypto|jwt|jwks|oauth|owasp|secret|credential|password' ]
+}
+
+@test "a .gitattributes binary mark cannot hide changed lines from the tier" {
+  printf '*.txt binary\n' > .gitattributes
+  git add .gitattributes && git commit -q -m attrs
+  modify_tracked f01.txt 300
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [[ "$output" != light* ]]
+}
+
+@test "moving a file out of a security path is not light" {
+  git config diff.renames true
+  mkdir -p lib/auth lib/util
+  seq 1 40 > lib/auth/session.py
+  git add lib && git commit -q -m "add auth file"
+  git mv lib/auth/session.py lib/util/session.py
+  run bash "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [[ "$output" == "full security-surface path" ]] || false
+}
+
+# put_index <path> — stage a path the filesystem may refuse (raw bytes).
+put_index() {
+  printf '100644 %s\t%s\0' "$(git hash-object -w f01.txt)" "$1" | git update-index -z --index-info
+}
+
+# use_utf8 — raw names must classify the same in a UTF-8 locale as in C.
+use_utf8() {
+  local l
+  for l in en_US.UTF-8 C.UTF-8 C.utf8; do
+    if locale -a | grep -qx "$l"; then export LC_ALL="$l"; return 0; fi
+  done
+  skip "no UTF-8 locale"
+}
+
+@test "a quoted file name still matches the migration and security patterns" {
+  local name
+  use_utf8
+  for name in "db/é.sql" $'db/\xff.sql' $'db/a"b.sql' $'db/a\nb.sql'; do
+    git reset -q
+    put_index "$name"
+    run bash "$SCRIPT"
+    [ "$status" -eq 0 ]
+    [[ "$output" == "full migration path" ]] || { echo "$name: $output"; false; }
+  done
+  for name in "é/auth/x.py" $'\xffauth/x.py' $'x\nauth/x.py'; do
+    git reset -q
+    put_index "$name"
+    run bash "$SCRIPT"
+    [[ "$output" == "full security-surface path" ]] || { echo "$name: $output"; false; }
+  done
+}
+
+@test "raw bytes in a file name do not hide that file or the next one" {
+  local i
+  use_utf8
+  put_index $'l\xc3'
+  put_index migrations/0001.py
+  run bash "$SCRIPT"
+  [[ "$output" == "full migration path" ]] || { echo "$output"; false; }
+  git reset -q
+  for i in $(seq 1 21); do put_index "$(printf "\\x$(printf %x $((0x81 + i)))")"; done
+  run bash "$SCRIPT"
+  [[ "$output" == "full large diff (>20 files)" ]] || { echo "$output"; false; }
+  git reset -q
+  git config core.quotePath false
+  put_index $'l\xc3'
+  seq 1 5000 > m.py && git add m.py
+  run bash "$SCRIPT"
+  [[ "$output" == standard\ * ]] || { echo "$output"; false; }
+}
+
+@test "a file name with a newline counts as one file and gains no match" {
+  put_index $'a\nb\nc\nd\ne'
+  run bash "$SCRIPT"
+  [[ "$output" == light\ * ]] || false
+  put_index $'row\nlevel.md'
+  run bash "$SCRIPT"
+  [[ "$output" == light\ * ]] || false
+  touch_files 3 && git add f01.txt f02.txt f03.txt
+  run bash "$SCRIPT"
+  [[ "$output" == standard\ * ]] || false
+}
+
+@test "a rename counts as one file" {
+  local i
+  git config diff.renames true
+  for i in $(seq 1 11); do
+    seq "$i" 60 > "$(printf 'old%02d.txt' "$i")"
+  done
+  git add . && git commit -q -m old
+  for i in $(seq 1 11); do
+    git mv "$(printf 'old%02d.txt' "$i")" "$(printf 'new%02d.txt' "$i")"
+  done
+  run bash "$SCRIPT"
+  [[ "$output" == standard\ * ]] || { echo "$output"; false; }
+}
+
+@test "--file mode sees a staged change" {
+  modify_tracked f01.txt 300
+  git add f01.txt
+  run bash "$SCRIPT" --file f01.txt
+  [ "$status" -eq 0 ]
+  [[ "$output" == standard\ * ]] || false
+  mkdir -p lib/auth && echo x > lib/auth/session.py && git add lib
+  run bash "$SCRIPT" --file lib/auth/session.py
+  [[ "$output" == "full security-surface path" ]] || false
+  # the work tree is what the reviewed diff compares with HEAD
+  modify_tracked f02.txt 300 && git add f02.txt && git show HEAD:f02.txt > f02.txt
+  run --separate-stderr bash "$SCRIPT" --file f02.txt
+  [ "$output" = "standard fail-safe" ]
+}
+
+@test "--file mode before the first commit is the fail-safe, not light" {
+  git init -q "$BATS_TEST_TMPDIR/empty" && cd "$BATS_TEST_TMPDIR/empty"
+  echo x > a.txt && git add a.txt
+  run --separate-stderr bash "$SCRIPT" --file a.txt
+  [ "$output" = "standard fail-safe" ]
+}
+
+# bump_submodule <path> — commit a gitlink, hide it with .gitmodules, then move it.
+bump_submodule() {
+  git update-index --add --cacheinfo "160000,$(git rev-parse HEAD),$1"
+  printf '[submodule "m"]\n\tpath = %s\n\turl = ./m\n\tignore = all\n' "$1" > .gitmodules
+  git add .gitmodules && git commit -q -m "add submodule"
+  git update-index --cacheinfo "160000,$(git rev-parse HEAD),$1"
+}
+
+@test "a .gitmodules ignore setting cannot hide a submodule bump from the tier" {
+  bump_submodule lib/auth
+  [ -z "$(git diff --staged --name-only)" ]  # git itself hides it
+  run bash "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [[ "$output" == "full security-surface path" ]] || false
+  git commit -q -m bump
+  run env REVIEW_TIER_BASE=HEAD~1 bash "$SCRIPT" --all
+  [[ "$output" == "full security-surface path" ]] || false
+}
+
+@test "diff.relative does not limit the tier to the current directory" {
+  mkdir -p lib/auth docs && echo x > lib/auth/session.py && echo d > docs/a.md && git add lib docs
+  git config diff.relative true
+  cd docs
+  run bash "$SCRIPT"
+  [[ "$output" == "full security-surface path" ]] || false
+}
+
+@test "diff.relative hides neither the staged change nor the line count" {
+  mkdir -p docs lib/auth && echo d > docs/a.md && echo one > lib/auth/s.py
+  git add docs lib && git commit -q -m base
+  git config diff.relative true
+  echo two > lib/auth/s.py && git add lib && echo one > lib/auth/s.py
+  cd docs
+  run bash "$SCRIPT"
+  [[ "$output" == "full security-surface path" ]] || false
+  git reset -q --hard
+  seq 1 300 >> ../f01.txt && git add ../f01.txt
+  run bash "$SCRIPT"
+  [[ "$output" == standard\ * ]] || false
+}
+
+@test "a hidden submodule bump counts in the staged probe and in the lines" {
+  bump_submodule vendor/m
+  modify_tracked f01.txt 198 && git add f01.txt
+  run bash "$SCRIPT"
+  [[ "$output" == standard\ * ]] || false
+  git reset -q f01.txt && git checkout -q f01.txt
+  modify_tracked f02.txt 300   # unstaged: only HEAD mode would see it
+  run bash "$SCRIPT"
+  [[ "$output" == light\ * ]] || false
+}
+
+@test "staged run bookkeeping alone does not keep the tier on the staged diff" {
+  local dir var
+  for dir in .planning spike-results; do
+    git reset -q --hard
+    mkdir -p "$dir" docs && echo n > "$dir/n.md" && echo d > docs/a.md && git add docs "$dir"
+    git commit -q -m docs -- docs
+    mkdir -p lib/auth && echo x > lib/auth/s.py && git add lib && git commit -q -m auth -- lib
+    echo y > lib/auth/s.py
+    [ "$(git diff --staged --name-only)" = "$dir/n.md" ]
+    for var in GIT_NONE GIT_LITERAL_PATHSPECS GIT_ICASE_PATHSPECS; do
+      run env "$var=1" bash "$SCRIPT"
+      [[ "$output" == "full security-surface path" ]] || { echo "$dir $var: $output"; false; }
+    done
+    (cd docs && bash "$SCRIPT") | grep -qx 'full security-surface path'
+    git reset -q --hard HEAD~2
+  done
+}
+
+@test "a staged change next to bookkeeping keeps the tier on the staged diff" {
+  mkdir -p .planning docs/.planning && echo n > .planning/n.md && echo n > docs/.planning/n.md
+  git add .planning docs
+  modify_tracked f01.txt 300   # unstaged: only HEAD mode would see it
+  run bash "$SCRIPT"
+  [[ "$output" == light\ * ]] || { echo "$output"; false; }
+}
+
+@test "--file is one exact path when the caller sets literal pathspecs, else a pattern" {
+  echo one > '[test].sql.txt' && echo one > t.sql.txt && echo one > ':!f01.txt' && git add -A && git commit -q -m names
+  echo two > '[test].sql.txt' && modify_tracked t.sql.txt 300
+  modify_tracked ':!f01.txt' 300
+  run env GIT_LITERAL_PATHSPECS=1 bash "$SCRIPT" --file '[test].sql.txt'
+  [[ "$output" == light\ * ]] || { echo "$output"; false; }
+  run env GIT_LITERAL_PATHSPECS=1 bash "$SCRIPT" --file ':!f01.txt'
+  [[ "$output" == standard\ moderate* ]] || { echo "$output"; false; }
+  # an older fence diffs the pattern, so without the variable the tier covers all it selects
+  run bash "$SCRIPT" --file '*.sql.txt'
+  [[ "$output" == standard\ moderate* ]] || { echo "$output"; false; }
+  mkdir -p lib/auth && echo x > lib/auth/s.py && git add lib
+  run bash "$SCRIPT" --file ':/lib/auth/s.py'
+  [[ "$output" == "full security-surface path" ]] || { echo "$output"; false; }
+}
+
+@test "inherited case folding does not widen the bookkeeping exclusion" {
+  mkdir -p .PLANNING && echo x > .PLANNING/auth.sql && git add -A
+  [ "$(git diff --staged --name-only)" = .PLANNING/auth.sql ] || skip "no case-distinct name"
+  run env GIT_ICASE_PATHSPECS=1 bash "$SCRIPT"
+  [[ "$output" == "full security-surface path" ]] || { echo "$output"; false; }
+}
+
+@test "a rename out of run bookkeeping counts every line it adds to the reviewed diff" {
+  mkdir -p .planning src && seq 1 300 > .planning/n.md && git add .planning && git commit -q -m plan
+  local base; base="$(git rev-parse HEAD)"
+  git mv .planning/n.md src/n.md
+  run bash "$SCRIPT"
+  [[ "$output" == standard\ moderate* ]] || { echo "staged: $output"; false; }
+  git commit -q -m move
+  run env REVIEW_TIER_BASE="$base" bash "$SCRIPT" --all
+  [[ "$output" == standard\ moderate* ]] || { echo "all: $output"; false; }
+  git reset -q --soft HEAD~1 && git reset -q && git add -N src/n.md
+  run bash "$SCRIPT"
+  [[ "$output" == standard\ moderate* ]] || { echo "HEAD: $output"; false; }
+}
+
+@test "a missing security-surface.sh is the fail-safe, and a cd function cannot hide it" {
+  mkdir -p lib/auth "$BATS_TEST_TMPDIR/bare" && echo x > lib/auth/s.py && git add lib
+  run bash -c 'cd() { builtin cd "$@" && echo noise; }; export -f cd; bash "$1"' _ "$SCRIPT"
+  [[ "$output" == "full security-surface path" ]] || { echo "$output"; false; }
+  cp "$SCRIPT" "$BATS_TEST_TMPDIR/bare/"
+  run --separate-stderr env KEYWORDS=none bash "$BATS_TEST_TMPDIR/bare/review-tier.sh"
+  [ "$status" -eq 0 ]
+  [ "$output" = "standard fail-safe" ]
+}
+
+@test "--file that selects no change is the fail-safe, not light" {
+  run --separate-stderr bash "$SCRIPT" --file missing.txt
+  [ "$output" = "standard fail-safe" ]
+  run bash "$SCRIPT" --file ""
+  [ "$status" -eq 2 ]
 }

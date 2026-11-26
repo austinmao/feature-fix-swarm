@@ -2109,6 +2109,47 @@ def _initialize_database(path: Path, root_fd: int) -> bool:
                 pass
 
 
+_ACCEPTANCE_POLICY_TABLES = frozenset({
+    "authority_acceptance_drafts", "authority_sealed_acceptances", "authority_acceptance_receipts",
+})
+_RUN_POLICY_TABLES = frozenset({
+    "authority_run_policy_budgets", "authority_policy_actions", "authority_policy_action_attempts",
+    "authority_policy_clock_reconciliations", "authority_policy_work_intervals",
+})
+_FRONTEND_POLICY_TABLES = frozenset({
+    "authority_frontend_policy_states", "authority_frontend_policy_candidates",
+    "authority_frontend_policy_checks", "authority_frontend_policy_findings",
+})
+
+
+def _authority_tables_present_tx(tx, expected: frozenset, corrupt_code: str) -> bool:
+    """False when none of the family exists, True when all exist, else refuse as corrupt."""
+    names = sorted(expected)
+    marks = ",".join("?" * len(names))
+    tables = {row[0] for row in tx.execute(
+        f"SELECT name FROM sqlite_master WHERE type='table' AND name IN ({marks})", names
+    )}
+    if not tables:
+        return False
+    if tables != expected:
+        _refuse(corrupt_code)
+    return True
+
+
+def _enumerate_decisions(source, gate: str | None):
+    with source.read_transaction() as tx:
+        _require_decision_expiry_schema(tx)
+        query, args = "SELECT * FROM authority_decisions", ()
+        if gate is not None:
+            query, args = query + " WHERE gate = ?", (gate,)
+        rows = tx.execute(query + " ORDER BY rowid", args).fetchall()
+    for row in rows:
+        yield Decision(row["id"], row["repository_id"], row["run_id"], row["gate"],
+                       bool(row["status"]), json.loads(row["input_hashes_json"]),
+                       json.loads(row["evidence_json"]), json.loads(row["provenance_json"]),
+                       json.loads(row["dependencies_json"]), row["expires_at"])
+
+
 class ControlStore:
     """A separate SQLite authority, available only at an explicit fixture path."""
     def __init__(self, path: Path, *, liveness_probe=None, fault_probe=None, policy_clock=None) -> None:
@@ -2805,22 +2846,7 @@ class ControlStore:
 
     @staticmethod
     def _acceptance_policy_tables_present_tx(tx) -> bool:
-        expected = {
-            "authority_acceptance_drafts", "authority_sealed_acceptances",
-            "authority_acceptance_receipts",
-        }
-        tables = {
-            row[0] for row in tx.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' "
-                "AND name IN ('authority_acceptance_drafts','authority_sealed_acceptances',"
-                "'authority_acceptance_receipts')"
-            )
-        }
-        if not tables:
-            return False
-        if tables != expected:
-            _refuse("ACCEPTANCE_POLICY_SCHEMA_CORRUPT")
-        return True
+        return _authority_tables_present_tx(tx, _ACCEPTANCE_POLICY_TABLES, "ACCEPTANCE_POLICY_SCHEMA_CORRUPT")
 
     @classmethod
     def _validate_acceptance_policy_schema_tx(cls, tx) -> None:
@@ -2864,21 +2890,7 @@ class ControlStore:
 
     @staticmethod
     def _run_policy_tables_present_tx(tx) -> bool:
-        expected = {
-            "authority_run_policy_budgets", "authority_policy_actions", "authority_policy_action_attempts",
-            "authority_policy_clock_reconciliations",
-            "authority_policy_work_intervals",
-        }
-        tables = {row[0] for row in tx.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name IN "
-            "('authority_run_policy_budgets','authority_policy_actions','authority_policy_action_attempts',"
-            "'authority_policy_clock_reconciliations','authority_policy_work_intervals')"
-        )}
-        if not tables:
-            return False
-        if tables != expected:
-            _refuse("RUN_POLICY_SCHEMA_CORRUPT")
-        return True
+        return _authority_tables_present_tx(tx, _RUN_POLICY_TABLES, "RUN_POLICY_SCHEMA_CORRUPT")
 
     @classmethod
     def _validate_run_policy_schema_tx(cls, tx) -> None:
@@ -2930,20 +2942,7 @@ class ControlStore:
 
     @staticmethod
     def _frontend_policy_tables_present_tx(tx) -> bool:
-        expected = {
-            "authority_frontend_policy_states", "authority_frontend_policy_candidates",
-            "authority_frontend_policy_checks", "authority_frontend_policy_findings",
-        }
-        tables = {row[0] for row in tx.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name IN "
-            "('authority_frontend_policy_states','authority_frontend_policy_candidates',"
-            "'authority_frontend_policy_checks','authority_frontend_policy_findings')"
-        )}
-        if not tables:
-            return False
-        if tables != expected:
-            _refuse("FRONTEND_POLICY_SCHEMA_CORRUPT")
-        return True
+        return _authority_tables_present_tx(tx, _FRONTEND_POLICY_TABLES, "FRONTEND_POLICY_SCHEMA_CORRUPT")
 
     def ensure_frontend_policy_schema(self) -> None:
         """Install E6 lifecycle rows in the existing ControlStore only."""
@@ -6285,19 +6284,7 @@ class ControlStore:
                             expires_at)
 
     def enumerate_decisions(self, *, gate: str | None = None):
-        with self.read_transaction() as tx:
-            _require_decision_expiry_schema(tx)
-            if gate is None:
-                rows = tx.execute("SELECT * FROM authority_decisions ORDER BY rowid").fetchall()
-            else:
-                rows = tx.execute(
-                    "SELECT * FROM authority_decisions WHERE gate = ? ORDER BY rowid", (gate,),
-                ).fetchall()
-        for row in rows:
-            yield Decision(row["id"], row["repository_id"], row["run_id"], row["gate"],
-                           bool(row["status"]), json.loads(row["input_hashes_json"]),
-                           json.loads(row["evidence_json"]), json.loads(row["provenance_json"]),
-                           json.loads(row["dependencies_json"]), row["expires_at"])
+        return _enumerate_decisions(self, gate)
 
     def project_gates(self, input_hashes: dict, *, run_id: str, repository_id: str) -> dict[str, bool]:
         with self.read_transaction() as tx:
@@ -8466,24 +8453,7 @@ class _ControlStoreView:
             yield {"id": row["id"], "event_type": row["event_type"], "payload": payload, "created_at": row["created_at"]}
 
     def enumerate_decisions(self, *, gate: str | None = None):
-        with self.read_transaction() as tx:
-            _require_decision_expiry_schema(tx)
-            if gate is None:
-                rows = tx.execute(
-                    "SELECT * FROM authority_decisions ORDER BY rowid"
-                ).fetchall()
-            else:
-                rows = tx.execute(
-                    "SELECT * FROM authority_decisions WHERE gate=? ORDER BY rowid",
-                    (gate,),
-                ).fetchall()
-        for row in rows:
-            yield Decision(
-                row["id"], row["repository_id"], row["run_id"], row["gate"],
-                bool(row["status"]), json.loads(row["input_hashes_json"]),
-                json.loads(row["evidence_json"]), json.loads(row["provenance_json"]),
-                json.loads(row["dependencies_json"]), row["expires_at"],
-            )
+        return _enumerate_decisions(self, gate)
 
     def project_gates(self, input_hashes: dict, *, run_id: str, repository_id: str):
         with self.read_transaction() as tx:

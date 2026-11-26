@@ -1,6 +1,6 @@
 ---
 name: goal-wrap
-version: "1.1.0"
+version: "1.1.1"
 description: Bundle current work into a self-contained autonomous-execution prompt with tracked done-when criteria, best-effort architecture grounding, and full autonomy by default (pass --gates to enable operator confirmation prompts).
 argument-hint: "[--gates] What should the next session accomplish?"
 allowed-tools:
@@ -16,7 +16,7 @@ allowed-tools:
 
 ## Host dispatch contract
 
-- Codex: `$skill`, Codex collaboration roles, and GPT-5.6 tiers.
+- Codex: `$skill`, Codex collaboration roles, and GPT-6 tiers.
 - Claude: `/skill`, Agent/Skill tools, and Claude aliases.
 - A bare `/skill` in this shared source denotes the Claude form; Codex dispatches the same named skill as `$skill`.
 

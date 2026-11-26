@@ -12,7 +12,7 @@ setup() {
 
 @test "tripped rungs are skipped centrally while preserving the final candidate" {
   store="$BATS_TEST_TMPDIR/evidence.json"
-  rung="codex:gpt-5.6-terra:medium"
+  rung="codex:gpt-6.1-terra:medium"
   for _ in $(seq 1 20); do
     GATES_STORE="$store" python3 "$ROOT/lib/gates.py" note-degraded rung-attempt --rung-id "$rung" --outcome fail >/dev/null
   done
@@ -25,11 +25,11 @@ printf '%s\n' "\$model" >> "$BATS_TEST_TMPDIR/models"
 printf 'OK\n' > "\$last"
 EOF
   chmod +x "$STUB_DIR/recording-codex"
-  run env GATES_STORE="$store" FFS_ADVERSARY_MODEL_PROBE=off ADVERSARY_BIN_CODEX=recording-codex PATH="$STUB_DIR:$PATH" bash -c '. "$1"; rungs="gpt-5.6-terra|medium
-gpt-5.6-luna|low"; adversary_invoke_model_ladder codex 10 gpt-5.6-sol high review 5 5 "$rungs"' _ "$LIB"
+  run env GATES_STORE="$store" FFS_ADVERSARY_MODEL_PROBE=off ADVERSARY_BIN_CODEX=recording-codex PATH="$STUB_DIR:$PATH" bash -c '. "$1"; rungs="gpt-6.1-terra|medium
+gpt-6-luna|low"; adversary_invoke_model_ladder codex 10 gpt-5.6-sol high review 5 5 "$rungs"' _ "$LIB"
   [ "$status" -eq 0 ]
-  [[ "$output" != *"SELECTED codex gpt-5.6-terra"* ]]
-  [[ "$output" == *"SELECTED codex gpt-5.6-luna"* ]]
+  [[ "$output" != *"SELECTED codex gpt-6.1-terra"* ]]
+  [[ "$output" == *"SELECTED codex gpt-6-luna"* ]]
 }
 
 @test "a failed exact-model invocation records no invocation row" {
@@ -43,7 +43,7 @@ gpt-5.6-luna|low"; adversary_invoke_model_ladder codex 10 gpt-5.6-sol high revie
   chmod +x "$STUB_DIR/failing-codex"
   run env GATES_STORE="$store" GSD_RUN_ID=spec-008 FFS_ADVERSARY_MODEL_PROBE=off \
     ADVERSARY_BIN_CODEX=failing-codex PATH="$STUB_DIR:$PATH" bash -c \
-    '. "$1"; adversary_invoke_typed_request codex claude 10 "{\"kind\":\"exact\",\"name\":\"gpt-5.6-terra\"}" review' _ "$LIB"
+    '. "$1"; adversary_invoke_typed_request codex claude 10 "{\"kind\":\"exact\",\"name\":\"gpt-6.1-terra\"}" review' _ "$LIB"
   [ "$status" -ne 0 ]
   run python3 - "$store" <<'PY'
 import json, sys, os
@@ -336,11 +336,11 @@ EOF
 
   run env FFS_ADVERSARY_MODEL_PROBE=off ADVERSARY_BIN_CODEX=ordered-codex \
     PATH="$STUB_DIR:$PATH" bash -c \
-    ". '$LIB'; adversary_invoke_model_ladder codex 10 gpt-5.6-sol xhigh review 5 5 \$'gpt-5.6-terra|medium\ngpt-5.6-luna|low'"
+    ". '$LIB'; adversary_invoke_model_ladder codex 10 gpt-5.6-sol xhigh review 5 5 \$'gpt-6.1-terra|medium\ngpt-6-luna|low'"
 
   [ "$status" -eq 0 ]
   [[ "$output" == *"VERDICT: PASS"* ]]
-  [[ "$output" == *"SELECTED codex gpt-5.6-luna"* ]]
+  [[ "$output" == *"SELECTED codex gpt-6-luna"* ]]
   tried="$(cat "$BATS_TEST_TMPDIR/tried.log")"
   # terra tried before luna; sol (the preferred/producer model) never tried —
   # ordered-rungs REPLACES the built-in ladder entirely.
@@ -349,10 +349,10 @@ EOF
   ! echo "$tried" | grep -q 'model="gpt-5.6-sol"'
 }
 
-@test "adversary_model_ladder: built-in sol fallback rung is gpt-6-sol xhigh for a non-sol preferred model" {
-  run bash -c ". '$LIB'; adversary_model_ladder codex gpt-5.6-terra medium"
+@test "adversary_model_ladder: built-in sol fallback rung is gpt-6.2-sol xhigh for a non-sol preferred model" {
+  run bash -c ". '$LIB'; adversary_model_ladder codex gpt-6.1-terra medium"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"gpt-6-sol|xhigh"* ]]
+  [[ "$output" == *"gpt-6.2-sol|xhigh"* ]]
   [[ "$output" != *"gpt-5.6-sol|high"* ]]
 }
 
@@ -388,12 +388,12 @@ EOF
   run env FFS_ADVERSARY_MODEL_PROBE=off ADVERSARY_BIN_CODEX=schema-codex \
     PATH="$STUB_DIR:$PATH" bash -c \
     ". '$LIB'; adversary_invoke_model_ladder codex 10 gpt-5.6-sol xhigh review 5 5 \
-      \$'gpt-5.6-terra|medium\ngpt-5.6-luna|low' /dev/null reject-non-array"
+      \$'gpt-6.1-terra|medium\ngpt-6-luna|low' /dev/null reject-non-array"
 
   [ "$status" -eq 0 ]
-  [ "$output" = "adversary-host: MODEL_FALLBACK — codex gpt-5.6-sol unavailable; selected gpt-5.6-luna
-adversary-host: SELECTED codex gpt-5.6-luna low
-[]" ] || [[ "$output" == *"SELECTED codex gpt-5.6-luna"* ]]
+  [ "$output" = "adversary-host: MODEL_FALLBACK — codex gpt-5.6-sol unavailable; selected gpt-6-luna
+adversary-host: SELECTED codex gpt-6-luna low
+[]" ] || [[ "$output" == *"SELECTED codex gpt-6-luna"* ]]
   [[ "$output" == *"[]"* ]]
 }
 
@@ -587,7 +587,7 @@ EOF
     ' _ "$LIB"
 
   [ "$status" -eq 0 ]
-  [[ "$output" == *"SELECTED codex gpt-5.6-terra"* ]]
+  [[ "$output" == *"SELECTED codex gpt-6.1-terra"* ]]
   [ "$(cat "$rec")" = "degraded=true" ]
 }
 
@@ -607,7 +607,7 @@ EOF
   ' _ "$LIB" 2>&1
 
   [ "$status" -eq 0 ]
-  [[ "$output" == *"TIER-DESCENT"*"requested=gpt-5.6-sol:high"*"answered=gpt-5.6-terra:medium"* ]]
+  [[ "$output" == *"TIER-DESCENT"*"requested=gpt-5.6-sol:high"*"answered=gpt-6.1-terra:medium"* ]]
   # in-process callers gate on the variable, not on parsing stdout
   [[ "$output" == *"flag=1"* ]]
 }
@@ -833,4 +833,29 @@ EOF
   [ "$status" -ne 0 ]
   [[ "$output" == *"review attempt exceeded"* ]]
   [[ "$output" != *"gpt-5.6-sol unavailable"* ]]
+}
+
+@test "Claude adversary runs outside the reviewed repo with user settings only" {
+  STUB_DIR="$BATS_TEST_TMPDIR/bin"
+  mkdir -p "$STUB_DIR"
+  cat > "$STUB_DIR/isolated-claude" <<EOF2
+#!/usr/bin/env bash
+printf '%s\n' "\$@" > "$BATS_TEST_TMPDIR/claude.args"
+pwd -P > "$BATS_TEST_TMPDIR/claude.cwd"
+cat >/dev/null
+echo 'VERDICT: PASS'
+EOF2
+  chmod +x "$STUB_DIR/isolated-claude"
+  repo="$BATS_TEST_TMPDIR/reviewed"
+  mkdir -p "$repo" && git -C "$repo" init -q
+  repo="$(cd "$repo" && pwd -P)"
+  ADVERSARY_BIN_CLAUDE=isolated-claude PATH="$STUB_DIR:$PATH" \
+    run bash -c "cd '$repo' && . '$LIB' && adversary_invoke claude 10 opus high review"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"VERDICT: PASS"* ]]
+  grep -Fqx -- '--setting-sources' "$BATS_TEST_TMPDIR/claude.args"
+  grep -Fqx -- 'user' "$BATS_TEST_TMPDIR/claude.args"
+  cwd="$(cat "$BATS_TEST_TMPDIR/claude.cwd")"
+  [[ "$cwd" != "$repo"* ]]
+  [ ! -e "$cwd" ]
 }

@@ -12,7 +12,7 @@ what FFS owns from what it installs, invokes, or merely integrates with.
 | Node.js and npm | Node 24+, npm 10+ | User-installed | Reproducible GSD package installation |
 | Python | 3.11+ | User-installed | Installer, gates, state, and verification tools |
 | Git | Current supported release | User-installed | Source control, common-directory locks, and worktrees |
-| Bash or zsh | macOS/Ubuntu system shell | User-installed | Runtime and hook scripts |
+| Bash or zsh | macOS/Ubuntu system shell. `scripts/gsd/reconcile.sh` needs bash 4+ (`mapfile`); stock macOS `/bin/bash` is 3.2 (see [Run healing](healing.md#known-issue-reconcile-relaunch-fails-on-bash-32)) | User-installed | Runtime and hook scripts |
 
 `package-lock.json` is committed and `npm ci` is the supported dependency
 install. The GSD version is repeated in package metadata and runtime checks so
@@ -31,15 +31,22 @@ packages. `/ffs-init` runs both as its Phase 0.
 
 | Component | Version policy | Ownership | Purpose |
 | --- | --- | --- | --- |
-| [GitHub CLI (`gh`)](https://cli.github.com) | Current release, authenticated | User-installed | Ship/finalize tail: `assert-merged.sh`, run watching, PR operations — no fallback |
-| [`jq`](https://jqlang.github.io/jq/) | Current release | User-installed | Canary gate and QA-coverage adversary JSON handling |
+| [GitHub CLI (`gh`)](https://cli.github.com) | Current release, authenticated | User-installed | Ship/finalize tail: `assert-merged.sh`, run watching, PR operations — no fallback. `ci-watch.sh` also uses it for CI status and reruns |
+| [`jq`](https://jqlang.github.io/jq/) | Current release | User-installed | Canary gate and QA-coverage adversary JSON handling; `reconcile.sh` lifecycle-record reads |
 | `shasum` or `sha256sum` | Either | System (perl / coreutils) | Evidence and cache-key hashing across the run scripts |
 | `ps` | POSIX | System | Host process detection in `adversary-host.sh` |
 
 Optional tools that degrade fail-soft when absent: `curl` (browser-proof
 readiness probe), `flock` (locking; shell fallback), `timeout`/`gtimeout`
-(bounded runs; python3 fallback), `tmux` (worktree-GC session check),
+(bounded runs; python3 fallback), `tmux` (`scripts/hooks/worktree-gc.sh` skips a worktree whose name matches a live tmux session),
 `npx`/vitest and `playwright` and `canary` (browser/JS QA lane).
+
+`crapper` and `dryer` (https://github.com/unclebob/crapper, https://github.com/unclebob/dryer)
+feed an advisory into review-gate Pass 3: new or grown cyclomatic complexity ≥ 10 and
+duplicate blocks (similarity ≥ 0.8) that touch the diff (`lib/clean_code_metrics.py`).
+FFS finds them on `PATH`, under `$FFS_UB_TOOLS_DIR/<tool>/<tool>`, or under
+`~/.local/share/ub-mode/<tool>/<tool>`. Their output goes to a temporary directory, never
+the reviewed tree. Absent tools print nothing; findings are at most MEDIUM and never block.
 
 ## Contributor and CI tooling
 
@@ -209,6 +216,15 @@ Installing both Claude Code and Codex enables cross-vendor adversarial review.
 With only one host, FFS can use a different model on the active vendor but
 marks the provenance degraded. A degraded fallback cannot satisfy a gate that
 requires an exact model or vendor.
+
+### Cloud delegation (experimental, opt-in)
+
+`/swarm --cloud` can offload tasks to Claude Code on the web or Codex cloud.
+It needs macOS with `/usr/bin/sandbox-exec`
+(result tests run under it), a logged-in Claude Code and/or Codex CLI with
+`ANTHROPIC_API_KEY` and `OPENAI_API_KEY` unset, an authenticated `gh`, and a
+GitHub `origin` remote. Nothing runs unless you pass the flag. See
+[Cloud delegation](cloud-delegation.md#quick-start).
 
 ### gbrain
 

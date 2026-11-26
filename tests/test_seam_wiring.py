@@ -248,7 +248,7 @@ PF_SKILL = ROOT / "skills" / "preflight" / "SKILL.md"
 # The "sha256:" prefix is the credential scanner's own sanctioned form for a
 # legitimate digest literal (env-registry.sh _WHITELIST) — keep it.
 REVIEW_GATE_SHA256 = (
-    "sha256:4978a39e685a4bb1dac472ce34650de5e85e6838ea0b6e1645fbaf0a7ac54ffe")
+    "sha256:f1dc1a0b60a5ab5438f927afe131cad88b1b41ec2a20c7a64d1ae18371e6762d")
 
 
 def test_int004a_review_gate_zero_seam_tokens():
@@ -278,6 +278,15 @@ def test_int004b_review_gate_content_pin():
     assert actual == REVIEW_GATE_SHA256, (
         f"review-gate-command.sh changed ({actual}); if intended, "
         f"re-pin REVIEW_GATE_SHA256 in this test in the same commit")
+
+
+def test_ship_seam_is_described_as_advisory():
+    """The installed ship workflow runs code_review_command after the PR exists
+    and continues whatever it returns, so the ship grant is checked by the skill."""
+    skill = FI_SKILL.read_text()
+    assert '`check-grant "$RUN_ID" --action ship:gsd`' in skill
+    assert "walled inside gsd's" not in skill
+    assert "REVISE verdict blocks it" not in REVIEW_GATE.read_text()
 
 
 def test_seam_presence_pins():

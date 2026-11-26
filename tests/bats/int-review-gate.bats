@@ -20,8 +20,8 @@ setup() {
   grep -F 'review-tier.sh' skills/review-gate/SKILL.md
 }
 
-@test "INT-001: --all tier call pins REVIEW_TIER_BASE=main on review-tier.sh --all" {
-  grep -F 'REVIEW_TIER_BASE=main scripts/gsd/review-tier.sh --all' skills/review-gate/SKILL.md
+@test "INT-001: --all tier call pins the diff's base on review-tier.sh --all" {
+  grep -F 'REVIEW_TIER_BASE="$DIFF_REF" "$FFS_T/scripts/gsd/review-tier.sh" --all' skills/review-gate/SKILL.md
 }
 
 @test "INT-001: LIGHT tier imperatively SKIPs Pass 2 and Pass 3" {
@@ -81,7 +81,7 @@ setup() {
 }
 
 @test "INT-001: review-gate retains the 1.9 contract after host-neutral bump" {
-  grep -F 'version: "1.12.0"' skills/review-gate/SKILL.md
+  grep -F 'version: "1.20.5"' skills/review-gate/SKILL.md
 }
 
 @test "spec 005: pass-1 finding format carries CAUSE/PROVENANCE/PROOF" {
@@ -106,10 +106,6 @@ setup() {
 
 @test "INT-004: findings-queue is invoked" {
   grep -F 'findings-queue' skills/review-gate/SKILL.md
-}
-
-@test "INT-004: GATES_PY resolution is a capability probe, not first-exists" {
-  grep -F 'findings-queue list >/dev/null 2>&1' skills/review-gate/SKILL.md
 }
 
 @test "INT-004: findings are recorded and resolved" {
@@ -147,4 +143,141 @@ setup() {
   [ -n "$output_line" ]
   [ "$merge_line" -lt "$add_line" ]
   [ "$add_line" -lt "$output_line" ]
+}
+
+# --- F3: reviewer prompts ask for the smallest change (grep snapshots) ---
+
+@test "F3 P4: Pass 1 asks for the smallest fix with a SCOPE field and drops doc-gap bullets" {
+  grep -qF -- '- Unhandled exceptions on paths the diff adds' skills/review-gate/SKILL.md
+  grep -qF -- '- Added code the goal does not need; existing code this diff makes deletable' skills/review-gate/SKILL.md
+  grep -qF 'smallest fix at the root cause' skills/review-gate/SKILL.md
+  grep -qF 'SCOPE: <in-spec | needs-new-requirement>' skills/review-gate/SKILL.md
+  [ "$(grep -c 'Documentation gaps' skills/review-gate/SKILL.md)" -eq 0 ]
+}
+
+@test "F3 P5: adversarial prompt asks for the smallest fix" {
+  grep -qF 'FIX (the smallest fix)' skills/review-gate/SKILL.md
+}
+
+@test "F3 P6: Pass 3 drops the missing-test bullets" {
+  [ "$(grep -c 'Missing integration tests for new API endpoints' skills/review-gate/SKILL.md)" -eq 0 ]
+  [ "$(grep -c 'Missing E2E tests for new user-facing flows' skills/review-gate/SKILL.md)" -eq 0 ]
+  [ "$(grep -c 'Edge cases not tested' skills/review-gate/SKILL.md)" -eq 0 ]
+}
+
+@test "F3 P8: HV_PROMPT bounds the diff by the spec Intent block" {
+  grep -qF "does not exceed the spec's Intent block" skills/review-gate/SKILL.md
+}
+
+@test "F2: findings-add maps SCOPE needs-new-requirement to --needs-requirement" {
+  grep -qF '${FINDING_NEEDS_REQ:+--needs-requirement}' skills/review-gate/SKILL.md
+}
+
+@test "F2: fail text replaces the unconditional fix rule" {
+  [ "$(grep -c 'Fix all CRITICAL and HIGH' skills/review-gate/SKILL.md)" -eq 0 ]
+  grep -qF 'CRITICAL and security findings: fix.' skills/review-gate/SKILL.md
+  grep -qF 'findings-queue retag <sig> --in-spec' skills/review-gate/SKILL.md
+}
+
+# ── findings-queue probe: run the fence itself ───────────────────────────────
+
+# Runs the probe fence in a scratch repo. $HOME/.claude/lib/feature-fix-swarm holds
+# both candidates: lib/gates.py (first) and gates.py (second).
+probe_setup() {
+  local skill="$PWD/skills/review-gate/SKILL.md"
+  PROBE="$BATS_TEST_TMPDIR/probe"; FFS_HOME="$PROBE/home/.claude/lib/feature-fix-swarm"
+  mkdir -p "$FFS_HOME/lib" "$PROBE/repo"
+  awk '/^### Findings queue: capability probe/ {s=1} s && /^```bash/ {f=1; next} f && /^```/ {exit} f' "$skill" > "$PROBE/fence.sh"
+  grep -q 'findings-queue list' "$PROBE/fence.sh"
+  printf 'echo "GATES_PY=$GATES_PY DEGRADED=$DEGRADED_PERSISTENCE SIGS=$RESOLVED_SIGS"\n' >> "$PROBE/fence.sh"
+  git -C "$PROBE/repo" init -q -b main
+  git -C "$PROBE/repo" -c user.email=t@example.com -c user.name=t commit -q --allow-empty -m base
+  printf 'import pathlib\npathlib.Path(__file__).with_suffix(".ran").touch()\nprint(%s)\n' \
+    "'[{\"sig\": \"cafe\", \"resolved\": true}]'" > "$FFS_HOME/gates.py"
+}
+
+probe_run() {
+  run env -u GATES_STORE -u FFS_T HOME="$PROBE/home" "$@" 'cd "$1" && . "$2"' _ "$PROBE/repo" "$PROBE/fence.sh"
+}
+
+probe_plant() {
+  cp lib/gates.py "$FFS_HOME/lib/gates.py"
+  mkdir "$PROBE/repo/.feature-fix-swarm"
+  echo '{}' > "$PROBE/repo/.feature-fix-swarm/evidence.json"
+  git -C "$PROBE/repo" add .feature-fix-swarm
+}
+
+@test "findings-queue probe: a refused evidence store ends the gate and tries no other runtime" {
+  probe_setup
+  probe_plant
+  probe_run bash -c
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"is tracked by git"* ]] || false
+  [[ "$output" == *"GATE: FAIL"* ]] || false
+  [ ! -e "$FFS_HOME/gates.ran" ]
+}
+
+@test "findings-queue probe: an unprovable evidence store ends the gate too" {
+  probe_setup
+  cp lib/gates.py "$FFS_HOME/lib/gates.py"
+  echo broken > "$PROBE/repo/.git/index"
+  probe_run bash -c
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"GATE: FAIL"* ]] || false
+  [[ "$output" != *"is tracked by git"* ]] || false
+  [ ! -e "$FFS_HOME/gates.ran" ]
+}
+
+@test "findings-queue probe: noclobber neither hides a refusal nor degrades a healthy store" {
+  probe_setup
+  probe_run bash -C -c
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"GATES_PY=$FFS_HOME/gates.py DEGRADED=0 SIGS=cafe"* ]] || false
+  probe_plant
+  probe_run bash -C -c
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"GATE: FAIL"* ]] || false
+}
+
+@test "findings-queue probe: no temporary file ends the gate" {
+  probe_setup
+  probe_plant
+  mkdir "$PROBE/bin"
+  printf '#!/bin/sh\nexit 1\n' > "$PROBE/bin/mktemp"
+  chmod +x "$PROBE/bin/mktemp"
+  PATH="$PROBE/bin:$PATH" probe_run bash -c
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"GATE: FAIL"* ]] || false
+  [ ! -e "$FFS_HOME/gates.ran" ]
+}
+
+@test "findings-queue probe: a runtime without the command falls back to the next one" {
+  probe_setup
+  printf 'import sys\nprint("unknown command: findings-queue", file=sys.stderr)\nsys.exit(2)\n' > "$FFS_HOME/lib/gates.py"
+  probe_run bash -c
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"GATES_PY=$FFS_HOME/gates.py DEGRADED=0 SIGS=cafe"* ]]
+}
+
+@test "findings-queue probe: no working runtime degrades and does not end the gate" {
+  probe_setup
+  printf 'import sys\nsys.exit(3)\n' | tee "$FFS_HOME/lib/gates.py" > "$FFS_HOME/gates.py"
+  probe_run bash -c
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"GATES_PY= DEGRADED=1 SIGS="* ]]
+}
+
+@test "findings-queue probe: the queue is listed once, by the runtime that wins" {
+  probe_setup
+  cat > "$FFS_HOME/lib/gates.py" <<'PY'
+import pathlib
+with pathlib.Path(__file__).with_suffix(".calls").open("a") as f:
+    f.write("x")
+print('[{"sig": "beef", "resolved": true}]')
+PY
+  probe_run bash -c
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"GATES_PY=$FFS_HOME/lib/gates.py DEGRADED=0 SIGS=beef"* ]] || false
+  [ "$(cat "$FFS_HOME/lib/gates.calls")" = x ]
+  [ ! -e "$FFS_HOME/gates.ran" ]
 }

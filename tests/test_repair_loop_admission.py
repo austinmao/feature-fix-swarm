@@ -139,10 +139,10 @@ def test_empty_diff_does_not_consume_review_allowance(case):
 @pytest.mark.parametrize("corruption", ["invalid-json", "loops-array", "cap-used-boolean"])
 def test_malformed_budget_store_refuses_before_reviewer(case, corruption):
     if corruption == "cap-used-boolean":
-        seeded = _gate(case, "loop-round", RUN, "review:diff", "--max", "2", "--durable")
+        seeded = _gate(case, "loop-round", RUN, "review:spec", "--max", "2", "--durable")
         assert seeded.returncode == 0, seeded.stderr
         data = json.loads(case.store.read_text())
-        data["_loops"][RUN]["review:diff#cap"]["used"] = True
+        data["_loops"][RUN]["review:spec#cap"]["used"] = True
         case.store.write_text(json.dumps(data))
     elif corruption == "loops-array":
         data = json.loads(case.store.read_text())
@@ -159,20 +159,20 @@ def test_malformed_budget_store_refuses_before_reviewer(case, corruption):
 
 
 def test_durable_cli_ceiling_cannot_be_raised_after_first_use(case):
-    assert _gate(case, "loop-round", RUN, "review:diff", "--max", "2", "--durable").returncode == 0
-    raised = _gate(case, "loop-round", RUN, "review:diff", "--max", "3", "--durable")
+    assert _gate(case, "loop-round", RUN, "review:spec", "--max", "2", "--durable").returncode == 0
+    raised = _gate(case, "loop-round", RUN, "review:spec", "--max", "3", "--durable")
     assert raised.returncode != 0
-    assert _gate(case, "loop-round", RUN, "review:diff", "--max", "2", "--durable").returncode == 0
-    assert _gate(case, "loop-round", RUN, "review:diff", "--max", "2", "--durable").returncode != 0
+    assert _gate(case, "loop-round", RUN, "review:spec", "--max", "2", "--durable").returncode == 0
+    assert _gate(case, "loop-round", RUN, "review:spec", "--max", "2", "--durable").returncode != 0
 
 
 @pytest.mark.parametrize("reset", ["named", "all"])
 def test_generic_cli_reset_cannot_replenish_exhausted_durable_allowance(case, reset):
     for _ in range(2):
-        assert _gate(case, "loop-round", RUN, "review:diff", "--max", "2", "--durable").returncode == 0
-    args = ["loop-round", RUN, "review:diff", "--reset"] if reset == "named" else ["loop-round", RUN, "--reset-all"]
+        assert _gate(case, "loop-round", RUN, "review:spec", "--max", "2", "--durable").returncode == 0
+    args = ["loop-round", RUN, "review:spec", "--reset"] if reset == "named" else ["loop-round", RUN, "--reset-all"]
     _gate(case, *args)
-    assert _gate(case, "loop-round", RUN, "review:diff", "--max", "2", "--durable").returncode != 0
+    assert _gate(case, "loop-round", RUN, "review:spec", "--max", "2", "--durable").returncode != 0
     assert _markers(case) == []
 
 
@@ -180,11 +180,11 @@ def test_concurrent_fresh_cli_processes_admit_at_most_two(case):
     barrier = threading.Barrier(3)
     def request():
         barrier.wait(timeout=10)
-        return _gate(case, "loop-round", RUN, "review:diff", "--max", "2", "--durable")
+        return _gate(case, "loop-round", RUN, "review:spec", "--max", "2", "--durable")
     with ThreadPoolExecutor(max_workers=3) as pool:
         results = list(pool.map(lambda _: request(), range(3)))
     assert sum(result.returncode == 0 for result in results) == 2
-    assert _gate(case, "loop-round", RUN, "review:diff", "--max", "2", "--durable").returncode != 0
+    assert _gate(case, "loop-round", RUN, "review:spec", "--max", "2", "--durable").returncode != 0
 
 
 def test_unrelated_legacy_convergence_reset_remains_compatible(case):

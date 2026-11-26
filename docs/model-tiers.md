@@ -23,17 +23,17 @@ better than self-review (F1 23.8% vs 24.6%) — statistically indistinguishable
 
 ## The approach: four workload tiers
 
-| Request | Claude resolution | Codex resolution | Default effort | Runs |
+| Request | Claude resolution | Codex resolution | Codex effort | Runs |
 |---|---|---|---|---|
-| **frontier** | `claude-fable-5-1` | `gpt-6-astra` | xhigh | Plan checking and explicit escalation — the single low-volume, highest-leverage seat |
-| **judgment** | `claude-opus-5-5` | `gpt-6-sol` | xhigh | Planning, debugging, verification, code/security review |
-| **execution** | `claude-sonnet-5-5` | `gpt-5.6-terra` | medium | Thin orchestration, implementation, research and research synthesis, integration, Nyquist work |
-| **volume** | `claude-haiku-5-5` | `gpt-5.6-luna` | low | Status collection and other mechanical passes — bounded-context inputs only |
+| **frontier** | `claude-fable-5-2` | `gpt-6.2-astra` | xhigh | Plan checking and explicit escalation — the single low-volume, highest-leverage seat |
+| **judgment** | `claude-opus-5-5` | `gpt-6.2-sol` | xhigh | Planning, debugging, verification, code/security review |
+| **execution** | `claude-sonnet-5-5` | `gpt-6.1-terra` | medium | Thin orchestration, implementation, research and research synthesis, integration, Nyquist work |
+| **volume** | `claude-haiku-5-5` | `gpt-6-luna` | low | Status collection and other mechanical passes — bounded-context inputs only |
 
-Defaults are declared in `templates/model-requests.json`. A request is either
+Defaults are declared in `templates/model-requests.json`. The effort column applies to Codex only: a Claude tier request carries no effort (`lib/model_requests.py` returns `null`), and the base gsd config sets Claude effort per role under `effort.agent_overrides`. A request is either
 `{"kind":"tier","name":"frontier|judgment|execution|volume"}` or
 `{"kind":"exact","id":"…"}`. Raw vendor IDs outside an exact request
-fail validation. Exact requests never silently substitute another model;
+fail validation. An exact request runs at `high` effort on Codex and carries no effort on Claude. Exact requests never silently substitute another model;
 optional fallback is available only for tier requests and records degraded
 adversary provenance. FFS infers the supported CLI from the exact ID (`gpt-*`
 and `oN*` use Codex; `claude-*` uses Claude); any other vendor fails before a
@@ -47,7 +47,7 @@ most expensive tier. A role only reaches frontier through an explicit pin
 
 Read the assignments as the producer/reviewer rule in action: the planner
 runs on judgment (Opus 5.5 — Anthropic's guidance is that most workloads start
-there) while its plan checker runs on frontier (Fable 5.1) and the plan wall
+there) while its plan checker runs on frontier (Fable 5.2) and the plan wall
 adds a further distinct reviewer (below); executors run on execution while
 their verification and security reviewers run on judgment. Never use the same
 resolved model on both sides of a check.
@@ -63,15 +63,18 @@ from what each side actually resolved to — not from the tier names. Historical
 frontier and judgment could collapse onto the same Codex model (both resolved
 to `gpt-5.6-sol`, distinguished only by effort); the gpt-6-astra/gpt-6-sol
 repin gives them distinct models again, but the `relation` field still exists
-for the day a future repin re-collapses two tiers onto one model.
+for the day a future repin re-collapses two tiers onto one model. The
+2026-11-19 refresh keeps them distinct on `gpt-6.2-astra` and `gpt-6.2-sol`.
 
 ## The plan wall
 
 Every phase's plan (`*-PLAN.md` / `PLAN.md`) clears an adversarial review
 before its phase can execute — `scripts/gsd/plan-wall.sh`. It always runs (no
 blast-radius tiering), selects its reviewer via the diversity-invariant
-algorithm above, and blocks on unresolved HIGH/CRITICAL findings
-(`findings-queue`, `--source wall`). An unchanged plan whose findings are all
+algorithm above, and runs one round. An unresolved CRITICAL finding
+blocks and buys one repair round; HIGH-only findings pass as `PASS-RESIDUAL`,
+stay open in `findings-queue` (`--source wall`) and are checked again at the
+executed-diff review. An unchanged plan whose findings are all
 resolved passes without a new dispatch (`adjudicated-pass`); a changed plan
 re-dispatches. Reviewer exhaustion is `WALL-UNREVIEWED` — blocking, not
 advisory.
@@ -89,14 +92,14 @@ phase flow.
 
 This is **enforced by code**, not convention.
 
-`scripts/gsd/adversary-host.sh:36-50` detects which vendor is orchestrating
-the session (`detect_orchestrator_host()`), then dispatches the adversarial
-review to the *other* vendor. Claude orchestrating means the Codex CLI
-reviews; Codex orchestrating means Claude reviews. The dispatch happens in
-`adversary_invoke_with_fallback()` (:236+).
+`scripts/gsd/adversary-host.sh` detects which vendor is orchestrating
+the session (`detect_orchestrator_host()`; `FFS_HOST=claude|codex` overrides),
+then dispatches the adversarial review to the *other* vendor. Claude
+orchestrating means the Codex CLI reviews; Codex orchestrating means Claude
+reviews. The dispatch happens in `adversary_invoke_with_fallback()`.
 
 When cross-vendor isn't possible, it falls back down a quality-descending
-ladder within the available vendor (`adversary-host.sh:89-102`):
+ladder within the available vendor (`adversary_model_ladder()`):
 
 - Claude side: `opus → sonnet → haiku`
 - Codex side: `sol → terra → luna`
@@ -118,10 +121,10 @@ an untyped model request:
 
 | Claude | Codex | Effort |
 |---|---|---|
-| fable | `gpt-6-astra` | `xhigh` |
-| opus | `gpt-6-sol` | `xhigh` |
-| sonnet | `gpt-5.6-terra` | `medium` |
-| haiku | `gpt-5.6-luna` | `low` |
+| fable | `gpt-6.2-astra` | `xhigh` |
+| opus | `gpt-6.2-sol` | `xhigh` |
+| sonnet | `gpt-6.1-terra` | `medium` |
+| haiku | `gpt-6-luna` | `low` |
 
 fable and opus resolve to distinct Codex models (Astra and Sol, respectively)
 via `codex_equiv_model`; `codex_equiv_effort` carries their effort (`*fable*` →
@@ -131,10 +134,21 @@ expensive Claude model. An explicit exact Fable request is not this
 compatibility mapping: it never falls back and its provenance gate cannot be
 satisfied by Sol or Opus.
 
+Older native Codex ids (`gpt-6-astra`, `gpt-6-sol`, `gpt-5.6-terra`,
+`gpt-5.6-luna`, `gpt-5.6-sol`) and `claude-fable-5-1` stay valid. They are not
+tier aliases: `codex_equiv_model` and `codex_equiv_effort` in
+`model-equivalents.sh` do not map them, and an exact request
+(`{"kind":"exact","id":"…"}`, for example through `GSD_MODEL_REQUEST`) is
+served exactly as pinned and is never rewritten to a current tier model.
+Config pins of `claude-fable-5-1` are touched only by the two legacy Claude
+levers below: `model-fallback.sh` demotes it only when that id itself is
+unavailable, and the security fence maps it to `claude-opus-5-5` on
+security-touching specs.
+
 **`GSD_LEAD_MODEL=fable` is unchanged and deliberate.** It keeps its exact
-`claude-fable-5-1` request semantics, including host-pinning and fail-closed
+`claude-fable-5-2` request semantics, including host-pinning and fail-closed
 guards — an operator naming fable wants Fable, and a tier conversion would
-silently substitute `gpt-6-astra@xhigh` on a Codex host. The tier system adds
+silently substitute `gpt-6.2-astra@xhigh` on a Codex host. The tier system adds
 `{"kind":"tier","name":"frontier"}` as the portable spelling alongside it,
 not a replacement for it.
 
@@ -144,19 +158,19 @@ not a replacement for it.
 It does not apply to a typed exact Fable request, whose contract is fail
 closed.
 
-**Trigger** — a probe finds fable unavailable (`:136`). Probe results cache
+**Trigger** — the probe of `claude-fable-5-2` finds it unavailable. Probe results cache
 for 24h in `$GSD_FALLBACK_CACHE` (default `~/.cache/gsd-model-probe`), bounded
 by `GSD_MODEL_PROBE_TIMEOUT` (default 120s).
 
-**Substitution** — `fable → opus` (`:11`). It rewrites both the short alias
-form (`"fable"`) and the full id form (`"claude-fable-5-1"`), so it works
+**Substitution** — `fable → opus`. It rewrites both the short alias
+form (`"fable"`) and the full id form (`"claude-fable-5-2"`; `"claude-fable-5-1"` and bare `"claude-fable-5"` remain legacy forms), so it works
 whichever way your config pins models.
 
 **Marker** — every rewrite is recorded to `.planning/fable-fallback.json`
-(`:53`) as `{"mode": "codex-sol"|"opus-only", "paths": {<json.path>: <original>}}`.
+as `{"mode": "codex-sol"|"opus-only", "paths": {<json.path>: <original>}}`.
 
 **Restore** — when fable returns, only the exact JSON paths this lever
-rewrote are restored (`:112-124`). An opus pin you set deliberately is never
+rewrote are restored. An opus pin you set deliberately is never
 flipped back to fable, because it was never in the marker.
 
 ## The security fence
@@ -164,10 +178,10 @@ flipped back to fable, because it was never in the marker.
 Independent of availability, `scripts/gsd/security-model-fence.sh` forces
 planning off fable when the spec is security-touching.
 
-- **Trigger**: security keywords in the spec (`:51`)
-- **Affects**: `gsd-planner` and `gsd-plan-checker` only (`:7, :61`)
-- **Change**: `fable → opus` (`:61`); the full-ID spelling `claude-fable-5-1 → claude-opus-5-5` is fenced too, and the legacy `claude-fable-5 → claude-opus-5` pair still is
-- **Untouched**: executor and verifier (`:9`)
+- **Trigger**: security keywords in the planning docs or the spec files passed to it
+- **Affects**: `gsd-planner` and `gsd-plan-checker` only
+- **Change**: `fable → opus`; the full-ID spellings `claude-fable-5-2 → claude-opus-5-5` and `claude-fable-5-1 → claude-opus-5-5` are fenced too, and the legacy `claude-fable-5 → claude-opus-5` pair still is
+- **Untouched**: executor and verifier
 - **Kill-switch**: `SECURITY_MODEL_FENCE=off` disables the demotion entirely
 
 The reasoning is cost-asymmetric, not capability-based. Fable handles
@@ -183,9 +197,9 @@ producer≠reviewer rule above.
 
 **Cheap tiers can be wrong.** Haiku on a mechanical task is the right call
 until the task turns out not to be mechanical. The escalation path is
-explicit: fail once, retry the same tier with the failure report appended;
-fail twice, go one tier up carrying *both* reports; never retry a third time
-on the same tier.
+explicit: fail once, retry the same tier with a tighter prompt;
+fail twice, go one tier up carrying the prior failure evidence; if the top
+tier fails, stop.
 
 **The fence over-spends on purpose.** Some security-keyword matches are
 false positives and will route a trivial plan to opus. Accepted: a wasted
@@ -220,7 +234,7 @@ and plan wall (`PLAN_WALL=off`, waiver-recorded).
 One rule to preserve when you edit: **every sub-agent spawn carries an
 explicit `model` pin.** Relying on inherit is a bug — an unpinned build agent
 under a premium orchestrator silently runs at premium cost. The
-`delegation-enforcer.sh` PreToolUse hook auto-pins spawns that omit `model`,
+`delegation-enforcer.sh` PreToolUse hook, when registered on `Agent|Task`, auto-pins spawns that omit `model`,
 reading from `model_overrides`. Kill-switch: `DELEGATION_ENFORCER=off`.
 
 ## Related

@@ -1,6 +1,7 @@
 #!/usr/bin/env bats
 
 setup() {
+  unset GSD_PROJECT
   ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
   SCRIPT="$ROOT/scripts/gsd/review-gate-command.sh"
   STUB_DIR="$BATS_TEST_TMPDIR/bin"
@@ -39,7 +40,7 @@ EOF
   [[ "$output" == *'"verdict":"APPROVED"'* ]]
   [ -f "$BATS_TEST_TMPDIR/codex.args" ]
   [ ! -f "$BATS_TEST_TMPDIR/claude.args" ]
-  grep -F 'model="gpt-6-sol"' "$BATS_TEST_TMPDIR/codex.args"
+  grep -F 'model="gpt-6.2-sol"' "$BATS_TEST_TMPDIR/codex.args"
   grep -F 'model_reasoning_effort="xhigh"' "$BATS_TEST_TMPDIR/codex.args"
 }
 
@@ -184,24 +185,6 @@ EOF
   [[ "$output" == *'both review hosts unavailable'* ]]
 }
 
-@test "scope-drift advisory stays on stderr — stdout remains pure JSON verdict" {
-  mkdir -p "$CWD/.planning/phases/01-x"
-  cat > "$CWD/.planning/phases/01-x/01-01-PLAN.md" <<'EOF'
----
-files_modified:
-  - a
-goal: stdout purity
----
-EOF
-  run env HOME="$BATS_TEST_TMPDIR" FFS_HOST=claude GSD_RUN_ID=spec-000 \
-    ADVERSARY_BIN_CODEX=fake-codex ADVERSARY_BIN_CLAUDE=fake-claude \
-    bash -c "cd '$CWD' && printf 'diff --git a/a b/a\n' | bash '$SCRIPT' 2>/dev/null"
-  [ "$status" -eq 0 ]
-  # stdout alone must be exactly the JSON verdict — parseable, no drift lines
-  echo "$output" | python3 -m json.tool >/dev/null
-  [[ "$output" == *'"verdict":"APPROVED"'* ]]
-}
-
 @test "wall policy (c): WALL-RESIDUALS.md feeds the reviewer prompt as review focus" {
   # the prompt travels via STDIN to the reviewer CLI — capture it
   cat > "$STUB_DIR/focus-codex" <<EOF
@@ -265,14 +248,14 @@ EOF
   python3 "$HOME/.claude/lib/feature-fix-swarm/gates.py" grant spec-000 \
     --action ship:gsd --reason test >/dev/null
   ADD_OUT="$(python3 "$HOME/.claude/lib/feature-fix-swarm/gates.py" findings-queue add \
-    lib/foo.py "idempotency key missing" --severity HIGH --source wall \
+    lib/foo.py "clé idempotente manquante ☃" --severity HIGH --source wall \
     --plan 01-01-PLAN.md)"
   SIG="$(printf '%s' "$ADD_OUT" | python3 -c 'import json,sys; print(json.load(sys.stdin)["sig"])')"
   SIG12="${SIG:0:12}"
   mkdir -p "$CWD/.planning/phases/01-degradation"
   cat > "$CWD/.planning/phases/01-degradation/WALL-RESIDUALS.md" <<EOF
 # Wall residuals — 01-degradation
-- $SIG12 HIGH lib/foo.py — idempotency key missing (plan: 01-01-PLAN.md)
+- $SIG12 HIGH lib/foo.py — clé idempotente manquante ☃ (plan: 01-01-PLAN.md)
 EOF
   run env HOME="$HOME" GATES_STORE="$GATES_STORE" FFS_HOST=claude GSD_RUN_ID=spec-000 \
     ADVERSARY_BIN_CODEX=fake-codex ADVERSARY_BIN_CLAUDE=fake-claude \
@@ -285,6 +268,148 @@ EOF
   ALL="$(python3 "$HOME/.claude/lib/feature-fix-swarm/gates.py" findings-queue list --source wall)"
   [[ "$ALL" == *"$SIG"* ]]
   [[ "$ALL" == *'"disposition": "fix"'* || "$ALL" == *'"disposition":"fix"'* ]]
+}
+
+@test "wall policy (c): residual already resolved by an operator is never overwritten" {
+  GP="$HOME/.claude/lib/feature-fix-swarm/gates.py"
+  ADD_OUT="$(python3 "$GP" findings-queue add lib/foo.py "idempotency key missing" \
+    --severity HIGH --source wall --plan 01-01-PLAN.md)"
+  SIG="$(printf '%s' "$ADD_OUT" | python3 -c 'import json,sys; print(json.load(sys.stdin)["sig"])')"
+  python3 "$GP" findings-queue resolve "$SIG" --disposition refute --reason "operator adjudication" >/dev/null
+  mkdir -p "$CWD/.planning/phases/01-degradation"
+  echo "- ${SIG:0:12} HIGH lib/foo.py — idempotency key missing (plan: 01-01-PLAN.md)" \
+    > "$CWD/.planning/phases/01-degradation/WALL-RESIDUALS.md"
+  run env HOME="$HOME" GATES_STORE="$GATES_STORE" FFS_HOST=claude GSD_RUN_ID=spec-000 \
+    ADVERSARY_BIN_CODEX=fake-codex ADVERSARY_BIN_CLAUDE=fake-claude \
+    bash -c "cd '$CWD' && printf 'diff --git a/a b/a\n' | bash '$SCRIPT'"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'"verdict":"APPROVED"'* ]]
+  python3 - "$GATES_STORE" "$SIG" <<'PY'
+import json,sys
+row=next(r for r in json.load(open(sys.argv[1]))["findings"] if r["sig"]==sys.argv[2])
+assert row["disposition"]=="refute" and row["reason"]=="operator adjudication", row
+assert not row.get("history"), row
+PY
+}
+
+@test "wall policy (c): residual record changed between read and resolve is not auto-closed" {
+  GP="$HOME/.claude/lib/feature-fix-swarm/gates.py"
+  REAL_PY="$(command -v python3)"
+  ADD_OUT="$(python3 "$GP" findings-queue add lib/foo.py "idempotency key missing" \
+    --severity HIGH --source wall --plan 01-01-PLAN.md)"
+  SIG="$(printf '%s' "$ADD_OUT" | python3 -c 'import json,sys; print(json.load(sys.stdin)["sig"])')"
+  mkdir -p "$CWD/.planning/phases/01-degradation"
+  echo "- ${SIG:0:12} HIGH lib/foo.py — idempotency key missing (plan: 01-01-PLAN.md)" \
+    > "$CWD/.planning/phases/01-degradation/WALL-RESIDUALS.md"
+  # python3 shim: just before the script's resolve call, another actor refutes
+  # then reopens the finding (still unresolved, record content changed).
+  cat > "$STUB_DIR/python3" <<EOF
+#!/usr/bin/env bash
+case " \$* " in
+  *" findings-queue resolve "*)
+    if [ ! -f "$BATS_TEST_TMPDIR/raced" ]; then
+      : > "$BATS_TEST_TMPDIR/raced"
+      "$REAL_PY" "$GP" findings-queue resolve "$SIG" --disposition refute --reason "raced adjudication" >/dev/null
+      "$REAL_PY" "$GP" findings-queue add lib/foo.py "idempotency key missing" --severity HIGH --source wall --plan 01-01-PLAN.md >/dev/null
+    fi ;;
+esac
+exec "$REAL_PY" "\$@"
+EOF
+  chmod +x "$STUB_DIR/python3"
+  run env HOME="$HOME" GATES_STORE="$GATES_STORE" FFS_HOST=claude GSD_RUN_ID=spec-000 \
+    ADVERSARY_BIN_CODEX=fake-codex ADVERSARY_BIN_CLAUDE=fake-claude \
+    bash -c "cd '$CWD' && printf 'diff --git a/a b/a\n' | bash '$SCRIPT' 2>&1"
+  [ "$status" -eq 0 ]
+  [ -f "$BATS_TEST_TMPDIR/raced" ]
+  [[ "$output" == *'"verdict":"APPROVED"'* ]]
+  [[ "$output" == *'resolve skipped'* ]]
+  python3 - "$GATES_STORE" "$SIG" <<'PY'
+import json,sys
+row=next(r for r in json.load(open(sys.argv[1]))["findings"] if r["sig"]==sys.argv[2])
+assert row["resolved"] is False, row
+assert row["history"][-1]["reason"]=="raced adjudication", row
+PY
+}
+
+@test "wall policy (c): record changed by the reviewer itself is not auto-closed" {
+  GP="$HOME/.claude/lib/feature-fix-swarm/gates.py"
+  ADD_OUT="$(python3 "$GP" findings-queue add lib/foo.py "idempotency key missing" \
+    --severity HIGH --source wall --plan 01-01-PLAN.md)"
+  SIG="$(printf '%s' "$ADD_OUT" | python3 -c 'import json,sys; print(json.load(sys.stdin)["sig"])')"
+  mkdir -p "$CWD/.planning/phases/01-degradation"
+  echo "- ${SIG:0:12} HIGH lib/foo.py — idempotency key missing (plan: 01-01-PLAN.md)" \
+    > "$CWD/.planning/phases/01-degradation/WALL-RESIDUALS.md"
+  # the reviewer itself refutes + re-adds the finding as CRITICAL, then passes
+  cat > "$STUB_DIR/fake-codex" <<EOF
+#!/usr/bin/env bash
+python3 "$GP" findings-queue resolve "$SIG" --disposition refute --reason "reviewer refuted" >/dev/null
+python3 "$GP" findings-queue add lib/foo.py "idempotency key missing" --severity CRITICAL --source wall --plan 01-01-PLAN.md >/dev/null
+echo 'VERDICT: PASS'
+EOF
+  chmod +x "$STUB_DIR/fake-codex"
+  run env HOME="$HOME" GATES_STORE="$GATES_STORE" FFS_HOST=claude GSD_RUN_ID=spec-000 \
+    ADVERSARY_BIN_CODEX=fake-codex ADVERSARY_BIN_CLAUDE=fake-claude \
+    bash -c "cd '$CWD' && printf 'diff --git a/a b/a\n' | bash '$SCRIPT' 2>&1"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'"verdict":"APPROVED"'* ]]
+  [[ "$output" == *'resolve skipped'* ]]
+  python3 - "$GATES_STORE" "$SIG" <<'PY'
+import json,sys
+row=next(r for r in json.load(open(sys.argv[1]))["findings"] if r["sig"]==sys.argv[2])
+assert row["resolved"] is False, row
+PY
+}
+
+@test "wall policy (c): gates.py without the record-guard support skips all auto-closes" {
+  GP="$HOME/.claude/lib/feature-fix-swarm/gates.py"
+  ADD_OUT="$(python3 "$GP" findings-queue add lib/foo.py "idempotency key missing" \
+    --severity HIGH --source wall --plan 01-01-PLAN.md)"
+  SIG="$(printf '%s' "$ADD_OUT" | python3 -c 'import json,sys; print(json.load(sys.stdin)["sig"])')"
+  # a working gates.py whose source lacks the guard marker token
+  sed 's/EXPECTED_RECORD_SHA256_MISMATCH/EXPECTED_RECORD_GUARD_RENAMED/g' "$GP" > "$GP.new"
+  mv "$GP.new" "$GP"
+  mkdir -p "$CWD/.planning/phases/01-degradation"
+  echo "- ${SIG:0:12} HIGH lib/foo.py — idempotency key missing (plan: 01-01-PLAN.md)" \
+    > "$CWD/.planning/phases/01-degradation/WALL-RESIDUALS.md"
+  run env HOME="$HOME" GATES_STORE="$GATES_STORE" FFS_HOST=claude GSD_RUN_ID=spec-000 \
+    ADVERSARY_BIN_CODEX=fake-codex ADVERSARY_BIN_CLAUDE=fake-claude \
+    bash -c "cd '$CWD' && printf 'diff --git a/a b/a\n' | bash '$SCRIPT' 2>&1"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'"verdict":"APPROVED"'* ]]
+  [[ "$output" == *'lacks record-guard support'* ]]
+  python3 - "$GATES_STORE" "$SIG" <<'PY'
+import json,sys
+row=next(r for r in json.load(open(sys.argv[1]))["findings"] if r["sig"]==sys.argv[2])
+assert row["resolved"] is False, row
+PY
+}
+
+@test "wall policy (c): needs-requirement residual stays unresolved and is named on stderr" {
+  export HOME="$BATS_TEST_TMPDIR"
+  mkdir -p "$HOME/.claude/lib/feature-fix-swarm"
+  cp "$ROOT/lib/gates.py" "$HOME/.claude/lib/feature-fix-swarm/gates.py"
+  export GATES_STORE="$BATS_TEST_TMPDIR/store.json"
+  python3 "$HOME/.claude/lib/feature-fix-swarm/gates.py" grant spec-000 \
+    --action ship:gsd --reason test >/dev/null
+  ADD_OUT="$(python3 "$HOME/.claude/lib/feature-fix-swarm/gates.py" findings-queue add \
+    lib/foo.py "idempotency key missing" --needs-requirement --severity HIGH --source wall \
+    --plan 01-01-PLAN.md)"
+  SIG="$(printf '%s' "$ADD_OUT" | python3 -c 'import json,sys; print(json.load(sys.stdin)["sig"])')"
+  SIG12="${SIG:0:12}"
+  mkdir -p "$CWD/.planning/phases/01-degradation"
+  cat > "$CWD/.planning/phases/01-degradation/WALL-RESIDUALS.md" <<EOF
+# Wall residuals — 01-degradation
+- $SIG12 HIGH lib/foo.py — idempotency key missing (plan: 01-01-PLAN.md)
+EOF
+  run env HOME="$HOME" GATES_STORE="$GATES_STORE" FFS_HOST=claude GSD_RUN_ID=spec-000 \
+    ADVERSARY_BIN_CODEX=fake-codex ADVERSARY_BIN_CLAUDE=fake-claude \
+    bash -c "cd '$CWD' && printf 'diff --git a/a b/a\n' | bash '$SCRIPT' 2>&1"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'"verdict":"APPROVED"'* ]]
+  [[ "$output" == *"needs-requirement"* ]]
+  UNRES="$(python3 "$HOME/.claude/lib/feature-fix-swarm/gates.py" findings-queue list \
+    --unresolved --source wall 2>/dev/null)"
+  [[ "$UNRES" == *"$SIG"* ]]
 }
 
 @test "wall policy (c): empty diff early-exit does NOT auto-resolve riding residuals" {
@@ -353,7 +478,44 @@ EOF
   ! grep -F 'foreign residual' "$BATS_TEST_TMPDIR/codex.stdin"
 }
 
-@test "wall policy (c): GSD_PROJECT without its phases dir falls back to .planning/phases" {
+# Fail-closed GSD_PROJECT cases: one REVISE JSON line, exit 1, no reviewer
+# dispatch (stub writes a marker) and no findings store touched.
+_gp_blocked() { # $1 = GSD_PROJECT value
+  rm -f "$BATS_TEST_TMPDIR/dispatched" "$BATS_TEST_TMPDIR/store.json"
+  cat > "$STUB_DIR/marker-codex" <<EOF
+#!/usr/bin/env bash
+touch "$BATS_TEST_TMPDIR/dispatched"
+echo 'VERDICT: PASS'
+EOF
+  chmod +x "$STUB_DIR/marker-codex"
+  mkdir -p "$CWD/.planning/phases/01-x"
+  echo "- cccccccccccc HIGH lib/x.py — default-root residual" > "$CWD/.planning/phases/01-x/WALL-RESIDUALS.md"
+  run env HOME="$BATS_TEST_TMPDIR" FFS_HOST=claude GSD_RUN_ID=spec-000 GSD_PROJECT="$1" \
+    ${GP_LC:+LC_ALL=$GP_LC} GATES_STORE="$BATS_TEST_TMPDIR/store.json" \
+    ADVERSARY_BIN_CODEX=marker-codex ADVERSARY_BIN_CLAUDE=fake-claude \
+    bash -c "cd '$CWD' && printf 'diff --git a/a b/a\n' | bash '$SCRIPT'"
+  [ "$status" -eq 1 ]
+  [ "$(printf '%s\n' "$output" | wc -l)" -eq 1 ]
+  printf '%s' "$output" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["verdict"]=="REVISE" and d["note"].startswith("BLOCKED")'
+  [ ! -e "$BATS_TEST_TMPDIR/dispatched" ]
+  [ ! -e "$BATS_TEST_TMPDIR/store.json" ]
+}
+
+@test "wall policy (c): GSD_PROJECT without its phases dir fails closed (no root fallback)" {
+  _gp_blocked absent
+  [[ "$output" == *"directory is missing"* ]] || false
+  [[ "$output" != *"absent"* ]] || false
+}
+
+@test "wall policy (c): invalid GSD_PROJECT is refused and cannot break the JSON" {
+  for bad in .. a/b a..b 'a"b' $'a\nb' 'x","verdict":"APPROVED'; do
+    _gp_blocked "$bad"
+    [[ "$output" == *"one path segment"* ]] || false
+  done
+}
+
+# One review round per test (the per-run round cap would trip a loop).
+_gp_plain_root() { # $1 = UNSET | literal GSD_PROJECT value
   cat > "$STUB_DIR/focus-codex" <<EOF
 #!/usr/bin/env bash
 cat > "$BATS_TEST_TMPDIR/codex.stdin"
@@ -362,9 +524,69 @@ EOF
   chmod +x "$STUB_DIR/focus-codex"
   mkdir -p "$CWD/.planning/phases/01-x"
   echo "- cccccccccccc HIGH lib/x.py — default-root residual" > "$CWD/.planning/phases/01-x/WALL-RESIDUALS.md"
-  run env HOME="$BATS_TEST_TMPDIR" FFS_HOST=claude GSD_RUN_ID=spec-000 GSD_PROJECT=absent \
+  if [ "$1" = UNSET ]; then
+    gp=(env -u GSD_PROJECT)
+  else
+    gp=(env GSD_PROJECT="$1")
+  fi
+  run "${gp[@]}" HOME="$BATS_TEST_TMPDIR" FFS_HOST=claude GSD_RUN_ID=spec-000 \
     ADVERSARY_BIN_CODEX=focus-codex ADVERSARY_BIN_CLAUDE=fake-claude \
     bash -c "cd '$CWD' && printf 'diff --git a/a b/a\n' | bash '$SCRIPT'"
   [ "$status" -eq 0 ]
   grep -F 'default-root residual' "$BATS_TEST_TMPDIR/codex.stdin"
+}
+
+@test "wall policy (c): non-ASCII GSD_PROJECT under a Latin-1 locale cannot yield invalid JSON" {
+  locale -a 2>/dev/null | grep -qx 'fr_FR.ISO8859-1' || skip "fr_FR.ISO8859-1 locale not installed"
+  # the byte must reach the script in that locale; value is never echoed
+  GP_LC=fr_FR.ISO8859-1
+  _gp_blocked $'a\xe9'
+  printf '%s' "$output" | python3 -c 'import json,sys; json.loads(sys.stdin.buffer.read().decode("utf-8"))'
+}
+
+@test "wall policy (c): valid GSD_PROJECT (with surrounding whitespace) scopes residuals to its own phases" {
+  cat > "$STUB_DIR/focus-codex" <<EOF
+#!/usr/bin/env bash
+cat > "$BATS_TEST_TMPDIR/codex.stdin"
+echo 'VERDICT: PASS'
+EOF
+  chmod +x "$STUB_DIR/focus-codex"
+  mkdir -p "$CWD/.planning/projA/phases/01-own" "$CWD/.planning/phases/01-foreign"
+  echo "- aaaaaaaaaaaa HIGH lib/own.py — own riding residual" > "$CWD/.planning/projA/phases/01-own/WALL-RESIDUALS.md"
+  echo "- bbbbbbbbbbbb HIGH lib/other.py — foreign residual" > "$CWD/.planning/phases/01-foreign/WALL-RESIDUALS.md"
+  run env HOME="$BATS_TEST_TMPDIR" FFS_HOST=claude GSD_RUN_ID=spec-000 GSD_PROJECT=" projA " \
+    ADVERSARY_BIN_CODEX=focus-codex ADVERSARY_BIN_CLAUDE=fake-claude \
+    bash -c "cd '$CWD' && printf 'diff --git a/a b/a\n' | bash '$SCRIPT'"
+  [ "$status" -eq 0 ]
+  grep -F 'own riding residual' "$BATS_TEST_TMPDIR/codex.stdin"
+  ! grep -F 'foreign residual' "$BATS_TEST_TMPDIR/codex.stdin"
+}
+
+@test "wall policy (c): GSD_PROJECT unset reads the plain root" {
+  _gp_plain_root UNSET
+}
+
+@test "wall policy (c): empty GSD_PROJECT reads the plain root" {
+  _gp_plain_root ""
+}
+
+@test "wall policy (c): whitespace-only GSD_PROJECT reads the plain root" {
+  _gp_plain_root "  	 "
+}
+
+@test "F3 P7: ship reviewer prompt asks for the smallest fix per finding" {
+  cat > "$STUB_DIR/fake-codex" <<EOS
+#!/usr/bin/env bash
+printf '%s\n' "\$@" > "$BATS_TEST_TMPDIR/codex.args"
+cat > "$BATS_TEST_TMPDIR/codex.stdin"
+echo 'VERDICT: PASS'
+EOS
+  chmod +x "$STUB_DIR/fake-codex"
+  run env HOME="$BATS_TEST_TMPDIR" FFS_HOST=claude GSD_RUN_ID=spec-000 \
+    ADVERSARY_BIN_CODEX=fake-codex ADVERSARY_BIN_CLAUDE=fake-claude \
+    bash -c "cd '$CWD' && printf 'diff --git a/a b/a\n' | bash '$SCRIPT'"
+  [ "$status" -eq 0 ]
+  cat "$BATS_TEST_TMPDIR/codex.args" "$BATS_TEST_TMPDIR/codex.stdin" > "$BATS_TEST_TMPDIR/sent.txt"
+  grep -qF 'Report ONLY CRITICAL or HIGH' "$BATS_TEST_TMPDIR/sent.txt"
+  grep -qF 'Name the smallest fix for each; removing added code is a valid fix.' "$BATS_TEST_TMPDIR/sent.txt"
 }

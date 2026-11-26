@@ -270,6 +270,10 @@ run_loop() {
         say "wall-pending phase=$phase rc=$rc wait=$wall_waits/$WALL_WAIT_MAX sleep=${WALL_DEFER_SECS}s (budget-neutral)"
         sleep "$WALL_DEFER_SECS"
         ;;
+      3)
+        dstate "$STATE_FILE" "steps.$idx.attempts=1" >/dev/null
+        quarantine_step "$idx" "$phase" "wall-budget-exhausted rc=3" "$log"
+        ;;
       78)
         block_step "$idx" "$phase" "operator-input-required (rc 78: tuple drift, missing grant, or refused launch)" "$rc" "$log"
         ;;
@@ -349,18 +353,21 @@ cmd_start() {
   case "$on_blocked" in next|park) ;; *) fail "usage --on-blocked next|park" ;; esac
   [ -n "$run" ] || run="drive-${project:-run}-$(date -u +%Y%m%dT%H%M%SZ)"
   safe_id "$run" || fail "usage --run unsafe"
+  local spec=""
+  if [[ "$project" =~ ^([0-9]{3}) ]]; then spec="spec-${BASH_REMATCH[1]}"
+  elif [[ "$(git branch --show-current 2>/dev/null)" =~ ^([0-9]{3}) ]]; then spec="spec-${BASH_REMATCH[1]}"; fi
   RUN="$run"; STATE_FILE="$(state_file "$RUN")"
   [ ! -f "$STATE_FILE" ] || fail "exists run=$RUN ($STATE_FILE) -- use resume"
   mkdir -p "$STATE_DIR"
-  python3 - "$STATE_FILE" "$RUN" "$verb" "$project" "$after_step" "$on_blocked" "$first" "$last" "${RESUME_ENV_KEYS[@]}" <<'PY'
+  python3 - "$STATE_FILE" "$RUN" "$verb" "$project" "$after_step" "$on_blocked" "$first" "$last" "$spec" "${RESUME_ENV_KEYS[@]}" <<'PY'
 import json, os, sys, time
-path, run, verb, project, after_step, on_blocked, first, last = sys.argv[1:9]
+path, run, verb, project, after_step, on_blocked, first, last, spec = sys.argv[1:10]
 # JSON null records "unset at start" so resume can tell it from an older state file lacking the key.
-runtime_env = {key: os.environ.get(key) for key in sys.argv[9:]}
+runtime_env = {key: os.environ.get(key) for key in sys.argv[10:]}
 steps = [{"phase": n, "run_id": f"{run}-p{n}", "state": "pending", "attempts": 0, "env_deaths": 0,
           "launches": 0, "no_progress": 0, "wall_waits": 0, "fingerprint": "", "head": "",
           "started_at": None, "last_rc": None, "reason": ""} for n in range(int(first), int(last) + 1)]
-state = {"run_id": run, "verb": verb, "project": project or None, "after_step": after_step or None,
+state = {"run_id": run, "verb": verb, "project": project or None, "spec": spec or None, "after_step": after_step or None,
          "runtime_env": runtime_env, "on_blocked": on_blocked, "steps": steps, "index": 0, "state": "running", "pid": None,
          "created_at": int(time.time()), "heartbeat": int(time.time())}
 with open(path, "w") as fh:
@@ -395,7 +402,7 @@ cmd_resume() {
   safe_id "$run" || fail "usage --run required"
   RUN="$run"; STATE_FILE="$(state_file "$RUN")"
   [ -f "$STATE_FILE" ] || fail "missing-state run=$RUN"
-  local prev state project key value
+  local prev state project key value spec
   prev="$(q '.pid // empty')"; state="$(q .state)"
   if [ "$state" = "done" ]; then say "already-done run=$RUN"; return 0; fi
   if [ -n "$prev" ] && [ "$prev" != "$$" ] && kill -0 "$prev" 2>/dev/null; then fail "already-running run=$RUN pid=$prev"; fi
@@ -425,6 +432,8 @@ cmd_resume() {
   fi
   project="$(q '.project // empty')"
   if [ -n "$project" ]; then export GSD_PROJECT="$project"; else unset GSD_PROJECT; fi
+  spec="$(q '.spec // empty')"
+  if [ -n "$spec" ]; then export FFS_SPEC_ID="$spec"; else unset FFS_SPEC_ID; fi
   dstate "$STATE_FILE" "pid=$$" 'state="running"' >/dev/null
   say "resume run=$RUN pid=$$ index=$(q .index)/$(q '.steps|length')"
   run_loop

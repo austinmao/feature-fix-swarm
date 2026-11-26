@@ -118,9 +118,9 @@ depth: core" "- ASSUME-001: default A
   [ "$cond_line" -gt "$init_line" ]
 }
 
-@test "the capture is errexit-safe and re-derives its own repo root" {
+@test "the capture is errexit-safe and re-derives its own trusted runtime" {
   fence_line="$(grep -nF '# resolve the spec for this diff' "$SKILL" | head -1 | cut -d: -f1)"
-  reroot_line="$(grep -nF 'HV_REPO_ROOT="$(git rev-parse --show-toplevel' "$SKILL" | head -1 | cut -d: -f1)"
+  reroot_line="$(grep -nF 'ffs_trusted_runtime "$FFS_REF"' "$SKILL" | awk -F: -v f="$fence_line" '$1 > f {print $1; exit}')"
   capture_line="$(grep -nF 'HV_SOCRATIC_OUT="$(bash "$HV_SOCRATIC_HELPER"' "$SKILL" | head -1)"
   capture_line_num="$(printf '%s' "$capture_line" | cut -d: -f1)"
   [ -n "$fence_line" ]
@@ -212,6 +212,7 @@ build_hv_harness() {
   {
     printf '#!/usr/bin/env bash\n'
     printf 'set -uo pipefail\n'
+    printf 'cd %q\n' "$HV_FIXTURE_REPO"
     printf 'HV_SPEC=%q\n' "$spec_md"
     printf '%s\n' "$block"
     printf 'printf "%%s\\n" "SPEC_DATA_END${HV_SOCRATIC_BLOCK}"\n'
@@ -230,6 +231,13 @@ build_hv_harness() {
   [[ "$block_script" == *'if [ -n "$HV_SOCRATIC_OUT" ]; then'* ]]
 
   harness="$BATS_TEST_TMPDIR/hv-socratic-harness.sh"
+  # The block loads socratic-slice.sh from the base-ref snapshot, so run it in
+  # a repo whose main commit holds this tree's scripts/ and lib/ (a snapshot
+  # without lib/gates.py is refused).
+  HV_FIXTURE_REPO="$BATS_TEST_TMPDIR/hv-repo"
+  mkdir -p "$HV_FIXTURE_REPO" && cp -R "$REPO_ROOT/scripts" "$REPO_ROOT/lib" "$HV_FIXTURE_REPO/"
+  git -C "$HV_FIXTURE_REPO" init -q -b main && git -C "$HV_FIXTURE_REPO" add -A
+  git -C "$HV_FIXTURE_REPO" -c user.name=t -c user.email=t@t commit -qm base
 
   # --- armed: vendor tree + socratic.md carrying an ASSUME entry -----------
   make_spec_dir "$SPEC" "domains: [requirements]" "- ASSUME-001: default A"

@@ -332,3 +332,19 @@ STUB
   [ "$(jq -r .budgets.env_deaths "$record")" = 2 ]
   [ "$(jq -r .budgets.respawns "$record")" = 0 ]
 }
+
+@test "relaunch works under macOS /bin/bash 3.2 (no mapfile) with a spaced argv entry" {
+  case "$(/bin/bash -c 'echo ${BASH_VERSINFO[0]}' 2>/dev/null)" in
+    3) ;;
+    *) skip "/bin/bash is not 3.x on this host; the bash 3.2 regression cannot be exercised" ;;
+  esac
+  now=$(date +%s)
+  bash scripts/gsd/lifecycle.sh checkpoint b32 waiting wait time "{\"wake_at\":$((now-1))}" '["scripts/gsd/resume-stub.sh","two words"]' '{"respawns":2}'
+  jq ".wake_at=$((now-1))" .planning/run-state/lifecycle-b32.json > record && mv record .planning/run-state/lifecycle-b32.json
+  run /bin/bash scripts/gsd/reconcile.sh
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'RECONCILE:relaunched run=b32'* ]]
+  [[ "$output" != *'command not found'* ]]
+  wait_for_marker "two words"
+  [ "$(jq -r .budgets.respawns .planning/run-state/lifecycle-b32.json)" = 1 ]
+}

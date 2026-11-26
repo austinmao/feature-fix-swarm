@@ -12,7 +12,7 @@ from test_verification_modes import test_installation_cli_runs_real_private_inst
 def _selected_source(tmp_path: Path) -> Path:
     source_root = tmp_path / "selected-source"
     source_root.mkdir()
-    for relative in ("setup.sh", "lib", "scripts/gsd", "skills", "patches", "data/installer", "package.json", "package-lock.json",
+    for relative in ("setup.sh", "lib", "scripts/gsd", "scripts/hooks", "skills", "patches", "data/installer", "templates/cloud", "package.json", "package-lock.json",
                      "node_modules/@opengsd/gsd-core/package.json"):
         origin, destination = ROOT / relative, source_root / relative
         destination.parent.mkdir(parents=True, exist_ok=True)
