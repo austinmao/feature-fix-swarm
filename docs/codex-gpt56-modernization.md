@@ -87,8 +87,9 @@ It never modifies `.planning` and never overwrites an edited collision.
 `scripts/gsd/gsd-run.sh` resolves its single-flight lock through
 `git rev-parse --git-common-dir`, so a primary checkout and its linked
 worktrees share one lock. Run worktrees live below
-`.claude/worktrees/<run-id>/`. The runner creates a registered detached Git
-worktree there, seeds untracked `.planning` state once, and launches the
+`.claude/worktrees/<run-id>/`. The runner creates a registered Git
+worktree there on a dedicated branch `ffs/runs/<run-id>` (never detached:
+gsd-executor refuses to commit on a detached HEAD), seeds untracked `.planning` state once, and launches the
 stateful CLI with that worktree as its current directory and sole writable
 root. Resume reuses the same registered worktree.
 
