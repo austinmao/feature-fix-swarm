@@ -8,6 +8,26 @@ all skills.
 
 ## Unreleased
 
+### Changed (2026-11-26, gsd-run per-run-id default state dir)
+
+- `gsd-run.sh` now defaults its runner state directory to `<git-common-dir>/ffs/gsd-run.d/<run-id>`
+  (a sibling namespace, so a run id such as `gsd-run.reclaim` can never alias the legacy dir's
+  lock files) when `GSD_RUN_ID` is set. The id is sanitized to `[A-Za-z0-9_.-]`; `.`, `..` and
+  an empty id are refused with exit 2. Two worktrees driving different run ids no longer block each
+  other on one repo-wide pidfile, while two drives of the same run id still collide (exit 75). An
+  explicit `GSD_RUN_STATE_DIR` still wins, and a run without `GSD_RUN_ID` keeps the shared
+  `<git-common-dir>/ffs/gsd-run` dir. An in-flight run whose `gsd-run.tuple` in the shared dir
+  carries the same `run_id` keeps resuming there. A symlinked legacy dir or `gsd-run.d` parent is
+  refused with exit 78. A resume requested without `GSD_RUN_ID` now fails closed (exit 2, candidate
+  ids listed) when non-completed per-run state exists, instead of silently missing it.
+- The same-run-id single-flight claim (exit 75) is taken before the `ffs/runs/<id>` branch and
+  run worktree are created, so a second same-id runner never reaches the failed-add branch
+  cleanup and cannot delete the branch the first runner just created. A bats case pins this
+  ordering.
+- Rollout: old and new runners of one run id pick different state dirs and cannot see each other
+  across the upgrade, so drain every running `gsd-run` drive that carries a run id before rolling
+  this out (then re-stage the runtime copy with `setup.sh --scope user`).
+
 ### Fixed (2026-10-26, run worktrees and drive resume env)
 
 - `gsd-run.sh` created the run worktree with `git worktree add --detach`, so every

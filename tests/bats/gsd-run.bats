@@ -3830,3 +3830,147 @@ EOS
   [ -s "$BATS_TEST_TMPDIR/spec.seen" ]
   ! grep -qv '^spec-123$' "$BATS_TEST_TMPDIR/spec.seen"
 }
+
+# --- per-run-id default state dir (<common>/ffs/gsd-run.d/<run-id>) ---
+
+_per_run_common() { (cd "$BATS_TEST_TMPDIR" && cd "$(git rev-parse --git-common-dir)" && pwd -P); }
+
+_per_run_drive() {
+  # usage: _per_run_drive [VAR=val ...]  -- one fast fake-codex drive
+  run env FFS_HOST=codex CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    GSD_MACHINE_ID=local-host "$@" \
+    bash -c "cd '$BATS_TEST_TMPDIR' && bash '$SCRIPT' /gsd-quick test"
+}
+
+@test "different run ids default to different state dirs and do not block each other" {
+  COMMON="$(_per_run_common)"
+  mkdir -p "$COMMON/ffs/gsd-run.d/run-a"
+  printf '%s\n' "$$" > "$COMMON/ffs/gsd-run.d/run-a/gsd-run.pid"
+
+  _per_run_drive GSD_RUN_ID=run-b
+  [ "$status" -eq 0 ]
+  [ -f "$COMMON/ffs/gsd-run.d/run-b/gsd-run.status" ]
+  # run-a's live owner is untouched and the shared legacy dir was not used.
+  [ "$(head -1 "$COMMON/ffs/gsd-run.d/run-a/gsd-run.pid")" = "$$" ]
+  [ ! -e "$COMMON/ffs/gsd-run/gsd-run.status" ]
+}
+
+@test "the same run id still collides on its per-run state dir" {
+  COMMON="$(_per_run_common)"
+  mkdir -p "$COMMON/ffs/gsd-run.d/run-same"
+  printf '%s\n' "$$" > "$COMMON/ffs/gsd-run.d/run-same/gsd-run.pid"
+
+  _per_run_drive GSD_RUN_ID=run-same
+  [ "$status" -eq 75 ]
+  [[ "$output" == *"active owner holds"* ]]
+  [ ! -f "$BATS_TEST_TMPDIR/codex.probed" ]
+}
+
+@test "explicit GSD_RUN_STATE_DIR still wins over the per-run default" {
+  COMMON="$(_per_run_common)"
+  RUN_STATE="$BATS_TEST_TMPDIR/explicit-state"
+
+  _per_run_drive GSD_RUN_ID=run-explicit GSD_RUN_STATE_DIR="$RUN_STATE"
+  [ "$status" -eq 0 ]
+  [ -f "$RUN_STATE/gsd-run.status" ]
+  [ ! -e "$COMMON/ffs/gsd-run.d/run-explicit" ]
+}
+
+@test "no run id keeps the shared legacy state dir" {
+  COMMON="$(_per_run_common)"
+
+  _per_run_drive
+  [ "$status" -eq 0 ]
+  [ -f "$COMMON/ffs/gsd-run/gsd-run.status" ]
+}
+
+@test "unusable run id as a state dir name is refused" {
+  _per_run_drive GSD_RUN_ID=..
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"not usable as a state directory name"* ]]
+}
+
+@test "legacy shared dir holding this run id's tuple keeps resuming there" {
+  COMMON="$(_per_run_common)"
+  mkdir -p "$COMMON/ffs/gsd-run"
+  printf 'run_id=run-legacy\n' > "$COMMON/ffs/gsd-run/gsd-run.tuple"
+  printf '%s\n' "$$" > "$COMMON/ffs/gsd-run/gsd-run.pid"
+
+  # Same id as the legacy tuple: the legacy dir is used, so its live owner blocks.
+  _per_run_drive GSD_RUN_ID=run-legacy
+  [ "$status" -eq 75 ]
+  [ ! -e "$COMMON/ffs/gsd-run.d/run-legacy" ]
+
+  # A different id ignores the legacy dir and gets its own per-run dir.
+  _per_run_drive GSD_RUN_ID=run-other
+  [ "$status" -eq 0 ]
+  [ -f "$COMMON/ffs/gsd-run.d/run-other/gsd-run.status" ]
+}
+
+@test "run id gsd-run.reclaim maps to gsd-run.d and never touches the legacy reclaim path" {
+  COMMON="$(_per_run_common)"
+
+  _per_run_drive GSD_RUN_ID=gsd-run.reclaim
+  [ "$status" -eq 0 ]
+  [ -f "$COMMON/ffs/gsd-run.d/gsd-run.reclaim/gsd-run.status" ]
+  [ ! -e "$COMMON/ffs/gsd-run/gsd-run.reclaim" ]
+  [ ! -e "$COMMON/ffs/gsd-run/gsd-run.status" ]
+}
+
+@test "symlinked gsd-run.d parent is refused with 78" {
+  COMMON="$(_per_run_common)"
+  mkdir -p "$COMMON/ffs" "$BATS_TEST_TMPDIR/elsewhere"
+  ln -s "$BATS_TEST_TMPDIR/elsewhere" "$COMMON/ffs/gsd-run.d"
+
+  _per_run_drive GSD_RUN_ID=run-sym
+  [ "$status" -eq 78 ]
+  [[ "$output" == *"symlinked run-state directory"* ]]
+  [ ! -e "$BATS_TEST_TMPDIR/elsewhere/run-sym" ]
+}
+
+@test "resume without GSD_RUN_ID fails closed when per-run state is resumable" {
+  COMMON="$(_per_run_common)"
+  mkdir -p "$COMMON/ffs/gsd-run.d/run-r1" "$COMMON/ffs/gsd-run.d/run-r2"
+  printf 'run_id=run-r1\nskill=gsd-quick\n' > "$COMMON/ffs/gsd-run.d/run-r1/gsd-run.tuple"
+  printf 'state=failed\n' > "$COMMON/ffs/gsd-run.d/run-r1/gsd-run.status"
+  printf 'run_id=run-r2\n' > "$COMMON/ffs/gsd-run.d/run-r2/gsd-run.tuple"
+  printf 'state=completed\n' > "$COMMON/ffs/gsd-run.d/run-r2/gsd-run.status"
+
+  _per_run_drive GSD_RESUME=1
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"export GSD_RUN_ID=<id>"* ]]
+  [[ "$output" == *"run-r1"* ]]
+  [[ "$output" != *"run-r2"* ]]
+  [ ! -f "$BATS_TEST_TMPDIR/codex.probed" ]
+}
+
+# --- same-id single-flight claim precedes run worktree/branch creation ---
+
+@test "a second same-id runner exits 75 before touching the run branch or worktree" {
+  COMMON="$(_per_run_common)"
+  BRANCH="ffs/runs/run-claim-order"
+  # The branch pre-exists with no worktree: any runner that reached
+  # ensure_run_worktree would refuse it (78) and a failed worktree add would
+  # run the branch cleanup. A runner that loses the claim must stop at 75.
+  git -C "$BATS_TEST_TMPDIR" branch "$BRANCH"
+  BRANCH_TIP="$(git -C "$BATS_TEST_TMPDIR" rev-parse "refs/heads/$BRANCH")"
+  mkdir -p "$COMMON/ffs/gsd-run.d/run-claim-order"
+  printf '%s\n' "$$" > "$COMMON/ffs/gsd-run.d/run-claim-order/gsd-run.pid"
+
+  _per_run_drive GSD_RUN_ID=run-claim-order
+  [ "$status" -eq 75 ]
+  [[ "$output" == *"active owner holds"* ]]
+  [[ "$output" != *"stale branch"* ]]
+  [[ "$output" != *"failed to create run worktree"* ]]
+  [ "$(git -C "$BATS_TEST_TMPDIR" rev-parse "refs/heads/$BRANCH")" = "$BRANCH_TIP" ]
+  [ ! -e "$BATS_TEST_TMPDIR/.claude/worktrees/run-claim-order" ]
+  [ ! -f "$BATS_TEST_TMPDIR/codex.probed" ]
+
+  # Control: with the claim gone the same runner does reach the worktree seam
+  # and refuses the stale branch (78), proving the 75 above came from the claim.
+  rm -f "$COMMON/ffs/gsd-run.d/run-claim-order/gsd-run.pid"
+  _per_run_drive GSD_RUN_ID=run-claim-order
+  [ "$status" -eq 78 ]
+  [[ "$output" == *"stale branch $BRANCH exists without a run worktree"* ]]
+  [ "$(git -C "$BATS_TEST_TMPDIR" rev-parse "refs/heads/$BRANCH")" = "$BRANCH_TIP" ]
+}

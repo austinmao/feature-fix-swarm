@@ -86,6 +86,12 @@ TRUSTED_NODE_BIN_FIXED=""
 # A linked worktree has its own git-dir but shares one common directory with
 # the primary checkout. Runner ownership and resume state live under that
 # common directory so two worktrees cannot start the same stateful drive.
+# With an explicit GSD_RUN_ID the default state dir is keyed per run id
+# (<common>/ffs/gsd-run.d/<run-id>, a sibling namespace
+# so a run id can never alias the legacy dir's own lock files): different run ids no longer block each
+# other, while two drives of the SAME run id still collide on one pidfile.
+# Without a run id, or when the legacy shared dir already holds that run id's
+# tuple (in-flight resume), the legacy shared dir is kept.
 GIT_COMMON_DIR=""
 if _git_common="$($GIT_BIN_FIXED rev-parse --git-common-dir 2>/dev/null)"; then
   case "$_git_common" in
@@ -189,6 +195,30 @@ mkdir -p "$LOG_DIR"
 TS="$(date +%Y%m%d-%H%M%S)"
 LOG_FILE="$LOG_DIR/gsd-run-${TS}.log"
 RUN_STATE_DIR="${GSD_RUN_STATE_DIR:-$DEFAULT_RUN_STATE_DIR}"
+if [ -z "${GSD_RUN_STATE_DIR:-}" ] && [ -n "${GSD_RUN_ID:-}" ] && [ -n "$GIT_COMMON_DIR" ]; then
+  _rs_id="$(printf '%s' "$GSD_RUN_ID" | LC_ALL=C tr -c 'A-Za-z0-9_.-' '_' | cut -c1-128)"
+  case "$_rs_id" in
+    ''|.|..)
+      echo "gsd-run: GSD_RUN_ID is not usable as a state directory name" >&2
+      exit 2
+      ;;
+  esac
+  # Legacy-resume: an in-flight run whose tuple lives in the shared dir keeps
+  # resuming there; everything else gets its own per-run dir.
+  if [ -f "$DEFAULT_RUN_STATE_DIR/gsd-run.tuple" ] && [ ! -L "$DEFAULT_RUN_STATE_DIR/gsd-run.tuple" ] \
+    && [ "$(sed -n 's/^run_id=//p' "$DEFAULT_RUN_STATE_DIR/gsd-run.tuple" | head -1)" = "$_rs_id" ]; then
+    :
+  else
+    _rs_parent="$GIT_COMMON_DIR/ffs/gsd-run.d"
+    if [ -L "$DEFAULT_RUN_STATE_DIR" ] || [ -L "$_rs_parent" ]; then
+      echo "gsd-run: refusing symlinked run-state directory: $DEFAULT_RUN_STATE_DIR or $_rs_parent" >&2
+      exit 78
+    fi
+    RUN_STATE_DIR="$_rs_parent/$_rs_id"
+    unset _rs_parent
+  fi
+  unset _rs_id
+fi
 RUN_PID_FILE="$RUN_STATE_DIR/gsd-run.pid"
 RUN_STATUS_FILE="$RUN_STATE_DIR/gsd-run.status"
 RUN_HEARTBEAT_FILE="$RUN_STATE_DIR/gsd-run.heartbeat"
@@ -391,6 +421,23 @@ fi
 RUN_ID="${GSD_RUN_ID:-}"
 if [ -z "$RUN_ID" ] && [ "$RESUME_REQUESTED" = 1 ] && [ -f "$RUN_TUPLE_FILE" ]; then
   RUN_ID="$(sed -n 's/^run_id=//p' "$RUN_TUPLE_FILE" | head -1)"
+fi
+if [ -z "$RUN_ID" ] && [ "$RESUME_REQUESTED" = 1 ] && [ -z "${GSD_RUN_STATE_DIR:-}" ] \
+  && [ -n "$GIT_COMMON_DIR" ] && [ -d "$GIT_COMMON_DIR/ffs/gsd-run.d" ]; then
+  # Per-run state lives in gsd-run.d/<id>; a resume with no GSD_RUN_ID can only
+  # see the shared tuple. Fail closed rather than guess which run to resume.
+  _rs_cands=""
+  for _rs_t in "$GIT_COMMON_DIR"/ffs/gsd-run.d/*/gsd-run.tuple; do
+    [ -f "$_rs_t" ] && [ ! -L "$_rs_t" ] || continue
+    _rs_d="$(dirname "$_rs_t")"
+    grep -qx 'state=completed' "$_rs_d/gsd-run.status" 2>/dev/null && continue
+    _rs_cands="$_rs_cands $(basename "$_rs_d")"
+  done
+  if [ -n "$_rs_cands" ]; then
+    echo "gsd-run: resume requested without GSD_RUN_ID, and resumable per-run state exists in $GIT_COMMON_DIR/ffs/gsd-run.d; export GSD_RUN_ID=<id> (candidates:$_rs_cands)" >&2
+    exit 2
+  fi
+  unset _rs_cands _rs_t _rs_d
 fi
 [ -n "$RUN_ID" ] || RUN_ID="$(date +%Y%m%d-%H%M%S)-$$"
 _safe_run_id="$(printf '%s' "$RUN_ID" | LC_ALL=C tr -c 'A-Za-z0-9_.-' '_' | cut -c1-128)"
