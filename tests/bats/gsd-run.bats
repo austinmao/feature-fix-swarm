@@ -3974,3 +3974,182 @@ _per_run_drive() {
   [[ "$output" == *"stale branch $BRANCH exists without a run worktree"* ]]
   [ "$(git -C "$BATS_TEST_TMPDIR" rev-parse "refs/heads/$BRANCH")" = "$BRANCH_TIP" ]
 }
+
+# --- review fixes for the per-run state dir ---
+
+_dead_pid() { sh -c 'echo $$'; }
+
+@test "resume without GSD_RUN_ID ignores a stale completed shared tuple and still fails closed on per-run state" {
+  COMMON="$(_per_run_common)"
+  # A REAL completed no-id run leaves the shared tuple behind.
+  _per_run_drive
+  [ "$status" -eq 0 ]
+  grep -q '^run_id=' "$COMMON/ffs/gsd-run/gsd-run.tuple"
+  grep -qx 'state=completed' "$COMMON/ffs/gsd-run/gsd-run.status"
+  rm -f "$BATS_TEST_TMPDIR/codex.probed"
+
+  mkdir -p "$COMMON/ffs/gsd-run.d/run-r1"
+  printf 'run_id=run-r1\n' > "$COMMON/ffs/gsd-run.d/run-r1/gsd-run.tuple"
+  printf 'state=failed\n' > "$COMMON/ffs/gsd-run.d/run-r1/gsd-run.status"
+
+  _per_run_drive GSD_RESUME=1
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"export GSD_RUN_ID=<id>"* ]]
+  [[ "$output" == *"run-r1"* ]]
+  [ ! -f "$BATS_TEST_TMPDIR/codex.probed" ]
+}
+
+@test "resume without GSD_RUN_ID still uses the shared tuple when no per-run state is resumable" {
+  COMMON="$(_per_run_common)"
+  _per_run_drive
+  [ "$status" -eq 0 ]
+  mkdir -p "$COMMON/ffs/gsd-run.d/run-done"
+  printf 'run_id=run-done\n' > "$COMMON/ffs/gsd-run.d/run-done/gsd-run.tuple"
+  printf 'state=completed\n' > "$COMMON/ffs/gsd-run.d/run-done/gsd-run.status"
+
+  _per_run_drive GSD_RESUME=1
+  [[ "$output" != *"export GSD_RUN_ID=<id>"* ]]
+}
+
+@test "a per-run runner refuses a run id the legacy pidfile owner is already running" {
+  COMMON="$(_per_run_common)"
+  mkdir -p "$COMMON/ffs/gsd-run"
+  printf '%s\nmachine=local-host\nclaimed_epoch=%s\n' "$$" "$(date +%s)" > "$COMMON/ffs/gsd-run/gsd-run.pid"
+  printf 'state=probing\nrun_id=run-dup\n' > "$COMMON/ffs/gsd-run/gsd-run.status"
+
+  # A different id does not block on the legacy owner.
+  _per_run_drive GSD_RUN_ID=run-free
+  [ "$status" -eq 0 ]
+
+  # The same id (held through an explicit legacy dir, tuple not written yet) does.
+  rm -f "$BATS_TEST_TMPDIR/codex.probed"
+  _per_run_drive GSD_RUN_ID=run-dup
+  [ "$status" -eq 75 ]
+  [[ "$output" == *"legacy"* ]]
+  [ ! -e "$COMMON/ffs/gsd-run.d/run-dup" ]
+  [ ! -f "$BATS_TEST_TMPDIR/codex.probed" ]
+
+  # A dead legacy owner no longer blocks.
+  printf '%s\nmachine=local-host\nclaimed_epoch=%s\n' "$(_dead_pid)" "$(date +%s)" > "$COMMON/ffs/gsd-run/gsd-run.pid"
+  _per_run_drive GSD_RUN_ID=run-dup
+  [ "$status" -eq 0 ]
+}
+
+@test "the runner status file records the run id" {
+  RUN_STATE="$BATS_TEST_TMPDIR/status-state"
+  _per_run_drive GSD_RUN_ID=run-status GSD_RUN_STATE_DIR="$RUN_STATE"
+  [ "$status" -eq 0 ]
+  grep -qx 'run_id=run-status' "$RUN_STATE/gsd-run.status"
+}
+
+@test "GSD_PLANNING_SYNC=worktree waits on a held repo-wide publish lock and times out typed" {
+  REPO="$BATS_TEST_TMPDIR/guard-fixture"
+  mkdir -p "$REPO/.planning/phases/03-guard"
+  git -C "$REPO" init -q
+  git -C "$REPO" config user.email test@example.com
+  git -C "$REPO" config user.name Test
+  printf '%s\n' seed > "$REPO/.planning/phases/03-guard/03-01-PLAN.md"
+  git -C "$REPO" add -A
+  git -C "$REPO" commit -qm seed
+  RID=publish-lock-a
+  WT="$REPO/.claude/worktrees/$RID"
+  mkdir -p "$(dirname "$WT")"
+  git -C "$REPO" worktree add -q --detach "$WT" HEAD
+  cp -R "$REPO/.planning" "$WT/.planning"
+  printf '%s\n' worktree-side-line >> "$WT/.planning/phases/03-guard/03-01-PLAN.md"
+  touch -t 202001010000 "$WT/.planning/phases/03-guard/03-01-PLAN.md"
+  printf '%s\n' repo-side-line >> "$REPO/.planning/phases/03-guard/03-01-PLAN.md"
+  touch -t 202506010000 "$REPO/.planning/phases/03-guard/03-01-PLAN.md"
+  COMMON="$(cd "$REPO" && cd "$(git rev-parse --git-common-dir)" && pwd -P)"
+
+  # Another run (different id) is mid-publish: the repo-wide lock is held by a live pid.
+  mkdir -p "$COMMON/ffs"
+  printf '%s\nmachine=local-host\nclaimed_epoch=%s\n' "$$" "$(date +%s)" > "$COMMON/ffs/planning-publish.pid"
+  GSD_RUN_ID="$RID" FFS_HOST=claude CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    GSD_MACHINE_ID=local-host GSD_PLANNING_SYNC=worktree GSD_PLANNING_PUBLISH_LOCK_WAIT_SECS=1 \
+    run bash -c "cd '$REPO' && bash '$SCRIPT' /gsd-plan-phase 3"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"GSD-RUN:PLANNING-SYNC-FAILED direction=worktree phase=03-guard stage=lock"* ]]
+  grep -Fq repo-side-line "$REPO/.planning/phases/03-guard/03-01-PLAN.md"
+  ! grep -Fq worktree-side-line "$REPO/.planning/phases/03-guard/03-01-PLAN.md"
+  [ ! -f "$BATS_TEST_TMPDIR/claude.args" ]
+  [ "$(head -1 "$COMMON/ffs/planning-publish.pid")" = "$$" ]
+
+  # A dead owner is reclaimed, the publish proceeds, and the lock is released.
+  printf '%s\nmachine=local-host\nclaimed_epoch=%s\n' "$(_dead_pid)" "$(date +%s)" > "$COMMON/ffs/planning-publish.pid"
+  GSD_RUN_ID="$RID" FFS_HOST=claude CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    GSD_MACHINE_ID=local-host GSD_PLANNING_SYNC=worktree \
+    run bash -c "cd '$REPO' && bash '$SCRIPT' /gsd-plan-phase 3"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"GSD-RUN:PLANNING-SYNC direction=worktree phase=03-guard"* ]]
+  grep -Fq worktree-side-line "$REPO/.planning/phases/03-guard/03-01-PLAN.md"
+  [ ! -e "$COMMON/ffs/planning-publish.pid" ]
+}
+
+@test "GSD_EXTRA_WRITABLE_WORKTREE refuses another live run's worktree" {
+  COMMON="$(_per_run_common)"
+  OTHER="$BATS_TEST_TMPDIR/.claude/worktrees/run-b"
+  mkdir -p "$BATS_TEST_TMPDIR/.claude/worktrees"
+  git -C "$BATS_TEST_TMPDIR" worktree add -q -b ffs/runs/run-b "$OTHER"
+  mkdir -p "$COMMON/ffs/gsd-run.d/run-b"
+  printf '%s\nmachine=local-host\nclaimed_epoch=%s\n' "$$" "$(date +%s)" > "$COMMON/ffs/gsd-run.d/run-b/gsd-run.pid"
+
+  _per_run_drive GSD_RUN_ID=run-a GSD_NETWORK_MODE=none GSD_EXTRA_WRITABLE_WORKTREE="$OTHER"
+  [ "$status" -eq 78 ]
+  [[ "$output" == *"extra writable worktree is the worktree of another live run"* ]]
+
+  # Once that run is dead the same path is an ordinary sibling worktree again.
+  printf '%s\nmachine=local-host\nclaimed_epoch=%s\n' "$(_dead_pid)" "$(date +%s)" > "$COMMON/ffs/gsd-run.d/run-b/gsd-run.pid"
+  _per_run_drive GSD_RUN_ID=run-a GSD_NETWORK_MODE=none GSD_EXTRA_WRITABLE_WORKTREE="$OTHER"
+  [ "$status" -eq 0 ]
+}
+
+@test "GSD_EXTRA_WRITABLE_WORKTREE refuses a worktree whose run holds the legacy pidfile" {
+  COMMON="$(_per_run_common)"
+  OTHER="$BATS_TEST_TMPDIR/.claude/worktrees/run-legacy-b"
+  mkdir -p "$BATS_TEST_TMPDIR/.claude/worktrees" "$COMMON/ffs/gsd-run"
+  git -C "$BATS_TEST_TMPDIR" worktree add -q -b ffs/runs/run-legacy-b "$OTHER"
+  printf '%s\nmachine=local-host\nclaimed_epoch=%s\n' "$$" "$(date +%s)" > "$COMMON/ffs/gsd-run/gsd-run.pid"
+  printf 'run_id=run-legacy-b\n' > "$COMMON/ffs/gsd-run/gsd-run.tuple"
+
+  _per_run_drive GSD_RUN_ID=run-a GSD_NETWORK_MODE=none GSD_EXTRA_WRITABLE_WORKTREE="$OTHER"
+  [ "$status" -eq 78 ]
+  [[ "$output" == *"another live run"* ]]
+}
+
+@test "a symlinked <common>/ffs is refused with 78 for per-run and shared runs" {
+  COMMON="$(_per_run_common)"
+  mkdir -p "$BATS_TEST_TMPDIR/elsewhere"
+  ln -s "$BATS_TEST_TMPDIR/elsewhere" "$COMMON/ffs"
+
+  _per_run_drive GSD_RUN_ID=run-sym-ffs
+  [ "$status" -eq 78 ]
+  [[ "$output" == *"symlinked"* ]]
+  [ -z "$(ls -A "$BATS_TEST_TMPDIR/elsewhere")" ]
+
+  _per_run_drive
+  [ "$status" -eq 78 ]
+  [ -z "$(ls -A "$BATS_TEST_TMPDIR/elsewhere")" ]
+}
+
+@test "the log name carries the run id so same-second runs never share a log" {
+  COMMON="$(_per_run_common)"
+  _per_run_drive GSD_RUN_ID=run-log-a
+  [ "$status" -eq 0 ]
+  _per_run_drive GSD_RUN_ID=run-log-b
+  [ "$status" -eq 0 ]
+  [ -f "$COMMON/ffs/gsd-run.d/run-log-a/gsd-run.status" ]
+  grep -E '^log=.*gsd-run-[0-9-]+-run-log-a\.log$' "$COMMON/ffs/gsd-run.d/run-log-a/gsd-run.status"
+  grep -E '^log=.*gsd-run-[0-9-]+-run-log-b\.log$' "$COMMON/ffs/gsd-run.d/run-log-b/gsd-run.status"
+  [ "$(ls "$BATS_TEST_TMPDIR"/.planning/logs/gsd-run-*-run-log-*.log | wc -l | tr -d ' ')" -eq 2 ]
+}
+
+@test "run id .. with an explicit state dir is still refused with 78 and nothing is created" {
+  RUN_STATE="$BATS_TEST_TMPDIR/dotdot-state"
+  _per_run_drive GSD_RUN_ID=.. GSD_RUN_STATE_DIR="$RUN_STATE"
+  [ "$status" -eq 78 ]
+  [[ "$output" == *"escapes the Git common worktrees namespace"* ]]
+  # No worktree or branch was created for the refused id.
+  [ "$(git -C "$BATS_TEST_TMPDIR" worktree list | wc -l | tr -d ' ')" -eq 1 ]
+  [ -z "$(git -C "$BATS_TEST_TMPDIR" for-each-ref 'refs/heads/ffs/runs/*')" ]
+}

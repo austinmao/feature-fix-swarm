@@ -22,8 +22,19 @@ all skills.
   ids listed) when non-completed per-run state exists, instead of silently missing it.
 - The same-run-id single-flight claim (exit 75) is taken before the `ffs/runs/<id>` branch and
   run worktree are created, so a second same-id runner never reaches the failed-add branch
-  cleanup and cannot delete the branch the first runner just created. A bats case pins this
-  ordering.
+  cleanup and cannot delete the branch the first runner just created. The code order already
+  existed; a bats case now pins it.
+- Review fixes for the per-run state dir: (A) a resume without `GSD_RUN_ID` now scans per-run
+  state before it reads the shared tuple (which is never deleted and goes stale once per-id runs
+  exist), so non-completed per-run state always fails closed (exit 2); the shared tuple is used
+  only when no such state exists. (B) A per-run launch refuses (exit 75) when a live owner of the
+  legacy shared pidfile is already running the same id (the runner status file now records
+  `run_id=`). (C) `GSD_PLANNING_SYNC=worktree` takes a short repo-wide lock
+  (`<common>/ffs/planning-publish.pid`, wait `GSD_PLANNING_PUBLISH_LOCK_WAIT_SECS`, default 30)
+  around the worktree-to-repo publish, since the repo-wide run pidfile no longer serialises it.
+  (D) `GSD_EXTRA_WRITABLE_WORKTREE` refuses (78) another live run's worktree. (E) A symlinked
+  `<common>/ffs` is refused with 78. (F) The log name includes the run id, so ids started in the
+  same second no longer share a log.
 - Rollout: old and new runners of one run id pick different state dirs and cannot see each other
   across the upgrade, so drain every running `gsd-run` drive that carries a run id before rolling
   this out (then re-stage the runtime copy with `setup.sh --scope user`).

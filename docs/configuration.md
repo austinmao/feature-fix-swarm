@@ -236,7 +236,7 @@ content in an error — see the table row above.
 | `GSD_RUN_ID` | derived from branch `spec-NNN` | `scripts/gsd/review-gate-command.sh:48` | Ledger key for the `ship:gsd` grant check. Underivable means fail-closed REVISE |
 | `TIMEOUT` | `900` | `scripts/gsd/gsd-run.sh:183` | Wall-clock bound on the whole drive |
 | `GSD_HOST_PROBE_TIMEOUT` | `45` | `scripts/gsd/gsd-run.sh:184` | Bound on the pre-launch host probe |
-| `GSD_RUN_STATE_DIR` | `<git-common-dir>/ffs/gsd-run` (shared by linked worktrees); `$REPO_ROOT/.planning/run-state` outside git | `scripts/gsd/gsd-run.sh:98-101,191` | Pidfile, status, heartbeat, reclaim mutex |
+| `GSD_RUN_STATE_DIR` | `<git-common-dir>/ffs/gsd-run` (shared by linked worktrees), or `<git-common-dir>/ffs/gsd-run.d/<run-id>` when `GSD_RUN_ID` is set (runs with different ids do not block each other); `$REPO_ROOT/.planning/run-state` outside git | `scripts/gsd/gsd-run.sh:98-101,191` | Pidfile, status, heartbeat, reclaim mutex |
 | `GSD_MACHINE_ID` | hostname | `scripts/gsd/gsd-run.sh:250` | Identity for cross-machine run-ownership contention |
 | `GSD_HEARTBEAT_SECS` | `15` | `scripts/gsd/gsd-run.sh:758` | Heartbeat refresh interval |
 | `GSD_FOREIGN_LEASE_SECS` | `120` | `scripts/gsd/gsd-run.sh:749` | How long a foreign machine's lease is honored before reclaim |

@@ -193,7 +193,34 @@ PROBE_PROMPT="This is a read-only availability probe. Use no tools. Output exact
 LOG_DIR="$REPO_ROOT/.planning/logs"
 mkdir -p "$LOG_DIR"
 TS="$(date +%Y%m%d-%H%M%S)"
-LOG_FILE="$LOG_DIR/gsd-run-${TS}.log"
+# Two run ids started in the same second must not share (and truncate) a log.
+_log_id=""
+[ -z "${GSD_RUN_ID:-}" ] || _log_id="-$(printf '%s' "$GSD_RUN_ID" | LC_ALL=C tr -c 'A-Za-z0-9_.-' '_' | cut -c1-128)"
+LOG_FILE="$LOG_DIR/gsd-run-${TS}${_log_id}.log"
+unset _log_id
+RUN_MACHINE_ID="${GSD_MACHINE_ID:-$(hostname 2>/dev/null || uname -n 2>/dev/null || printf unknown)}"
+RUN_MACHINE_ID="$(printf '%s' "$RUN_MACHINE_ID" | LC_ALL=C tr -c 'A-Za-z0-9_.:-' '_' | cut -c1-128)"
+[ -n "$RUN_MACHINE_ID" ] || RUN_MACHINE_ID=unknown
+# run_state_owner_live_for_id STATE_DIR RUN_ID: success when STATE_DIR's pidfile
+# is held by a live same-machine pid (the liveness test ffs_lock_acquire uses)
+# AND its tuple or status names RUN_ID. A third argument "any" skips the name
+# check (a per-run dir is by construction one run's).
+run_state_owner_live_for_id() {
+  local dir="$1" id="$2" pf pid owner_machine named
+  pf="$dir/gsd-run.pid"
+  [ -f "$pf" ] && [ ! -L "$pf" ] || return 1
+  pid="$(head -1 "$pf" 2>/dev/null | tr -d '[:space:]' || true)"
+  owner_machine="$(sed -n 's/^machine=//p' "$pf" 2>/dev/null | head -1)"
+  [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null || return 1
+  [ -z "$owner_machine" ] || [ "$owner_machine" = "$RUN_MACHINE_ID" ] || return 1
+  [ "${3:-}" != any ] || return 0
+  for named in "$dir/gsd-run.tuple" "$dir/gsd-run.status"; do
+    [ -f "$named" ] && [ ! -L "$named" ] || continue
+    [ "$(sed -n 's/^run_id=//p' "$named" 2>/dev/null | head -1)" = "$id" ] && return 0
+  done
+  return 1
+}
+
 RUN_STATE_DIR="${GSD_RUN_STATE_DIR:-$DEFAULT_RUN_STATE_DIR}"
 if [ -z "${GSD_RUN_STATE_DIR:-}" ] && [ -n "${GSD_RUN_ID:-}" ] && [ -n "$GIT_COMMON_DIR" ]; then
   _rs_id="$(printf '%s' "$GSD_RUN_ID" | LC_ALL=C tr -c 'A-Za-z0-9_.-' '_' | cut -c1-128)"
@@ -210,9 +237,16 @@ if [ -z "${GSD_RUN_STATE_DIR:-}" ] && [ -n "${GSD_RUN_ID:-}" ] && [ -n "$GIT_COM
     :
   else
     _rs_parent="$GIT_COMMON_DIR/ffs/gsd-run.d"
-    if [ -L "$DEFAULT_RUN_STATE_DIR" ] || [ -L "$_rs_parent" ]; then
-      echo "gsd-run: refusing symlinked run-state directory: $DEFAULT_RUN_STATE_DIR or $_rs_parent" >&2
+    if [ -L "$GIT_COMMON_DIR/ffs" ] || [ -L "$DEFAULT_RUN_STATE_DIR" ] || [ -L "$_rs_parent" ]; then
+      echo "gsd-run: refusing symlinked run-state directory: $GIT_COMMON_DIR/ffs, $DEFAULT_RUN_STATE_DIR or $_rs_parent" >&2
       exit 78
+    fi
+    # The legacy pidfile used to serialise every run. If a live owner of it is
+    # already running THIS id (explicit GSD_RUN_STATE_DIR, or tuple not yet
+    # written), the per-run dir would give the same id a second lock.
+    if run_state_owner_live_for_id "$DEFAULT_RUN_STATE_DIR" "$_rs_id"; then
+      echo "gsd-run: run id $_rs_id is already running under the legacy shared state dir $DEFAULT_RUN_STATE_DIR; refusing duplicate launch" >&2
+      exit 75
     fi
     RUN_STATE_DIR="$_rs_parent/$_rs_id"
     unset _rs_parent
@@ -277,9 +311,6 @@ lifecycle_finish() {
     (cd "$root" && bash "$SCRIPT_DIR/lifecycle.sh" transition "$RUN_ID" failed "rc-$rc") >/dev/null 2>&1 || true
   fi
 }
-RUN_MACHINE_ID="${GSD_MACHINE_ID:-$(hostname 2>/dev/null || uname -n 2>/dev/null || printf unknown)}"
-RUN_MACHINE_ID="$(printf '%s' "$RUN_MACHINE_ID" | LC_ALL=C tr -c 'A-Za-z0-9_.:-' '_' | cut -c1-128)"
-[ -n "$RUN_MACHINE_ID" ] || RUN_MACHINE_ID=unknown
 ACTIVE_HOST=""
 MODEL_REQUEST_KIND=""
 MODEL_REQUEST_NAME=""
@@ -419,13 +450,11 @@ if { [ "$FRESH_ROLE_PIN_RECOVERY_REQUESTED" -eq 1 ] || [ "$FRESH_BUNDLE_RECOVERY
   exit 2
 fi
 RUN_ID="${GSD_RUN_ID:-}"
-if [ -z "$RUN_ID" ] && [ "$RESUME_REQUESTED" = 1 ] && [ -f "$RUN_TUPLE_FILE" ]; then
-  RUN_ID="$(sed -n 's/^run_id=//p' "$RUN_TUPLE_FILE" | head -1)"
-fi
 if [ -z "$RUN_ID" ] && [ "$RESUME_REQUESTED" = 1 ] && [ -z "${GSD_RUN_STATE_DIR:-}" ] \
   && [ -n "$GIT_COMMON_DIR" ] && [ -d "$GIT_COMMON_DIR/ffs/gsd-run.d" ]; then
-  # Per-run state lives in gsd-run.d/<id>; a resume with no GSD_RUN_ID can only
-  # see the shared tuple. Fail closed rather than guess which run to resume.
+  # Per-run state lives in gsd-run.d/<id>; a resume with no GSD_RUN_ID cannot
+  # know which one is meant. Fail closed rather than guess, and do it before
+  # the shared tuple (always stale once per-id runs exist) is consulted.
   _rs_cands=""
   for _rs_t in "$GIT_COMMON_DIR"/ffs/gsd-run.d/*/gsd-run.tuple; do
     [ -f "$_rs_t" ] && [ ! -L "$_rs_t" ] || continue
@@ -438,6 +467,13 @@ if [ -z "$RUN_ID" ] && [ "$RESUME_REQUESTED" = 1 ] && [ -z "${GSD_RUN_STATE_DIR:
     exit 2
   fi
   unset _rs_cands _rs_t _rs_d
+fi
+# Only when no per-run state is resumable does a no-id resume fall back to the
+# shared tuple. The shared tuple is never deleted and per-id runs no longer
+# update it, so consulting it BEFORE the per-run scan above would let a stale
+# (often completed) shared run shadow the per-run candidates.
+if [ -z "$RUN_ID" ] && [ "$RESUME_REQUESTED" = 1 ] && [ -f "$RUN_TUPLE_FILE" ]; then
+  RUN_ID="$(sed -n 's/^run_id=//p' "$RUN_TUPLE_FILE" | head -1)"
 fi
 [ -n "$RUN_ID" ] || RUN_ID="$(date +%Y%m%d-%H%M%S)-$$"
 _safe_run_id="$(printf '%s' "$RUN_ID" | LC_ALL=C tr -c 'A-Za-z0-9_.-' '_' | cut -c1-128)"
@@ -513,6 +549,7 @@ write_run_status() {
     printf 'state=%s\n' "$state"
     printf 'pid=%s\n' "$$"
     printf 'machine=%s\n' "$RUN_MACHINE_ID"
+    printf 'run_id=%s\n' "$RUN_ID"
     printf 'host=%s\n' "${SELECTED_HOST:-${ACTIVE_HOST:-unknown}}"
     printf 'skill=%s\n' "$GSD_SKILL_NAME"
     printf 'log=%s\n' "$LOG_FILE"
@@ -787,6 +824,16 @@ PY
 }
 
 acquire_run_state() {
+  # A symlinked <common>/ffs would redirect the legacy dir, gsd-run.d and the
+  # publish lock together while every per-leaf check below still passes.
+  if [ -n "$GIT_COMMON_DIR" ] && [ -L "$GIT_COMMON_DIR/ffs" ]; then
+    case "$RUN_STATE_DIR" in
+      "$GIT_COMMON_DIR/ffs"/*)
+        echo "gsd-run: refusing symlinked run-state directory: $GIT_COMMON_DIR/ffs" >&2
+        return 78
+        ;;
+    esac
+  fi
   [ ! -L "$RUN_STATE_DIR" ] || {
     echo "gsd-run: refusing symlinked run-state directory: $RUN_STATE_DIR" >&2
     return 78
@@ -994,7 +1041,7 @@ ensure_run_worktree() {
 validate_extra_writable_worktrees() {
   local requested expected_parent expected_parent_real candidate candidate_real
   local actual_top actual_common registered registered_path registered_real
-  local prior
+  local prior candidate_id
 
   EXTRA_WRITABLE_WORKTREES=()
   EXTRA_WRITABLE_WORKTREES_TUPLE="none"
@@ -1049,6 +1096,15 @@ validate_extra_writable_worktrees() {
       echo "gsd-run: extra writable worktree must be distinct from the active run worktree" >&2
       return 78
     }
+    # Another live run's own worktree is not a sibling to share: two runners
+    # would both edit it. Its run id is the worktree directory name.
+    candidate_id="${candidate_real##*/}"
+    if [ "$candidate_id" != "$RUN_ID" ] && [ -n "$GIT_COMMON_DIR" ] \
+      && { run_state_owner_live_for_id "$GIT_COMMON_DIR/ffs/gsd-run.d/$candidate_id" "$candidate_id" any \
+        || run_state_owner_live_for_id "$DEFAULT_RUN_STATE_DIR" "$candidate_id"; }; then
+      echo "gsd-run: extra writable worktree is the worktree of another live run ($candidate_id): $candidate" >&2
+      return 78
+    fi
     actual_top="$($GIT_BIN_FIXED -C "$candidate_real" rev-parse --show-toplevel 2>/dev/null || true)"
     [ -n "$actual_top" ] || {
       echo "gsd-run: extra writable path is not a registered Git worktree: $candidate" >&2
@@ -1201,6 +1257,38 @@ worktree_committed_superset() {
 # Copy $1 onto $2 without ever destroying $2 first: stage a sibling temp,
 # stash the live destination, promote, and only then drop the stash. Any
 # failure restores the stash and emits a typed line. $3=direction $4=slug.
+# Repo-wide publish lock. The worktree-direction sync overwrites one shared
+# repo destination, so two run ids on the same checkout and phase must not
+# publish at once (the repo-wide run pidfile used to serialise this). Same
+# pidfile/reclaim primitive as the run lock; waits up to
+# GSD_PLANNING_PUBLISH_LOCK_WAIT_SECS (default 30). Always paired with
+# planning_publish_unlock.
+planning_publish_lock() {
+  local base="${GIT_COMMON_DIR:-$REPO_ROOT/.planning}/ffs" waited=0 wait_secs rc
+  wait_secs="${GSD_PLANNING_PUBLISH_LOCK_WAIT_SECS:-30}"
+  case "$wait_secs" in ''|*[!0-9]*) wait_secs=30 ;; esac
+  [ ! -L "$base" ] || { echo "gsd-run: refusing symlinked run-state directory: $base" >&2; return 78; }
+  mkdir -p "$base" || return 1
+  PLANNING_PUBLISH_PIDFILE="$base/planning-publish.pid"
+  while :; do
+    ffs_lock_acquire "$PLANNING_PUBLISH_PIDFILE" "$base/planning-publish.heartbeat" "$base/planning-publish.reclaim" \
+      "$RUN_MACHINE_ID" "${GSD_FOREIGN_LEASE_SECS:-120}" "${GSD_RECLAIM_LEASE_SECS:-30}" \
+      "gsd-run planning-publish" >/dev/null 2>&1
+    rc=$?
+    [ "$rc" -ne 75 ] || {
+      [ "$waited" -lt "$wait_secs" ] || return 75
+      sleep 1
+      waited=$((waited + 1))
+      continue
+    }
+    return "$rc"
+  done
+}
+
+planning_publish_unlock() {
+  ffs_lock_release "$PLANNING_PUBLISH_PIDFILE" "$RUN_MACHINE_ID" || true
+}
+
 planning_sync_copy() {
   local src="$1" dest="$2" direction="$3" slug="$4" tmp bak
   tmp="$dest.tmp.$$"
@@ -1361,7 +1449,14 @@ PY
         echo "gsd-run: cannot sync .planning direction=worktree phase=$slug: source missing" >&2
         return 1
       }
-      planning_sync_copy "$wt_dir" "$repo_dir" worktree "$slug" || return 1
+      planning_publish_lock || {
+        echo "GSD-RUN:PLANNING-SYNC-FAILED direction=worktree phase=$slug stage=lock" >&2
+        return 1
+      }
+      planning_sync_copy "$wt_dir" "$repo_dir" worktree "$slug"
+      _publish_rc=$?
+      planning_publish_unlock
+      [ "$_publish_rc" -eq 0 ] || return 1
       PLANNING_SYNC_REPO_CHANGED=1
       echo "GSD-RUN:PLANNING-SYNC direction=worktree phase=$slug" >&2
       return 0
