@@ -427,7 +427,7 @@ if [ -n "$RUN_COORD_ID" ]; then
   export FFS_COORD_ANCHOR_PID="$$"
 fi
 
-# Pin the spec identity before any detached worktree (no branch there) exists.
+# Pin the spec identity before the run worktree (a branch worktree) exists.
 if [ -z "${FFS_SPEC_ID:-}" ]; then
   _spec_n="$("$GIT_BIN_FIXED" -C "$REPO_ROOT" branch --show-current 2>/dev/null | grep -Eo '^[0-9]{3}' || true)"
   [[ -n "$_spec_n" || ! "${GSD_PROJECT:-}" =~ ^[0-9]{3}$ ]] || _spec_n="$GSD_PROJECT"
@@ -835,6 +835,13 @@ acquire_run_state() {
   echo "gsd-run: liveness pidfile=$RUN_PID_FILE pid=$$ machine=$RUN_MACHINE_ID status=$RUN_STATUS_FILE log=$LOG_FILE" >&2
 }
 
+# Prints the path of the worktree that has refs/heads/$1 checked out (nothing
+# when no worktree holds it). Paths with spaces are preserved.
+branch_worktree_path() {
+  "$GIT_BIN_FIXED" -C "$REPO_ROOT" worktree list --porcelain 2>/dev/null \
+    | awk -v want="branch refs/heads/$1" '/^worktree /{sub(/^worktree /, ""); p=$0} $0 == want {print p; exit}'
+}
+
 ensure_run_worktree() {
   local parent expected_parent actual_common
   [ -n "$GIT_COMMON_DIR" ] || {
@@ -905,12 +912,27 @@ ensure_run_worktree() {
   # A pre-existing ffs/runs/<id> branch with no registered worktree is a stale
   # leftover of a crashed run; reusing its old tip could silently execute on
   # outdated code, so fail closed instead of guessing.
-  local run_branch="ffs/runs/$RUN_ID"
+  local run_branch="ffs/runs/$RUN_ID" branch_holder base_head branch_tip
   if "$GIT_BIN_FIXED" -C "$REPO_ROOT" show-ref --verify --quiet "refs/heads/$run_branch"; then
-    echo "gsd-run: stale branch $run_branch exists without a run worktree; run git worktree prune, then delete it (git branch -D $run_branch) or choose a new GSD_RUN_ID" >&2
+    branch_holder="$(branch_worktree_path "$run_branch")"
+    if [ -n "$branch_holder" ]; then
+      echo "gsd-run: cannot attach branch $run_branch: it is checked out in worktree $branch_holder; remove that worktree (git worktree remove) or choose a new GSD_RUN_ID" >&2
+    else
+      echo "gsd-run: stale branch $run_branch exists without a run worktree; run git worktree prune, then delete it (git branch -D $run_branch) or choose a new GSD_RUN_ID" >&2
+    fi
     return 78
   fi
+  base_head="$("$GIT_BIN_FIXED" -C "$REPO_ROOT" rev-parse -q --verify HEAD 2>/dev/null || true)"
   "$GIT_BIN_FIXED" -C "$REPO_ROOT" worktree add -b "$run_branch" "$RUN_WORKTREE_ROOT" HEAD >/dev/null || {
+    # A failed add can leave the branch it just created behind, and every retry
+    # would then be refused as a stale branch. Remove it only when it is
+    # provably ours and unused: its tip is still the base HEAD it was created
+    # from and no worktree holds it.
+    branch_tip="$("$GIT_BIN_FIXED" -C "$REPO_ROOT" rev-parse -q --verify "refs/heads/$run_branch" 2>/dev/null || true)"
+    if [ -n "$base_head" ] && [ "$branch_tip" = "$base_head" ] \
+       && [ -z "$(branch_worktree_path "$run_branch")" ]; then
+      "$GIT_BIN_FIXED" -C "$REPO_ROOT" branch -D "$run_branch" >/dev/null 2>&1 || true
+    fi
     echo "gsd-run: failed to create run worktree at $RUN_WORKTREE_ROOT" >&2
     return 1
   }
@@ -1096,7 +1118,7 @@ PY
 # copy legitimately lacks. Anything else extra (e.g. a *-PLAN.md) forces the copy.
 WORKTREE_RUN_OUTPUT_PATTERNS=(
   '*-SUMMARY.md' '*-BASELINE.md' '*-VERIFICATION.md' '*-evidence.json' '*-UAT.md'
-  '*-REVIEW.md' '*-CONTEXT.md' '*-RESEARCH.md' '.continue-here.md' 'WALL-RESIDUALS.md'
+  '*-REVIEW.md' '*-CONTEXT.md' '*-RESEARCH.md' '.continue-here.md'
 )
 
 # True only when ALL hold (fail closed; any doubt returns non-zero and the

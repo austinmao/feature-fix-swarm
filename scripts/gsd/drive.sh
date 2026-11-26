@@ -419,15 +419,27 @@ cmd_resume() {
         value="$(jq -r --arg key "$key" '.runtime_env[$key]' "$STATE_FILE")"
         if [ "$key" = TMPDIR ] && [ ! -d "$value" ]; then
           # A saved temp root that has since vanished would make every
-          # gsd-run mktemp fail; fall back to the default instead.
-          say "tmpdir-missing run=$RUN saved=$value; unsetting TMPDIR"
-          unset TMPDIR
+          # gsd-run mktemp fail; keep the caller's TMPDIR if it is a usable
+          # directory, otherwise fall back to the default.
+          if [ -n "${TMPDIR:-}" ] && [ -d "$TMPDIR" ]; then
+            say "tmpdir-missing run=$RUN saved=$value; keeping caller TMPDIR"
+          else
+            say "tmpdir-missing run=$RUN saved=$value; unsetting TMPDIR"
+            unset TMPDIR
+          fi
         else
           export "$key=$value"
         fi
+      else
+        # A key absent from the state file means a state written by an older
+        # drive.sh. The original keys were always saved, so absent = unset
+        # (the historical behaviour); only the keys added later keep the
+        # caller's value, since an older drive.sh could not have saved them.
+        case "$key" in
+          GSD_PLANNING_SYNC|TMPDIR|GSD_EXTRA_WRITABLE_WORKTREE) ;;
+          *) unset "$key" ;;
+        esac
       fi
-      # A key absent from the state file (state written by an older drive.sh;
-      # a key unset at start is saved as null) leaves the caller's environment untouched.
     done
   fi
   project="$(q '.project // empty')"

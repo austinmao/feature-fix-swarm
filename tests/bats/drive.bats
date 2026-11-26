@@ -250,6 +250,29 @@ STUB
   [ "$(tail -1 "$STUB_ROOT/runtime2" | cut -d' ' -f2)" = unset ]
 }
 
+@test "resume unsets an original key that an older state file lacks even when the caller has it set" {
+  printf '78\n' > "$STUB_ROOT/plan-1"
+  run env -u GSD_NETWORK_MODE bash scripts/gsd/drive.sh start --verb plan-phase --phases 1-2 --on-blocked park --run legacyorig
+  [ "$status" -eq 0 ]
+  jq 'del(.runtime_env.GSD_NETWORK_MODE)' .planning/run-state/drive-legacyorig.json > "$BATS_TEST_TMPDIR/legacy.json"
+  mv "$BATS_TEST_TMPDIR/legacy.json" .planning/run-state/drive-legacyorig.json
+  run env GSD_NETWORK_MODE=enabled bash scripts/gsd/drive.sh resume --run legacyorig
+  [ "$status" -eq 0 ]
+  [ "$(tail -1 "$STUB_ROOT/runtime" | cut -d' ' -f3)" = unset ]
+}
+
+@test "resume keeps the caller's TMPDIR when the saved one is gone and the caller's is a directory" {
+  printf '78\n' > "$STUB_ROOT/plan-1"
+  mkdir "$BATS_TEST_TMPDIR/gone-tmp2" "$BATS_TEST_TMPDIR/caller-tmp"
+  run env TMPDIR="$BATS_TEST_TMPDIR/gone-tmp2" bash scripts/gsd/drive.sh start --verb plan-phase --phases 1-2 --on-blocked park --run keeptmp
+  [ "$status" -eq 0 ]
+  rmdir "$BATS_TEST_TMPDIR/gone-tmp2"
+  run env TMPDIR="$BATS_TEST_TMPDIR/caller-tmp" bash scripts/gsd/drive.sh resume --run keeptmp
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"DRIVE:tmpdir-missing run=keeptmp"* ]]
+  [ "$(tail -1 "$STUB_ROOT/runtime2" | cut -d' ' -f2)" = "$BATS_TEST_TMPDIR/caller-tmp" ]
+}
+
 @test "resume unsets a key that was saved as null even when the caller passes a value" {
   printf '78\n' > "$STUB_ROOT/plan-1"
   run env -u GSD_PLANNING_SYNC bash scripts/gsd/drive.sh start --verb plan-phase --phases 1-2 --on-blocked park --run nullkey

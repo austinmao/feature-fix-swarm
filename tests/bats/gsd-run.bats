@@ -3235,6 +3235,58 @@ EOF
   [[ "$output" == *"gsd-run: stale branch ffs/runs/$RID exists without a run worktree"* ]]
 }
 
+@test "a failed worktree add removes the unused ffs/runs/<id> branch so a retry is not refused with 78" {
+  [ "$(id -u)" -ne 0 ] || skip "needs a non-root user to make the worktree parent unwritable"
+  REPO="$BATS_TEST_TMPDIR/failed-add-fixture"
+  mkdir -p "$REPO"
+  git -C "$REPO" init -q
+  git -C "$REPO" config user.email test@example.com
+  git -C "$REPO" config user.name Test
+  printf '%s\n' seed > "$REPO/seed"
+  git -C "$REPO" add seed
+  git -C "$REPO" commit -qm seed
+  RID=failed-add-1
+  # A read-only worktree parent makes `git worktree add -b` create the branch
+  # and then fail to create the worktree directory.
+  mkdir -p "$REPO/.claude/worktrees"
+  chmod 555 "$REPO/.claude/worktrees"
+
+  GSD_RUN_ID="$RID" FFS_HOST=claude CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    run bash -c "cd '$REPO' && bash '$SCRIPT' /gsd-quick test"
+  chmod 755 "$REPO/.claude/worktrees"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"gsd-run: failed to create run worktree at "* ]]
+  run git -C "$REPO" show-ref --verify --quiet "refs/heads/ffs/runs/$RID"
+  [ "$status" -ne 0 ]
+
+  GSD_RUN_ID="$RID" FFS_HOST=claude CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    run bash -c "cd '$REPO' && bash '$SCRIPT' /gsd-quick test"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"stale branch"* ]]
+  run git -C "$REPO/.claude/worktrees/$RID" symbolic-ref -q HEAD
+  [ "$output" = "refs/heads/ffs/runs/$RID" ]
+}
+
+@test "ffs/runs/<id> held by another worktree fails closed naming that worktree, not suggesting branch -D" {
+  REPO="$BATS_TEST_TMPDIR/held-branch-fixture"
+  mkdir -p "$REPO"
+  git -C "$REPO" init -q
+  git -C "$REPO" config user.email test@example.com
+  git -C "$REPO" config user.name Test
+  printf '%s\n' seed > "$REPO/seed"
+  git -C "$REPO" add seed
+  git -C "$REPO" commit -qm seed
+  RID=held-branch-1
+  git -C "$REPO" worktree add -q -b "ffs/runs/$RID" "$BATS_TEST_TMPDIR/held-elsewhere" HEAD
+
+  GSD_RUN_ID="$RID" FFS_HOST=claude CODEX_BIN=fake-codex CLAUDE_BIN=fake-claude \
+    run bash -c "cd '$REPO' && bash '$SCRIPT' /gsd-quick test"
+  [ "$status" -eq 78 ]
+  [[ "$output" == *"gsd-run: cannot attach branch ffs/runs/$RID"* ]]
+  [[ "$output" == *"held-elsewhere"* ]]
+  [[ "$output" != *"git branch -D"* ]]
+}
+
 reuse_fixture() { # $1 = repo path, $2 = run id; leaves a DETACHED registered worktree (old-code shape)
   mkdir -p "$1"
   git -C "$1" init -q
@@ -3670,7 +3722,7 @@ guard_wall_calls() {
   ! grep -q 'PLAN_WALL_AUTO_RESET_MAX' "$SCRIPT"
 }
 
-@test "gsd-run exports FFS_SPEC_ID from the launching branch before creating the detached worktree" {
+@test "gsd-run exports FFS_SPEC_ID from the launching branch before creating the branch worktree" {
   grep -q 'export FFS_SPEC_ID' "$SCRIPT"
   exp_line="$(grep -n 'export FFS_SPEC_ID' "$SCRIPT" | head -1 | cut -d: -f1)"
   wt_line="$(grep -n 'worktree add -b' "$SCRIPT" | head -1 | cut -d: -f1)"
